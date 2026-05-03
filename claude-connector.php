@@ -3,8 +3,8 @@
  * Plugin Name:  Claude Connector
  * Plugin URI:   https://github.com/wisnuub/claude-connector
  * Description:  Secure REST API bridge for Claude AI — ACF sync, cache purge, file management, database queries, post CRUD, plugin/theme control, and more.
- * Version:      1.0.1
- * Author:       Futurefy
+ * Version:      1.1.0
+ * Author:       Wisnuub
  * Author URI:   https://wisnuub.github.io
  * License:      GPL-2.0-or-later
  * License URI:  https://www.gnu.org/licenses/gpl-2.0.html
