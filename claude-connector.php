@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'CLAUDE_CONNECTOR_VERSION', '1.0.1' );
+define( 'CLAUDE_CONNECTOR_VERSION', '1.1.0' );
 define( 'CLAUDE_CONNECTOR_NS',      'claude/v1' );
 
 // PHP 7.x polyfills ────────────────────────────────────────────────────────────
@@ -92,6 +92,7 @@ function claude_settings_page() {
     if ( ! current_user_can( 'manage_options' ) ) {
         return;
     }
+    global $wpdb;
     if (
         isset( $_POST['claude_regen'], $_POST['_wpnonce'] )
         && wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['_wpnonce'] ) ), 'claude_regen' )
@@ -100,9 +101,29 @@ function claude_settings_page() {
         echo '<div class="notice notice-success"><p><strong>API key regenerated.</strong> Update your Claude sessions with the new key.</p></div>';
     }
 
+    if (
+        isset( $_POST['claude_save_settings'], $_POST['_wpnonce'] )
+        && wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['_wpnonce'] ) ), 'claude_save_settings' )
+    ) {
+        update_option( 'claude_connector_logging', isset( $_POST['claude_logging_enabled'] ) ? 1 : 0, false );
+        echo '<div class="notice notice-success"><p><strong>Settings saved.</strong></p></div>';
+    }
+
+    if (
+        isset( $_POST['claude_clear_log'], $_POST['_wpnonce'] )
+        && wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['_wpnonce'] ) ), 'claude_clear_log' )
+    ) {
+        $wpdb->query( "TRUNCATE TABLE {$wpdb->prefix}claude_log" );
+        echo '<div class="notice notice-success"><p><strong>Access log cleared.</strong></p></div>';
+    }
+
+    $logging_enabled = (bool) get_option( 'claude_connector_logging', 1 );
+
     $key        = claude_get_api_key();
     $base_url   = rest_url( CLAUDE_CONNECTOR_NS );
     $status_url = add_query_arg( '_key', $key, rest_url( CLAUDE_CONNECTOR_NS . '/status' ) );
+
+    $last_access = $wpdb->get_row( "SELECT * FROM {$wpdb->prefix}claude_log ORDER BY id DESC LIMIT 1", ARRAY_A );
 
     $endpoints = array(
         array( 'GET',    '/status',          'Site info, WP/PHP version, active theme & plugins' ),
@@ -122,10 +143,14 @@ function claude_settings_page() {
         array( 'POST',   '/themes',           'Switch active theme' ),
         array( 'GET',    '/files?path=',      'List files in a wp-content subdirectory' ),
         array( 'GET',    '/files/read',       'Read a file\'s content' ),
-        array( 'POST',   '/files',            'Write (create or overwrite) a file' ),
+        array( 'POST',   '/files',            'Write (create or overwrite) a file — supports content_b64' ),
         array( 'DELETE', '/files?path=',      'Delete a file or empty directory' ),
+        array( 'POST',   '/files/stage',      'Stage a base64 chunk for WAF-bypass write (use with /files/commit)' ),
+        array( 'POST',   '/files/commit',     'Commit staged chunks and write file to disk' ),
         array( 'GET',    '/db/tables',        'List database tables' ),
         array( 'POST',   '/db/query',         'Execute a database query' ),
+        array( 'GET',    '/logs',             'View recent API access log' ),
+        array( 'POST',   '/logs/clear',       'Clear the access log' ),
     );
     $colours = array( 'GET' => '#0074a2', 'POST' => '#007a3d', 'PUT' => '#856404', 'DELETE' => '#a00' );
     ?>
@@ -150,8 +175,43 @@ function claude_settings_page() {
                 <th>Health Check</th>
                 <td><a href="<?php echo esc_url( $status_url ); ?>" target="_blank" class="button button-secondary">Test connection ↗</a></td>
             </tr>
+            <tr>
+                <th>Last Access</th>
+                <td>
+                <?php if ( $last_access ) : ?>
+                    <strong><?php echo esc_html( get_date_from_gmt( $last_access['time'], 'D, d M Y H:i:s' ) ); ?></strong>
+                    &nbsp;—&nbsp;
+                    IP: <code><?php echo esc_html( $last_access['ip'] ); ?></code>
+                    &nbsp;—&nbsp;
+                    <span style="font-family:monospace;"><?php echo esc_html( $last_access['method'] . ' ' . $last_access['endpoint'] ); ?></span>
+                    &nbsp;
+                    <span style="color:<?php echo (int) $last_access['status'] >= 400 ? '#a00' : '#007a3d'; ?>;font-weight:700;"><?php echo esc_html( $last_access['status'] ); ?></span>
+                <?php else : ?>
+                    <em style="color:#666;">No requests recorded yet.</em>
+                <?php endif; ?>
+                </td>
+            </tr>
         </table>
-        <h2>Regenerate API Key</h2>
+        <h2>Settings</h2>
+        <form method="post">
+            <?php wp_nonce_field( 'claude_save_settings' ); ?>
+            <table class="form-table" role="presentation">
+                <tr>
+                    <th>Access Logging</th>
+                    <td>
+                        <label>
+                            <input type="checkbox" name="claude_logging_enabled" value="1"
+                                <?php checked( $logging_enabled ); ?>>
+                            Enable access log
+                        </label>
+                        <p class="description">Records IP, method, endpoint, status, and time for every API request. The last access is always shown above regardless of this setting.</p>
+                    </td>
+                </tr>
+            </table>
+            <button type="submit" name="claude_save_settings" value="1" class="button button-primary">Save Settings</button>
+        </form>
+
+        <h2 style="margin-top:1.5em;">Regenerate API Key</h2>
         <form method="post">
             <?php wp_nonce_field( 'claude_regen' ); ?>
             <p>Generating a new key will immediately invalidate the current one.</p>
@@ -171,6 +231,36 @@ function claude_settings_page() {
                 <?php endforeach; ?>
             </tbody>
         </table>
+
+        <h2 style="margin-top:2em;">Recent API Access Log</h2>
+        <?php if ( ! $logging_enabled ) : ?>
+        <p class="description">Logging is disabled. Enable it in Settings above to record all requests.</p>
+        <?php else :
+        $log_rows = $wpdb->get_results( "SELECT * FROM {$wpdb->prefix}claude_log ORDER BY id DESC LIMIT 50", ARRAY_A );
+        if ( $log_rows ) :
+        ?>
+        <table class="widefat" style="max-width:900px;">
+            <thead><tr><th>Time (local)</th><th>IP</th><th>Method</th><th>Endpoint</th><th>Status</th></tr></thead>
+            <tbody>
+            <?php foreach ( $log_rows as $row ) : ?>
+                <tr>
+                    <td style="white-space:nowrap;"><?php echo esc_html( get_date_from_gmt( $row['time'], 'Y-m-d H:i:s' ) ); ?></td>
+                    <td><code><?php echo esc_html( $row['ip'] ); ?></code></td>
+                    <td><span style="color:<?php echo esc_attr( $colours[ $row['method'] ] ?? '#666' ); ?>;font-weight:700;font-family:monospace;"><?php echo esc_html( $row['method'] ); ?></span></td>
+                    <td><code><?php echo esc_html( $row['endpoint'] ); ?></code></td>
+                    <td style="color:<?php echo (int) $row['status'] >= 400 ? '#a00' : '#007a3d'; ?>;font-weight:700;"><?php echo esc_html( $row['status'] ); ?></td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+        <form method="post" style="margin-top:8px;">
+            <?php wp_nonce_field( 'claude_clear_log' ); ?>
+            <button type="submit" name="claude_clear_log" value="1" class="button button-secondary"
+                    onclick="return confirm('Clear all log entries?')">Clear Log</button>
+        </form>
+        <?php else : ?>
+        <p class="description">No requests logged yet.</p>
+        <?php endif; endif; ?>
     </div>
     <?php
 }
@@ -213,10 +303,25 @@ add_action( 'rest_api_init', function () {
         array( 'methods' => 'POST',   'callback' => 'claude_files_write',  'permission_callback' => $a ),
         array( 'methods' => 'DELETE', 'callback' => 'claude_files_delete', 'permission_callback' => $a ),
     ) );
-    register_rest_route( $ns, '/files/read', array( 'methods' => 'GET',  'callback' => 'claude_files_read',  'permission_callback' => $a ) );
-    register_rest_route( $ns, '/db/tables',  array( 'methods' => 'GET',  'callback' => 'claude_db_tables',   'permission_callback' => $a ) );
-    register_rest_route( $ns, '/db/query',   array( 'methods' => 'POST', 'callback' => 'claude_db_query',    'permission_callback' => $a ) );
+    register_rest_route( $ns, '/files/read',   array( 'methods' => 'GET',  'callback' => 'claude_files_read',   'permission_callback' => $a ) );
+    register_rest_route( $ns, '/files/stage',  array( 'methods' => 'POST', 'callback' => 'claude_files_stage',  'permission_callback' => $a ) );
+    register_rest_route( $ns, '/files/commit', array( 'methods' => 'POST', 'callback' => 'claude_files_commit', 'permission_callback' => $a ) );
+    register_rest_route( $ns, '/db/tables',    array( 'methods' => 'GET',  'callback' => 'claude_db_tables',    'permission_callback' => $a ) );
+    register_rest_route( $ns, '/db/query',     array( 'methods' => 'POST', 'callback' => 'claude_db_query',     'permission_callback' => $a ) );
+    register_rest_route( $ns, '/logs',         array( 'methods' => 'GET',  'callback' => 'claude_logs_list',    'permission_callback' => $a ) );
+    register_rest_route( $ns, '/logs/clear',   array( 'methods' => 'POST', 'callback' => 'claude_logs_clear',   'permission_callback' => $a ) );
 } );
+
+// Log every request to our namespace after dispatch (only when logging is enabled).
+add_filter( 'rest_post_dispatch', function ( $response, $server, $request ) {
+    if (
+        get_option( 'claude_connector_logging', 1 )
+        && strpos( $request->get_route(), '/' . CLAUDE_CONNECTOR_NS ) === 0
+    ) {
+        claude_log_access( $request, $response );
+    }
+    return $response;
+}, 10, 3 );
 
 // ──────────────────────────────────────────────────────────────────────────────
 //  Status
@@ -586,14 +691,111 @@ function claude_files_read( $req ) {
 
 function claude_files_write( $req ) {
     $body    = (array) $req->get_json_params();
-    $rel     = (string) ( $body['path']    ?? '' );
+    $rel     = (string) ( $body['path'] ?? '' );
     $content = $body['content'] ?? null;
-    if ( ! $rel || $content === null ) return new WP_Error( 'missing', 'Body must include "path" and "content".', array( 'status' => 400 ) );
+
+    // Accept base64-encoded content — allows writing PHP files through WAFs that
+    // block POST bodies containing raw PHP code patterns (e.g. Cloudflare managed rules).
+    if ( $content === null && isset( $body['content_b64'] ) ) {
+        $decoded = base64_decode( (string) $body['content_b64'], true );
+        if ( $decoded === false ) {
+            return new WP_Error( 'invalid_b64', 'content_b64 is not valid base64.', array( 'status' => 400 ) );
+        }
+        $content = $decoded;
+    }
+
+    if ( ! $rel || $content === null ) {
+        return new WP_Error( 'missing', 'Body must include "path" and either "content" or "content_b64".', array( 'status' => 400 ) );
+    }
     $path = claude_safe_path( $rel );
     if ( ! $path ) return new WP_Error( 'forbidden', 'Path is outside wp-content.', array( 'status' => 403 ) );
     wp_mkdir_p( dirname( $path ) );
     $bytes = file_put_contents( $path, $content ); // phpcs:ignore
     if ( $bytes === false ) return new WP_Error( 'write_failed', 'Could not write file.', array( 'status' => 500 ) );
+    return new WP_REST_Response( array( 'written' => $rel, 'bytes' => $bytes ) );
+}
+
+/**
+ * Stage one chunk of base64-encoded file content as a transient.
+ * Chunk the file on the client side when the plain POST is blocked by a WAF.
+ * Call /files/commit once all chunks are staged.
+ */
+function claude_files_stage( $req ) {
+    $body        = (array) $req->get_json_params();
+    $rel         = (string) ( $body['path']        ?? '' );
+    $content_b64 = (string) ( $body['content_b64'] ?? '' );
+    $chunk_index = (int)    ( $body['chunk_index']  ?? 0 );
+    $chunk_total = (int)    ( $body['chunk_total']  ?? 1 );
+
+    if ( ! $rel || ! $content_b64 ) {
+        return new WP_Error( 'missing', 'Body must include "path" and "content_b64".', array( 'status' => 400 ) );
+    }
+    if ( $chunk_total < 1 || $chunk_total > 200 ) {
+        return new WP_Error( 'invalid', 'chunk_total must be between 1 and 200.', array( 'status' => 400 ) );
+    }
+    if ( $chunk_index < 0 || $chunk_index >= $chunk_total ) {
+        return new WP_Error( 'invalid', 'chunk_index must be 0 .. chunk_total-1.', array( 'status' => 400 ) );
+    }
+
+    $path = claude_safe_path( $rel );
+    if ( ! $path ) return new WP_Error( 'forbidden', 'Path is outside wp-content.', array( 'status' => 403 ) );
+
+    $key = 'claude_stage_' . md5( $rel ) . '_' . $chunk_index;
+    set_transient( $key, $content_b64, HOUR_IN_SECONDS );
+
+    return new WP_REST_Response( array(
+        'staged'      => true,
+        'path'        => $rel,
+        'chunk_index' => $chunk_index,
+        'chunk_total' => $chunk_total,
+    ) );
+}
+
+/**
+ * Reassemble all staged chunks for a path and write the file to disk.
+ * Transients are deleted after a successful commit.
+ */
+function claude_files_commit( $req ) {
+    $body        = (array) $req->get_json_params();
+    $rel         = (string) ( $body['path']       ?? '' );
+    $chunk_total = (int)    ( $body['chunk_total'] ?? 1 );
+
+    if ( ! $rel ) {
+        return new WP_Error( 'missing', 'Body must include "path".', array( 'status' => 400 ) );
+    }
+
+    $path = claude_safe_path( $rel );
+    if ( ! $path ) return new WP_Error( 'forbidden', 'Path is outside wp-content.', array( 'status' => 403 ) );
+
+    $content_b64 = '';
+    for ( $i = 0; $i < $chunk_total; $i++ ) {
+        $key   = 'claude_stage_' . md5( $rel ) . '_' . $i;
+        $chunk = get_transient( $key );
+        if ( $chunk === false ) {
+            return new WP_Error(
+                'missing_chunk',
+                "Chunk {$i} not found. Stage all {$chunk_total} chunks before committing.",
+                array( 'status' => 400 )
+            );
+        }
+        $content_b64 .= $chunk;
+    }
+
+    $content = base64_decode( $content_b64, true );
+    if ( $content === false ) {
+        return new WP_Error( 'invalid_b64', 'Staged content is not valid base64.', array( 'status' => 500 ) );
+    }
+
+    wp_mkdir_p( dirname( $path ) );
+    $bytes = file_put_contents( $path, $content ); // phpcs:ignore
+    if ( $bytes === false ) {
+        return new WP_Error( 'write_failed', 'Could not write file.', array( 'status' => 500 ) );
+    }
+
+    for ( $i = 0; $i < $chunk_total; $i++ ) {
+        delete_transient( 'claude_stage_' . md5( $rel ) . '_' . $i );
+    }
+
     return new WP_REST_Response( array( 'written' => $rel, 'bytes' => $bytes ) );
 }
 
@@ -647,7 +849,89 @@ function claude_db_query( $req ) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+//  Access Log
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Write one log row. Prunes the table to 1 000 rows after every 50 inserts
+ * (checked via a lightweight counter transient) to prevent unbounded growth.
+ */
+function claude_log_access( $request, $response ) {
+    global $wpdb;
+
+    // Real IP — check Cloudflare first, then common proxies, then REMOTE_ADDR.
+    $ip = '0.0.0.0';
+    foreach ( array( 'HTTP_CF_CONNECTING_IP', 'HTTP_X_FORWARDED_FOR', 'REMOTE_ADDR' ) as $key ) {
+        if ( ! empty( $_SERVER[ $key ] ) ) {
+            $ip = sanitize_text_field( trim( explode( ',', $_SERVER[ $key ] )[0] ) );
+            break;
+        }
+    }
+
+    $status = is_a( $response, 'WP_REST_Response' ) ? $response->get_status() : 500;
+
+    $wpdb->insert(
+        $wpdb->prefix . 'claude_log',
+        array(
+            'time'     => current_time( 'mysql', true ), // UTC
+            'ip'       => $ip,
+            'method'   => $request->get_method(),
+            'endpoint' => $request->get_route(),
+            'status'   => $status,
+        ),
+        array( '%s', '%s', '%s', '%s', '%d' )
+    );
+
+    // Prune: keep newest 1 000 entries (checked every ~50 writes via transient).
+    $counter = (int) get_transient( 'claude_log_counter' );
+    $counter++;
+    set_transient( 'claude_log_counter', $counter, DAY_IN_SECONDS );
+    if ( $counter % 50 === 0 ) {
+        $table = $wpdb->prefix . 'claude_log';
+        $count = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$table}" );
+        if ( $count > 1000 ) {
+            $wpdb->query( $wpdb->prepare( "DELETE FROM {$table} ORDER BY id ASC LIMIT %d", $count - 1000 ) );
+        }
+    }
+}
+
+function claude_logs_list( $req ) {
+    global $wpdb;
+    $limit = min( (int) ( $req->get_param( 'limit' ) ?: 50 ), 500 );
+    $table = $wpdb->prefix . 'claude_log';
+    $rows  = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$table} ORDER BY id DESC LIMIT %d", $limit ), ARRAY_A );
+    return new WP_REST_Response( array( 'logs' => $rows, 'count' => count( $rows ) ) );
+}
+
+function claude_logs_clear() {
+    global $wpdb;
+    $wpdb->query( "TRUNCATE TABLE {$wpdb->prefix}claude_log" );
+    return new WP_REST_Response( array( 'cleared' => true ) );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 //  Activation
 // ──────────────────────────────────────────────────────────────────────────────
 
-register_activation_hook( __FILE__, 'claude_get_api_key' );
+register_activation_hook( __FILE__, 'claude_activate' );
+
+function claude_activate() {
+    global $wpdb;
+    claude_get_api_key(); // generate key on first activation
+
+    $table           = $wpdb->prefix . 'claude_log';
+    $charset_collate = $wpdb->get_charset_collate();
+    $sql             = "CREATE TABLE IF NOT EXISTS {$table} (
+        id       BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        time     DATETIME        NOT NULL,
+        ip       VARCHAR(45)     NOT NULL DEFAULT '',
+        method   VARCHAR(10)     NOT NULL DEFAULT '',
+        endpoint VARCHAR(255)    NOT NULL DEFAULT '',
+        status   SMALLINT        NOT NULL DEFAULT 0,
+        PRIMARY KEY (id),
+        KEY time (time)
+    ) {$charset_collate};";
+
+    require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+    dbDelta( $sql );
+}

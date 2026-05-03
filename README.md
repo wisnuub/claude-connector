@@ -219,9 +219,11 @@ GET    /files?path=themes/my-theme/
 GET    /files/read?path=themes/my-theme/single-service.php
 POST   /files
 DELETE /files?path=themes/my-theme/old-file.php
+POST   /files/stage
+POST   /files/commit
 ```
 
-**Write (create or overwrite) a file:**
+**Write (create or overwrite) a file — plain content:**
 
 ```json
 POST /files
@@ -230,6 +232,70 @@ POST /files
   "content": "<?php\n// file content here"
 }
 ```
+
+**Write with base64-encoded content (use when a WAF blocks PHP code in POST bodies):**
+
+```json
+POST /files
+{
+  "path":        "themes/my-theme/single-service.php",
+  "content_b64": "PD9waHAKLy8gZmlsZSBjb250ZW50IGhlcmU="
+}
+```
+
+#### WAF-bypass two-step write (`/files/stage` + `/files/commit`)
+
+Use this when a firewall (e.g. Cloudflare managed rules) blocks any POST body containing PHP code patterns. The content is sent as base64 in one or more small chunks, stored as transients, then written to disk by a separate commit call that carries no file content at all.
+
+**Step 1 — stage (repeat for each chunk):**
+
+```json
+POST /files/stage
+{
+  "path":        "themes/my-theme/single-service.php",
+  "content_b64": "<base64-encoded chunk>",
+  "chunk_index": 0,
+  "chunk_total": 1
+}
+```
+
+`chunk_index` is zero-based. For a single file, use `chunk_index: 0, chunk_total: 1`. Split large files into multiple chunks (max 200) and POST each one.
+
+**Step 2 — commit:**
+
+```json
+POST /files/commit
+{
+  "path":        "themes/my-theme/single-service.php",
+  "chunk_total": 1
+}
+```
+
+Staged chunks expire automatically after 1 hour if commit is never called.
+
+---
+
+### Access Log
+
+```
+GET  /logs
+POST /logs/clear
+```
+
+```
+GET /logs?limit=100
+```
+
+Returns the most recent API requests (default 50, max 500). Each entry includes timestamp (UTC), client IP, HTTP method, endpoint, and response status.
+
+```json
+POST /logs/clear
+{}
+```
+
+Clears all log entries. Equivalent to the "Clear Log" button in WP Admin → Settings → Claude Connector.
+
+Logging can be enabled or disabled from the plugin's settings page. The **Last Access** row on the settings page always shows the most recent request regardless of whether full logging is enabled.
 
 ---
 
@@ -327,6 +393,13 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 ---
 
 ## Changelog
+
+### 1.1.0
+- **WAF-bypass file writes**: `POST /files` now accepts `content_b64` (base64-encoded content) as an alternative to `content`, avoiding Cloudflare and other WAF rules that match PHP code patterns in POST bodies
+- **Chunked staging**: new `POST /files/stage` + `POST /files/commit` endpoints for multi-chunk base64 uploads — send any size file through a WAF in small pieces with no PHP code visible in any request body
+- **Access log**: new `wp_claude_log` database table records IP, method, endpoint, status, and timestamp for every API request
+- **Log endpoints**: `GET /logs` and `POST /logs/clear`
+- **Settings page improvements**: "Last Access" row always shows most recent request (like cPanel's last login); logging can be toggled on/off without losing the last-access display
 
 ### 1.0.1
 - PHP 7.4 compatibility: removed union return types, replaced `match()` with `switch`, added `str_starts_with()` polyfill
