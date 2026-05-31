@@ -139,7 +139,10 @@ function claude_settings_page() {
     ) {
         update_option( 'claude_relay_enabled', isset( $_POST['claude_relay_enabled'] ) ? 1 : 0, false );
         update_option( 'claude_relay_url', sanitize_url( wp_unslash( $_POST['claude_relay_url'] ?? '' ) ), false );
-        update_option( 'claude_relay_key', sanitize_text_field( wp_unslash( $_POST['claude_relay_key'] ?? '' ) ), false );
+        $new_key = sanitize_text_field( wp_unslash( $_POST['claude_relay_key'] ?? '' ) );
+        if ( $new_key !== '' ) {
+            update_option( 'claude_relay_key', $new_key, false );
+        }
         echo '<div class="notice notice-success"><p><strong>Relay settings saved.</strong></p></div>';
     }
 
@@ -276,11 +279,11 @@ function claude_settings_page() {
                 <tr>
                     <th>Relay Secret</th>
                     <td>
-                        <input type="text" name="claude_relay_key"
-                               value="<?php echo esc_attr( $relay_key ); ?>"
+                        <input type="password" name="claude_relay_key"
+                               value=""
                                style="width:420px;font-family:monospace;"
-                               placeholder="Same value as RELAY_SECRET in your Worker">
-                        <p class="description">Must match the <code>RELAY_SECRET</code> secret variable set in your Cloudflare Worker.</p>
+                               placeholder="<?php echo $relay_key ? '••••••••••••••••••••••• (saved — leave blank to keep)' : 'Enter your RELAY_SECRET from Cloudflare'; ?>">
+                        <p class="description">Must match the <code>RELAY_SECRET</code> secret variable set in your Cloudflare Worker. <?php if ( $relay_key ) echo '<strong style="color:#007a3d;">Secret is saved.</strong>'; ?></p>
                     </td>
                 </tr>
             </table>
