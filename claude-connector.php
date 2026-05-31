@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'CLAUDE_CONNECTOR_VERSION', '1.1.0' );
+define( 'CLAUDE_CONNECTOR_VERSION', '1.2.0' );
 define( 'CLAUDE_CONNECTOR_NS',      'claude/v1' );
 
 // PHP 7.x polyfills ────────────────────────────────────────────────────────────
@@ -26,6 +26,22 @@ if ( ! function_exists( 'str_starts_with' ) ) {
         return $needle === '' || strncmp( $haystack, $needle, strlen( $needle ) ) === 0;
     }
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+//  Relay – cron schedule + hook
+// ──────────────────────────────────────────────────────────────────────────────
+
+add_filter( 'cron_schedules', function ( $schedules ) {
+    if ( ! isset( $schedules['claude_minutely'] ) ) {
+        $schedules['claude_minutely'] = array(
+            'interval' => 60,
+            'display'  => 'Every Minute (Claude Relay)',
+        );
+    }
+    return $schedules;
+} );
+
+add_action( 'claude_relay_poll_event', 'claude_relay_poll' );
 
 // ──────────────────────────────────────────────────────────────────────────────
 //  API Key helpers
@@ -117,7 +133,28 @@ function claude_settings_page() {
         echo '<div class="notice notice-success"><p><strong>Access log cleared.</strong></p></div>';
     }
 
+    if (
+        isset( $_POST['claude_save_relay'], $_POST['_wpnonce'] )
+        && wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['_wpnonce'] ) ), 'claude_save_relay' )
+    ) {
+        update_option( 'claude_relay_enabled', isset( $_POST['claude_relay_enabled'] ) ? 1 : 0, false );
+        update_option( 'claude_relay_url', sanitize_url( wp_unslash( $_POST['claude_relay_url'] ?? '' ) ), false );
+        update_option( 'claude_relay_key', sanitize_text_field( wp_unslash( $_POST['claude_relay_key'] ?? '' ) ), false );
+        echo '<div class="notice notice-success"><p><strong>Relay settings saved.</strong></p></div>';
+    }
+
+    if (
+        isset( $_POST['claude_relay_poll_now'], $_POST['_wpnonce'] )
+        && wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['_wpnonce'] ) ), 'claude_relay_poll_now' )
+    ) {
+        claude_relay_poll();
+        echo '<div class="notice notice-info"><p><strong>Relay polled manually.</strong></p></div>';
+    }
+
     $logging_enabled = (bool) get_option( 'claude_connector_logging', 1 );
+    $relay_enabled   = (bool) get_option( 'claude_relay_enabled', 0 );
+    $relay_url       = get_option( 'claude_relay_url', '' );
+    $relay_key       = get_option( 'claude_relay_key', '' );
 
     $key        = claude_get_api_key();
     $base_url   = rest_url( CLAUDE_CONNECTOR_NS );
@@ -209,6 +246,50 @@ function claude_settings_page() {
                 </tr>
             </table>
             <button type="submit" name="claude_save_settings" value="1" class="button button-primary">Save Settings</button>
+        </form>
+
+        <h2 style="margin-top:1.5em;">Relay Mode</h2>
+        <p class="description">When Cloudflare blocks inbound REST API calls, enable Relay Mode. The plugin polls your Cloudflare Worker every minute for commands instead — outbound traffic is never blocked.</p>
+        <form method="post">
+            <?php wp_nonce_field( 'claude_save_relay' ); ?>
+            <table class="form-table" role="presentation">
+                <tr>
+                    <th>Enable Relay</th>
+                    <td>
+                        <label>
+                            <input type="checkbox" name="claude_relay_enabled" value="1"
+                                <?php checked( $relay_enabled ); ?>>
+                            Poll Cloudflare Worker for commands
+                        </label>
+                    </td>
+                </tr>
+                <tr>
+                    <th>Worker URL</th>
+                    <td>
+                        <input type="url" name="claude_relay_url"
+                               value="<?php echo esc_attr( $relay_url ); ?>"
+                               style="width:420px;"
+                               placeholder="https://claude-connector.wisnuadi415.workers.dev">
+                        <p class="description">Your Cloudflare Worker URL.</p>
+                    </td>
+                </tr>
+                <tr>
+                    <th>Relay Secret</th>
+                    <td>
+                        <input type="text" name="claude_relay_key"
+                               value="<?php echo esc_attr( $relay_key ); ?>"
+                               style="width:420px;font-family:monospace;"
+                               placeholder="Same value as RELAY_SECRET in your Worker">
+                        <p class="description">Must match the <code>RELAY_SECRET</code> secret variable set in your Cloudflare Worker.</p>
+                    </td>
+                </tr>
+            </table>
+            <button type="submit" name="claude_save_relay" value="1" class="button button-primary">Save Relay Settings</button>
+        </form>
+        <form method="post" style="margin-top:8px;">
+            <?php wp_nonce_field( 'claude_relay_poll_now' ); ?>
+            <button type="submit" name="claude_relay_poll_now" value="1" class="button button-secondary">Poll Now</button>
+            <span class="description"> Manually trigger one relay poll — useful for testing without waiting for cron.</span>
         </form>
 
         <h2 style="margin-top:1.5em;">Regenerate API Key</h2>
@@ -910,6 +991,86 @@ function claude_logs_clear() {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+//  Relay – polling and execution
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Called by WP-Cron every minute. Polls the Cloudflare Worker relay for a
+ * pending command, executes it internally via rest_do_request(), and posts
+ * the result back — all outbound, so Cloudflare never blocks it.
+ */
+function claude_relay_poll() {
+    if ( ! get_option( 'claude_relay_enabled', 0 ) ) {
+        return;
+    }
+
+    $relay_url = rtrim( get_option( 'claude_relay_url', '' ), '/' );
+    $relay_key = get_option( 'claude_relay_key', '' );
+
+    if ( ! $relay_url || ! $relay_key ) {
+        return;
+    }
+
+    $response = wp_remote_get( $relay_url . '/poll', array(
+        'headers' => array( 'X-Relay-Key' => $relay_key ),
+        'timeout' => 10,
+    ) );
+
+    if ( is_wp_error( $response ) || wp_remote_retrieve_response_code( $response ) !== 200 ) {
+        return;
+    }
+
+    $data = json_decode( wp_remote_retrieve_body( $response ), true );
+    if ( empty( $data['command'] ) ) {
+        return;
+    }
+
+    $command = $data['command'];
+    $result  = claude_relay_execute( $command );
+
+    wp_remote_post( $relay_url . '/result/' . $command['id'], array(
+        'headers' => array(
+            'X-Relay-Key'  => $relay_key,
+            'Content-Type' => 'application/json',
+        ),
+        'body'    => wp_json_encode( $result ),
+        'timeout' => 15,
+    ) );
+}
+
+/**
+ * Dispatches a relay command through the existing REST API stack using
+ * rest_do_request() — no HTTP round-trip, no firewall involvement.
+ *
+ * @param  array $command  { method, endpoint, params, body, id }
+ * @return array           { status, body }
+ */
+function claude_relay_execute( $command ) {
+    $method   = strtoupper( sanitize_text_field( $command['method']   ?? 'GET' ) );
+    $endpoint = sanitize_text_field( $command['endpoint'] ?? '/status' );
+    $params   = is_array( $command['params'] ?? null ) ? $command['params'] : array();
+    $body     = $command['body'] ?? null;
+
+    $request = new WP_REST_Request( $method, '/' . CLAUDE_CONNECTOR_NS . $endpoint );
+    $request->set_header( 'X-Claude-Key', claude_get_api_key() );
+
+    if ( ! empty( $params ) ) {
+        $request->set_query_params( $params );
+    }
+    if ( $body !== null ) {
+        $request->set_body( wp_json_encode( $body ) );
+        $request->set_header( 'Content-Type', 'application/json' );
+    }
+
+    $response = rest_do_request( $request );
+
+    return array(
+        'status' => $response->get_status(),
+        'body'   => $response->get_data(),
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 //  Activation
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -934,4 +1095,12 @@ function claude_activate() {
 
     require_once ABSPATH . 'wp-admin/includes/upgrade.php';
     dbDelta( $sql );
+
+    if ( ! wp_next_scheduled( 'claude_relay_poll_event' ) ) {
+        wp_schedule_event( time(), 'claude_minutely', 'claude_relay_poll_event' );
+    }
 }
+
+register_deactivation_hook( __FILE__, function () {
+    wp_clear_scheduled_hook( 'claude_relay_poll_event' );
+} );
