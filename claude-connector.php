@@ -3,7 +3,7 @@
  * Plugin Name:  Claude Connector
  * Plugin URI:   https://github.com/wisnuub/claude-connector
  * Description:  Secure REST API bridge for Claude AI - ACF sync, cache purge, file management, database queries, post CRUD, plugin/theme control, and more.
- * Version:      1.4.0
+ * Version:      1.4.1
  * Author:       Wisnuub
  * Author URI:   https://wisnuub.github.io
  * License:      GPL-2.0-or-later
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'CLAUDE_CONNECTOR_VERSION', '1.4.0' );
+define( 'CLAUDE_CONNECTOR_VERSION', '1.4.1' );
 define( 'CLAUDE_CONNECTOR_NS',      'claude/v1' );
 define( 'CLAUDE_CONNECTOR_GH_REPO', 'wisnuub/claude-connector' );
 
@@ -193,25 +193,20 @@ function claude_get_api_key() {
 
 /**
  * REST permission callback.
- * Expects the API key in X-Claude-Key header (preferred) or ?_key= param.
+ * Header-only by design: a URL param fallback would let the key leak into
+ * server access logs, browser history, and Referer headers.
  *
  * @param  WP_REST_Request $req
  * @return true|WP_Error
  */
 function claude_auth( $req ) {
-    $header   = $req->get_header( 'X-Claude-Key' );
-    $param    = $req->get_param( '_key' );
-    $provided = (string) ( $header !== null ? $header : ( $param !== null ? $param : '' ) );
+    $provided = (string) ( $req->get_header( 'X-Claude-Key' ) ?? '' );
 
     if ( $provided === '' ) {
         return new WP_Error( 'unauthorized', 'Missing API key. Send X-Claude-Key header.', array( 'status' => 401 ) );
     }
     if ( ! hash_equals( claude_get_api_key(), $provided ) ) {
         return new WP_Error( 'unauthorized', 'Invalid API key.', array( 'status' => 401 ) );
-    }
-    // Warn if key was sent as a URL param (appears in server logs)
-    if ( $param && ! $header ) {
-        trigger_error( 'Claude Connector: API key passed via URL param - use X-Claude-Key header instead.', E_USER_WARNING );
     }
     return true;
 }
@@ -265,7 +260,6 @@ function claude_settings_page() {
 
     $key        = claude_get_api_key();
     $base_url   = rest_url( CLAUDE_CONNECTOR_NS );
-    $status_url = add_query_arg( '_key', $key, rest_url( CLAUDE_CONNECTOR_NS . '/status' ) );
 
     $last_access = $wpdb->get_row( "SELECT * FROM {$wpdb->prefix}claude_log ORDER BY id DESC LIMIT 1", ARRAY_A );
 
@@ -306,9 +300,10 @@ function claude_settings_page() {
             <tr>
                 <th>API Key</th>
                 <td>
-                    <input type="text" value="<?php echo esc_attr( $key ); ?>"
-                           style="width:500px;font-family:monospace;font-size:12px;"
+                    <input type="password" id="claude-api-key" value="<?php echo esc_attr( $key ); ?>"
+                           style="width:440px;font-family:monospace;font-size:12px;"
                            readonly onclick="this.select()">
+                    <button type="button" class="button button-secondary" onclick="var f=document.getElementById('claude-api-key');f.type=(f.type==='password'?'text':'password');this.textContent=(f.type==='password'?'Show':'Hide');">Show</button>
                     <p class="description">
                         Send as <code>X-Claude-Key: &lt;key&gt;</code> on every request.<br>
                         To pin permanently, add to <code>wp-config.php</code>:<br>
@@ -319,7 +314,10 @@ function claude_settings_page() {
             <tr><th>Base URL</th><td><code><?php echo esc_url( $base_url ); ?></code></td></tr>
             <tr>
                 <th>Health Check</th>
-                <td><a href="<?php echo esc_url( $status_url ); ?>" target="_blank" class="button button-secondary">Test connection ↗</a></td>
+                <td>
+                    <button type="button" id="claude-test-btn" class="button button-secondary">Test connection</button>
+                    <span id="claude-test-result" style="margin-left:8px;"></span>
+                </td>
             </tr>
             <tr>
                 <th>Last Access</th>
@@ -338,6 +336,35 @@ function claude_settings_page() {
                 </td>
             </tr>
         </table>
+        <script>
+        (function () {
+            var btn = document.getElementById( 'claude-test-btn' );
+            var out = document.getElementById( 'claude-test-result' );
+            btn.addEventListener( 'click', function () {
+                btn.disabled = true;
+                out.style.color = '#666';
+                out.textContent = 'Testing...';
+                fetch( <?php echo wp_json_encode( esc_url_raw( $base_url . '/status' ) ); ?>, {
+                    headers: { 'X-Claude-Key': document.getElementById( 'claude-api-key' ).value }
+                } ).then( function ( r ) {
+                    return r.json().then( function ( data ) { return { ok: r.ok, status: r.status, data: data }; } );
+                } ).then( function ( res ) {
+                    btn.disabled = false;
+                    if ( res.ok ) {
+                        out.style.color = '#007a3d';
+                        out.textContent = 'Connected - WP ' + ( res.data.wp_version || '' );
+                    } else {
+                        out.style.color = '#a00';
+                        out.textContent = 'Failed: ' + ( res.data.message || ( 'HTTP ' + res.status ) );
+                    }
+                } ).catch( function ( e ) {
+                    btn.disabled = false;
+                    out.style.color = '#a00';
+                    out.textContent = 'Failed: ' + e.message;
+                } );
+            } );
+        })();
+        </script>
         <h2>Settings</h2>
         <form method="post">
             <?php wp_nonce_field( 'claude_save_settings' ); ?>
@@ -742,6 +769,9 @@ function claude_blocked_options() {
 function claude_options_get( $req ) {
     $key = sanitize_text_field( (string) $req->get_param( 'key' ) );
     if ( ! $key ) return new WP_Error( 'missing', 'Provide ?key=option_name.', array( 'status' => 400 ) );
+    if ( in_array( $key, claude_blocked_options(), true ) ) {
+        return new WP_Error( 'blocked', "Option '{$key}' is protected and cannot be read via API.", array( 'status' => 403 ) );
+    }
     return new WP_REST_Response( array( 'key' => $key, 'value' => get_option( $key ) ) );
 }
 
@@ -1148,12 +1178,13 @@ add_action( 'wp_ajax_nopriv_claude_cmd', 'claude_ajax_handler' );
 
 /**
  * Handles POST /wp-admin/admin-ajax.php?action=claude_cmd.
- * Authenticates via X-Claude-Key header or ?_key= param, then dispatches
+ * Authenticates via X-Claude-Key header only (header-only, not $_REQUEST,
+ * so a cookie named "_key" can never satisfy this check), then dispatches
  * the command internally using claude_relay_execute() - no second HTTP
  * request, no Cloudflare/Imunify involvement after this point.
  */
 function claude_ajax_handler() {
-    $provided = trim( (string) ( $_SERVER['HTTP_X_CLAUDE_KEY'] ?? $_REQUEST['_key'] ?? '' ) );
+    $provided = trim( (string) ( $_SERVER['HTTP_X_CLAUDE_KEY'] ?? '' ) );
     if ( ! $provided || ! hash_equals( claude_get_api_key(), $provided ) ) {
         wp_send_json( array( 'status' => 401, 'body' => array( 'error' => 'Unauthorized' ) ) );
         return;

@@ -356,7 +356,7 @@ POST /db/query
 
 ### What to avoid
 
-- **Don't pass the key as a URL parameter** (`?_key=...`). It works, but the key will appear in server access logs and browser history. Always use the header.
+- **The API key is only accepted via the `X-Claude-Key` header** - there is no URL parameter fallback, so it can never end up in server access logs, browser history, or Referer headers.
 - **Don't commit the key to version control.** If you pin it via `wp-config.php`, make sure `wp-config.php` is in `.gitignore`.
 
 ### File access boundary
@@ -365,9 +365,11 @@ The `/files` endpoints enforce a hard boundary at `WP_CONTENT_DIR`. Path travers
 
 ### Protected options
 
-The following options cannot be modified via `/options` to prevent accidental site breakage:
+The following options cannot be read or modified via `/options` (both `GET` and `POST`), to prevent accidental site breakage and to keep secrets out of API responses:
 
 `siteurl`, `home`, `admin_email`, `blogname`, `blogdescription`, `users_can_register`, `default_role`, `active_plugins`, `template`, `stylesheet`, WordPress auth/salt keys, and the connector's own API key.
+
+Note that this is a fixed blocklist, not a general secrets scanner - it won't catch, say, another plugin's API key stored inside a serialized option value under an unrelated option name. The `/db/query` and `/options` endpoints assume anyone holding the API key is fully trusted; see "Security" above.
 
 ### Regenerating the key
 
@@ -412,6 +414,11 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 ---
 
 ## Changelog
+
+### 1.4.1
+- **Security hardening**: the API key is now accepted only via the `X-Claude-Key` header - the `?_key=` URL parameter fallback (and the admin-ajax `$_REQUEST` fallback, which also read cookies) has been removed, since query strings can leak into server logs, browser history, and Referer headers.
+- **`GET /options` now respects the protected-options blocklist** (previously only `POST /options` did), so secrets stored under blocked option names can't be read back via the API either.
+- Settings page: the API key field is masked by default (with a Show/Hide toggle), and the "Test connection" button now sends the key as a header via JavaScript instead of embedding it in a clickable URL.
 
 ### 1.4.0
 - **GitHub-based auto-updates**: no wordpress.org listing needed - WP Admin → Plugins now checks GitHub Releases directly and supports one-click **Update Now**
