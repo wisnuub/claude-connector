@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "claude-connector": {
+      "command": "node",
+      "args": ["./mcp-server/index.js"]
+    }
+  }
+}

@@ -1,0 +1,6 @@
+.DS_Store
+*.zip
+.mcp.json
+mcp-server/node_modules/
+mcp-server/sites.json
+sites/*/.mcp.json
