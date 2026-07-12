@@ -413,12 +413,12 @@ function claude_settings_page() {
         <p class="description">Download a one-click setup script for your computer. It installs the MCP bridge, creates a workspace folder for this site, and opens it in VSCode - Claude Code connects automatically.</p>
         <p style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap;">
             <a id="claude-dl-mac" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-ajax.php?action=claude_connect_script&os=mac' ), 'claude_connect_script' ) ); ?>"
-               class="button button-primary" style="font-size:13px;">&#8984;&nbsp; Download Mac Script (.command)</a>
+               class="button button-primary" style="font-size:13px;">&#8984;&nbsp; Download Mac Script (.terminal)</a>
             <a id="claude-dl-windows" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-ajax.php?action=claude_connect_script&os=windows' ), 'claude_connect_script' ) ); ?>"
                class="button button-primary" style="font-size:13px;">&#x229e;&nbsp; Download Windows Script (.ps1)</a>
         </p>
         <p class="description" style="margin-top:8px;">
-            <strong>Mac:</strong> double-click the <code>.command</code> file in Finder &mdash;
+            <strong>Mac:</strong> double-click the <code>.terminal</code> file in Finder &mdash;
             <strong>Windows:</strong> right-click the <code>.ps1</code> file &rarr; Run with PowerShell.<br>
             Requires Node.js (<a href="https://nodejs.org" target="_blank">nodejs.org</a>) and VSCode with the Claude Code extension.
         </p>
@@ -1458,10 +1458,28 @@ BASH;
         '{{MD_B64}}'  => $md_b64,
     ) );
 
+    // Wrap in a .terminal plist — Terminal.app opens these directly without
+    // needing execute permissions (unlike .command files which fail on download).
+    $script_b64 = base64_encode( $script );
+    $plist = '<?xml version="1.0" encoding="UTF-8"?>' . "\n"
+        . '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' . "\n"
+        . '<plist version="1.0"><dict>' . "\n"
+        . "\t<key>CommandString</key>\n"
+        . "\t<string>printf '%s' '" . $script_b64 . "' | base64 -d | bash</string>\n"
+        . "\t<key>ProfileCurrentVersion</key>\n"
+        . "\t<real>2.0600000000000001</real>\n"
+        . "\t<key>RunCommandAsShell</key>\n"
+        . "\t<false/>\n"
+        . "\t<key>name</key>\n"
+        . "\t<string>Claude Connector</string>\n"
+        . "\t<key>type</key>\n"
+        . "\t<string>Window Settings</string>\n"
+        . '</dict></plist>' . "\n";
+
     header( 'Content-Type: application/octet-stream' );
-    header( "Content-Disposition: attachment; filename=\"connect-{$slug}.command\"" );
+    header( "Content-Disposition: attachment; filename=\"connect-{$slug}.terminal\"" );
     header( 'X-Content-Type-Options: nosniff' );
-    echo $script;
+    echo $plist;
 }
 
 function claude_script_windows( $url, $key, $slug, $name ) {
