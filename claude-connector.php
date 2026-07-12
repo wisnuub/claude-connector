@@ -3,7 +3,7 @@
  * Plugin Name:  Claude Connector
  * Plugin URI:   https://github.com/wisnuub/claude-connector
  * Description:  Secure REST API bridge for Claude AI - ACF sync, cache purge, file management, database queries, post CRUD, plugin/theme control, and more.
- * Version:      1.4.1
+ * Version:      1.4.2
  * Author:       Wisnuub
  * Author URI:   https://wisnuub.github.io
  * License:      GPL-2.0-or-later
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'CLAUDE_CONNECTOR_VERSION', '1.4.1' );
+define( 'CLAUDE_CONNECTOR_VERSION', '1.4.2' );
 define( 'CLAUDE_CONNECTOR_NS',      'claude/v1' );
 define( 'CLAUDE_CONNECTOR_GH_REPO', 'wisnuub/claude-connector' );
 
@@ -147,7 +147,21 @@ add_filter( 'upgrader_source_selector', 'claude_connector_fix_source_dir', 10, 4
 function claude_connector_fix_source_dir( $source, $remote_source, $upgrader, $hook_extra ) {
     global $wp_filesystem;
 
-    if ( empty( $hook_extra['plugin'] ) || $hook_extra['plugin'] !== claude_connector_basename() || ! $wp_filesystem ) {
+    if ( ! $wp_filesystem ) {
+        return $source;
+    }
+
+    // Auto-update path: hook_extra['plugin'] is set and must match ours.
+    // Manual upload path: hook_extra['plugin'] is empty, so we check whether
+    // the extracted folder looks like ours (name starts with claude-connector,
+    // or a flat zip dropped claude-connector.php directly at the root).
+    $is_auto   = ! empty( $hook_extra['plugin'] ) && $hook_extra['plugin'] === claude_connector_basename();
+    $src_base  = basename( rtrim( $source, '/\\' ) );
+    $is_manual = empty( $hook_extra['plugin'] )
+        && ( str_starts_with( $src_base, 'claude-connector' )
+            || file_exists( trailingslashit( $source ) . 'claude-connector.php' ) );
+
+    if ( ! $is_auto && ! $is_manual ) {
         return $source;
     }
 
