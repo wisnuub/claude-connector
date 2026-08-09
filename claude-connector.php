@@ -3,7 +3,7 @@
  * Plugin Name:  Claude Connector
  * Plugin URI:   https://github.com/wisnuub/claude-connector
  * Description:  Secure REST API bridge for Claude AI - ACF sync, cache purge, file management, database queries, post CRUD, plugin/theme control, and more.
- * Version:      1.4.2
+ * Version:      1.5.0
  * Author:       Wisnuub
  * Author URI:   https://wisnuub.github.io
  * License:      GPL-2.0-or-later
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'CLAUDE_CONNECTOR_VERSION', '1.4.2' );
+define( 'CLAUDE_CONNECTOR_VERSION', '1.5.0' );
 define( 'CLAUDE_CONNECTOR_NS',      'claude/v1' );
 define( 'CLAUDE_CONNECTOR_GH_REPO', 'wisnuub/claude-connector' );
 
@@ -25,6 +25,11 @@ define( 'CLAUDE_CONNECTOR_GH_REPO', 'wisnuub/claude-connector' );
 if ( ! function_exists( 'str_starts_with' ) ) {
     function str_starts_with( string $haystack, string $needle ): bool {
         return $needle === '' || strncmp( $haystack, $needle, strlen( $needle ) ) === 0;
+    }
+}
+if ( ! function_exists( 'str_ends_with' ) ) {
+    function str_ends_with( string $haystack, string $needle ): bool {
+        return $needle === '' || substr( $haystack, -strlen( $needle ) ) === $needle;
     }
 }
 
@@ -147,21 +152,7 @@ add_filter( 'upgrader_source_selector', 'claude_connector_fix_source_dir', 10, 4
 function claude_connector_fix_source_dir( $source, $remote_source, $upgrader, $hook_extra ) {
     global $wp_filesystem;
 
-    if ( ! $wp_filesystem ) {
-        return $source;
-    }
-
-    // Auto-update path: hook_extra['plugin'] is set and must match ours.
-    // Manual upload path: hook_extra['plugin'] is empty, so we check whether
-    // the extracted folder looks like ours (name starts with claude-connector,
-    // or a flat zip dropped claude-connector.php directly at the root).
-    $is_auto   = ! empty( $hook_extra['plugin'] ) && $hook_extra['plugin'] === claude_connector_basename();
-    $src_base  = basename( rtrim( $source, '/\\' ) );
-    $is_manual = empty( $hook_extra['plugin'] )
-        && ( str_starts_with( $src_base, 'claude-connector' )
-            || file_exists( trailingslashit( $source ) . 'claude-connector.php' ) );
-
-    if ( ! $is_auto && ! $is_manual ) {
+    if ( empty( $hook_extra['plugin'] ) || $hook_extra['plugin'] !== claude_connector_basename() || ! $wp_filesystem ) {
         return $source;
     }
 
@@ -206,9 +197,25 @@ function claude_get_api_key() {
 }
 
 /**
+ * Returns the real client IP, preferring Cloudflare header when present.
+ *
+ * @return string
+ */
+function claude_get_request_ip() {
+    foreach ( array( 'HTTP_CF_CONNECTING_IP', 'HTTP_X_FORWARDED_FOR', 'REMOTE_ADDR' ) as $k ) {
+        if ( ! empty( $_SERVER[ $k ] ) ) {
+            return sanitize_text_field( trim( explode( ',', $_SERVER[ $k ] )[0] ) );
+        }
+    }
+    return '0.0.0.0';
+}
+
+/**
  * REST permission callback.
  * Header-only by design: a URL param fallback would let the key leak into
  * server access logs, browser history, and Referer headers.
+ *
+ * Rate-limits auth failures to 10 attempts per IP per 5 minutes.
  *
  * @param  WP_REST_Request $req
  * @return true|WP_Error
@@ -219,9 +226,21 @@ function claude_auth( $req ) {
     if ( $provided === '' ) {
         return new WP_Error( 'unauthorized', 'Missing API key. Send X-Claude-Key header.', array( 'status' => 401 ) );
     }
+
+    // Rate-limit by IP: block after 10 consecutive failures in a 5-min window.
+    $rl_key = 'claude_fail_' . md5( claude_get_request_ip() );
+    $fails  = (int) get_transient( $rl_key );
+    if ( $fails >= 10 ) {
+        return new WP_Error( 'rate_limited', 'Too many failed attempts. Try again in 5 minutes.', array( 'status' => 429 ) );
+    }
+
     if ( ! hash_equals( claude_get_api_key(), $provided ) ) {
+        set_transient( $rl_key, $fails + 1, 5 * MINUTE_IN_SECONDS );
         return new WP_Error( 'unauthorized', 'Invalid API key.', array( 'status' => 401 ) );
     }
+
+    // Success — clear the failure counter.
+    delete_transient( $rl_key );
     return true;
 }
 
@@ -278,33 +297,39 @@ function claude_settings_page() {
     $last_access = $wpdb->get_row( "SELECT * FROM {$wpdb->prefix}claude_log ORDER BY id DESC LIMIT 1", ARRAY_A );
 
     $endpoints = array(
-        array( 'GET',    '/status',          'Site info, WP/PHP version, active theme & plugins' ),
-        array( 'GET',    '/acf/groups',       'List ACF field groups and sync status' ),
-        array( 'POST',   '/acf/sync',         'Sync field groups from local JSON' ),
-        array( 'POST',   '/cache/purge',      'Flush all caches (WPEngine, W3TC, Rocket, etc.)' ),
-        array( 'GET',    '/posts',            'Query posts by type, status, search, taxonomy' ),
-        array( 'POST',   '/posts',            'Create a post' ),
-        array( 'GET',    '/posts/{id}',       'Get post with all meta & taxonomy terms' ),
-        array( 'PUT',    '/posts/{id}',       'Update a post' ),
-        array( 'DELETE', '/posts/{id}',       'Delete a post' ),
-        array( 'GET',    '/options?key=',     'Read a WordPress option' ),
-        array( 'POST',   '/options',          'Write a WordPress option' ),
-        array( 'GET',    '/plugins',          'List all plugins with active status' ),
-        array( 'POST',   '/plugins',          'Activate or deactivate a plugin' ),
-        array( 'GET',    '/themes',           'List installed themes' ),
-        array( 'POST',   '/themes',           'Switch active theme' ),
-        array( 'GET',    '/files?path=',      'List files in a wp-content subdirectory' ),
-        array( 'GET',    '/files/read',       'Read a file\'s content' ),
-        array( 'POST',   '/files',            'Write (create or overwrite) a file - supports content_b64' ),
-        array( 'DELETE', '/files?path=',      'Delete a file or empty directory' ),
-        array( 'POST',   '/files/stage',      'Stage a base64 chunk for WAF-bypass write (use with /files/commit)' ),
-        array( 'POST',   '/files/commit',     'Commit staged chunks and write file to disk' ),
-        array( 'GET',    '/db/tables',        'List database tables' ),
-        array( 'POST',   '/db/query',         'Execute a database query' ),
-        array( 'GET',    '/logs',             'View recent API access log' ),
-        array( 'POST',   '/logs/clear',       'Clear the access log' ),
-        array( 'POST',   '/wpcli',            'Run a WP-CLI command - accepts args[] array or command string' ),
-        array( 'POST',   '/wp-admin/admin-ajax.php?action=claude_cmd', 'Admin-AJAX mode - Cloudflare WAF bypass' ),
+        array( 'GET',    '/status',                   'Site info, WP/PHP version, active theme & plugins' ),
+        array( 'GET',    '/acf/groups',               'List ACF/SCF field groups and sync status' ),
+        array( 'POST',   '/acf/sync',                 'Sync field groups from local JSON' ),
+        array( 'GET',    '/acf/groups/{key}/export',  'Export a field group with all fields as JSON' ),
+        array( 'GET',    '/acf/fields/{id}',          'Read all ACF/SCF field values for a post' ),
+        array( 'POST',   '/acf/fields/{id}',          'Write ACF/SCF field values for a post' ),
+        array( 'GET',    '/acf/options',              'Read all ACF/SCF options-page field values' ),
+        array( 'POST',   '/acf/options',              'Write ACF/SCF options-page field values' ),
+        array( 'POST',   '/cache/purge',              'Flush all caches (WPEngine, W3TC, Rocket, etc.)' ),
+        array( 'GET',    '/posts',                    'Query posts by type, status, search, taxonomy' ),
+        array( 'POST',   '/posts',                    'Create a post' ),
+        array( 'GET',    '/posts/{id}',               'Get post with all meta & taxonomy terms' ),
+        array( 'PUT',    '/posts/{id}',               'Update a post' ),
+        array( 'DELETE', '/posts/{id}',               'Delete a post' ),
+        array( 'GET',    '/options?key=',             'Read a WordPress option' ),
+        array( 'POST',   '/options',                  'Write a WordPress option' ),
+        array( 'GET',    '/plugins',                  'List all plugins with active status' ),
+        array( 'POST',   '/plugins',                  'Activate or deactivate a plugin' ),
+        array( 'GET',    '/themes',                   'List installed themes' ),
+        array( 'POST',   '/themes',                   'Switch active theme' ),
+        array( 'GET',    '/files?path=',              'List files in a wp-content subdirectory' ),
+        array( 'GET',    '/files/read',               'Read a file\'s content' ),
+        array( 'POST',   '/files',                    'Write (create or overwrite) a file — PHP lint + auto-backup' ),
+        array( 'DELETE', '/files?path=',              'Delete a file or empty directory' ),
+        array( 'POST',   '/files/stage',              'Stage a base64 chunk for WAF-bypass write (use with /files/commit)' ),
+        array( 'POST',   '/files/commit',             'Commit staged chunks and write file to disk — PHP lint + auto-backup' ),
+        array( 'GET',    '/db/tables',                'List database tables' ),
+        array( 'POST',   '/db/query',                 'Execute a SQL query (pass readonly:true to block writes)' ),
+        array( 'GET',    '/logs',                     'View recent API access log' ),
+        array( 'POST',   '/logs/clear',               'Clear the access log' ),
+        array( 'POST',   '/wpcli',                    'Run a WP-CLI command - accepts args[] array or command string' ),
+        array( 'POST',   '/wp-admin/admin-ajax.php?action=claude_cmd', 'Admin-AJAX mode — bypasses /wp-json/ WAF rules' ),
+        array( 'POST',   '/wp-admin/admin-ajax.php?action=claude_enc', 'Encrypted mode — AES-256-GCM payload, bypasses body-inspection WAF (Imunify360)' ),
     );
     $colours = array( 'GET' => '#0074a2', 'POST' => '#007a3d', 'PUT' => '#856404', 'DELETE' => '#a00' );
     ?>
@@ -427,12 +452,12 @@ function claude_settings_page() {
         <p class="description">Download a one-click setup script for your computer. It installs the MCP bridge, creates a workspace folder for this site, and opens it in VSCode - Claude Code connects automatically.</p>
         <p style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap;">
             <a id="claude-dl-mac" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-ajax.php?action=claude_connect_script&os=mac' ), 'claude_connect_script' ) ); ?>"
-               class="button button-primary" style="font-size:13px;">&#8984;&nbsp; Download Mac Script (.terminal)</a>
+               class="button button-primary" style="font-size:13px;">&#8984;&nbsp; Download Mac Script (.command)</a>
             <a id="claude-dl-windows" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-ajax.php?action=claude_connect_script&os=windows' ), 'claude_connect_script' ) ); ?>"
                class="button button-primary" style="font-size:13px;">&#x229e;&nbsp; Download Windows Script (.ps1)</a>
         </p>
         <p class="description" style="margin-top:8px;">
-            <strong>Mac:</strong> double-click the <code>.terminal</code> file in Finder &mdash;
+            <strong>Mac:</strong> double-click the <code>.command</code> file in Finder &mdash;
             <strong>Windows:</strong> right-click the <code>.ps1</code> file &rarr; Run with PowerShell.<br>
             Requires Node.js (<a href="https://nodejs.org" target="_blank">nodejs.org</a>) and VSCode with the Claude Code extension.
         </p>
@@ -506,10 +531,19 @@ add_action( 'rest_api_init', function () {
     $a  = 'claude_auth';
     $ns = CLAUDE_CONNECTOR_NS;
 
-    register_rest_route( $ns, '/status',             array( 'methods' => 'GET',    'callback' => 'claude_status',         'permission_callback' => $a ) );
-    register_rest_route( $ns, '/acf/groups',         array( 'methods' => 'GET',    'callback' => 'claude_acf_groups',     'permission_callback' => $a ) );
-    register_rest_route( $ns, '/acf/sync',           array( 'methods' => 'POST',   'callback' => 'claude_acf_sync',       'permission_callback' => $a ) );
-    register_rest_route( $ns, '/cache/purge',        array( 'methods' => 'POST',   'callback' => 'claude_cache_purge',    'permission_callback' => $a ) );
+    register_rest_route( $ns, '/status',                          array( 'methods' => 'GET',  'callback' => 'claude_status',           'permission_callback' => $a ) );
+    register_rest_route( $ns, '/acf/groups',                     array( 'methods' => 'GET',  'callback' => 'claude_acf_groups',       'permission_callback' => $a ) );
+    register_rest_route( $ns, '/acf/sync',                       array( 'methods' => 'POST', 'callback' => 'claude_acf_sync',         'permission_callback' => $a ) );
+    register_rest_route( $ns, '/acf/groups/(?P<key>[a-z0-9_]+)/export', array( 'methods' => 'GET',  'callback' => 'claude_acf_group_export', 'permission_callback' => $a ) );
+    register_rest_route( $ns, '/acf/fields/(?P<id>\d+)',         array(
+        array( 'methods' => 'GET',  'callback' => 'claude_acf_fields_get', 'permission_callback' => $a ),
+        array( 'methods' => 'POST', 'callback' => 'claude_acf_fields_set', 'permission_callback' => $a ),
+    ) );
+    register_rest_route( $ns, '/acf/options',                    array(
+        array( 'methods' => 'GET',  'callback' => 'claude_acf_options_get', 'permission_callback' => $a ),
+        array( 'methods' => 'POST', 'callback' => 'claude_acf_options_set', 'permission_callback' => $a ),
+    ) );
+    register_rest_route( $ns, '/cache/purge',                    array( 'methods' => 'POST', 'callback' => 'claude_cache_purge',      'permission_callback' => $a ) );
     register_rest_route( $ns, '/posts',              array(
         array( 'methods' => 'GET',  'callback' => 'claude_posts_list',   'permission_callback' => $a ),
         array( 'methods' => 'POST', 'callback' => 'claude_posts_create', 'permission_callback' => $a ),
@@ -642,6 +676,113 @@ function claude_acf_sync( $req ) {
         $synced[] = array( 'key' => $group_key, 'file' => basename( $file_path ) );
     }
     return new WP_REST_Response( array( 'synced' => $synced, 'skipped' => $skipped, 'count' => count( $synced ) ) );
+}
+
+/**
+ * GET /acf/groups/{key}/export
+ * Returns a field group + all its fields as JSON (same structure as ACF local JSON files).
+ * Useful for exporting to version control or inspecting the schema.
+ */
+function claude_acf_group_export( $req ) {
+    if ( ! function_exists( 'acf_get_field_group' ) ) {
+        return new WP_Error( 'acf_missing', 'ACF/SCF is not active on this site.', array( 'status' => 422 ) );
+    }
+    $key   = sanitize_text_field( $req['key'] );
+    $group = acf_get_field_group( $key );
+    if ( ! $group ) {
+        return new WP_Error( 'not_found', "Field group '{$key}' not found.", array( 'status' => 404 ) );
+    }
+    $group['fields'] = acf_get_fields( $key ) ?: array();
+    return new WP_REST_Response( $group );
+}
+
+/**
+ * GET /acf/fields/{id}
+ * Returns all ACF/SCF field values for a post.
+ * Supports any post type; pass format_value=false to get raw values (optional param).
+ */
+function claude_acf_fields_get( $req ) {
+    if ( ! function_exists( 'get_fields' ) ) {
+        return new WP_Error( 'acf_missing', 'ACF/SCF is not active on this site.', array( 'status' => 422 ) );
+    }
+    $post_id = (int) $req['id'];
+    if ( ! get_post( $post_id ) ) {
+        return new WP_Error( 'not_found', 'Post not found.', array( 'status' => 404 ) );
+    }
+    $format = $req->get_param( 'format_value' ) !== 'false';
+    $fields = get_fields( $post_id, $format );
+    return new WP_REST_Response( array( 'post_id' => $post_id, 'fields' => $fields ?: array() ) );
+}
+
+/**
+ * POST /acf/fields/{id}
+ * Writes ACF/SCF field values for a post.
+ * Body: { "fields": { "field_key_or_name": value, ... } }
+ */
+function claude_acf_fields_set( $req ) {
+    if ( ! function_exists( 'update_field' ) ) {
+        return new WP_Error( 'acf_missing', 'ACF/SCF is not active on this site.', array( 'status' => 422 ) );
+    }
+    $post_id = (int) $req['id'];
+    if ( ! get_post( $post_id ) ) {
+        return new WP_Error( 'not_found', 'Post not found.', array( 'status' => 404 ) );
+    }
+    $body   = (array) $req->get_json_params();
+    $fields = $body['fields'] ?? null;
+    if ( ! is_array( $fields ) || empty( $fields ) ) {
+        return new WP_Error( 'missing', 'Body must include "fields" as a non-empty object.', array( 'status' => 400 ) );
+    }
+    $updated = array();
+    $failed  = array();
+    foreach ( $fields as $key => $value ) {
+        // update_field() returns false only on a genuine failure (field not found or type mismatch).
+        $result = update_field( sanitize_text_field( $key ), $value, $post_id );
+        if ( $result !== false ) {
+            $updated[] = $key;
+        } else {
+            $failed[] = $key;
+        }
+    }
+    return new WP_REST_Response( array(
+        'post_id' => $post_id,
+        'updated' => $updated,
+        'failed'  => $failed,
+    ) );
+}
+
+/**
+ * GET /acf/options
+ * Returns all ACF/SCF Options Page field values.
+ * Requires ACF Pro or a registered options page (acf_add_options_page).
+ */
+function claude_acf_options_get() {
+    if ( ! function_exists( 'get_fields' ) ) {
+        return new WP_Error( 'acf_missing', 'ACF/SCF is not active on this site.', array( 'status' => 422 ) );
+    }
+    $fields = get_fields( 'option' );
+    return new WP_REST_Response( array( 'fields' => $fields ?: array() ) );
+}
+
+/**
+ * POST /acf/options
+ * Writes ACF/SCF Options Page field values.
+ * Body: { "fields": { "field_key_or_name": value, ... } }
+ */
+function claude_acf_options_set( $req ) {
+    if ( ! function_exists( 'update_field' ) ) {
+        return new WP_Error( 'acf_missing', 'ACF/SCF is not active on this site.', array( 'status' => 422 ) );
+    }
+    $body   = (array) $req->get_json_params();
+    $fields = $body['fields'] ?? null;
+    if ( ! is_array( $fields ) || empty( $fields ) ) {
+        return new WP_Error( 'missing', 'Body must include "fields" as a non-empty object.', array( 'status' => 400 ) );
+    }
+    $updated = array();
+    foreach ( $fields as $key => $value ) {
+        update_field( sanitize_text_field( $key ), $value, 'option' );
+        $updated[] = $key;
+    }
+    return new WP_REST_Response( array( 'updated' => $updated ) );
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -899,6 +1040,66 @@ function claude_safe_path( $relative ) {
         ? $target : false;
 }
 
+/**
+ * Runs `php -l` on a string of PHP content before writing.
+ * Returns the error message on syntax failure, or null if clean (or not a PHP file).
+ *
+ * @param  string $content  File content to check.
+ * @param  string $rel      Relative path (used to detect .php extension).
+ * @return string|null
+ */
+function claude_php_lint( $content, $rel ) {
+    if ( ! str_ends_with( strtolower( $rel ), '.php' ) ) {
+        return null; // not a PHP file – skip
+    }
+    if ( ! function_exists( 'proc_open' ) ) {
+        return null; // can't run lint without proc_open – skip silently
+    }
+    $tmp = tempnam( sys_get_temp_dir(), 'cc_lint_' );
+    if ( ! $tmp ) {
+        return null;
+    }
+    file_put_contents( $tmp, $content ); // phpcs:ignore
+    $descriptors = array(
+        0 => array( 'pipe', 'r' ),
+        1 => array( 'pipe', 'w' ),
+        2 => array( 'pipe', 'w' ),
+    );
+    $proc = @proc_open( array( PHP_BINARY, '-l', $tmp ), $descriptors, $pipes ); // phpcs:ignore
+    if ( ! is_resource( $proc ) ) {
+        @unlink( $tmp ); // phpcs:ignore
+        return null;
+    }
+    fclose( $pipes[0] );
+    $stdout = (string) stream_get_contents( $pipes[1] );
+    $stderr = (string) stream_get_contents( $pipes[2] );
+    fclose( $pipes[1] );
+    fclose( $pipes[2] );
+    $exit = proc_close( $proc );
+    @unlink( $tmp ); // phpcs:ignore
+    if ( $exit !== 0 ) {
+        // Replace temp path with the real relative path for a readable error message.
+        $msg = trim( $stdout . ' ' . $stderr );
+        return str_replace( $tmp, $rel, $msg );
+    }
+    return null;
+}
+
+/**
+ * Creates a timestamped .bak copy of a file before overwriting it.
+ * Silently skips if the file does not exist yet (new file) or copy fails.
+ *
+ * @param  string $abs_path  Absolute path to the file.
+ * @return string|null       Path to the backup, or null if none was made.
+ */
+function claude_backup_file( $abs_path ) {
+    if ( ! is_file( $abs_path ) ) {
+        return null;
+    }
+    $backup = $abs_path . '.' . gmdate( 'YmdHis' ) . '.bak';
+    return @copy( $abs_path, $backup ) ? $backup : null; // phpcs:ignore
+}
+
 function claude_files_list( $req ) {
     $path = claude_safe_path( sanitize_text_field( (string) $req->get_param( 'path' ) ) );
     if ( ! $path )           return new WP_Error( 'forbidden', 'Path is outside wp-content.',  array( 'status' => 403 ) );
@@ -946,10 +1147,22 @@ function claude_files_write( $req ) {
     }
     $path = claude_safe_path( $rel );
     if ( ! $path ) return new WP_Error( 'forbidden', 'Path is outside wp-content.', array( 'status' => 403 ) );
+
+    // PHP syntax check before write - prevents a bad edit from white-screening the site.
+    $lint_error = claude_php_lint( $content, $rel );
+    if ( $lint_error ) {
+        return new WP_Error( 'php_syntax_error', $lint_error, array( 'status' => 422 ) );
+    }
+
     wp_mkdir_p( dirname( $path ) );
-    $bytes = file_put_contents( $path, $content ); // phpcs:ignore
+    $backup = claude_backup_file( $path ); // backup before overwrite
+    $bytes  = file_put_contents( $path, $content ); // phpcs:ignore
     if ( $bytes === false ) return new WP_Error( 'write_failed', 'Could not write file.', array( 'status' => 500 ) );
-    return new WP_REST_Response( array( 'written' => $rel, 'bytes' => $bytes ) );
+    return new WP_REST_Response( array(
+        'written' => $rel,
+        'bytes'   => $bytes,
+        'backup'  => $backup ? ltrim( str_replace( WP_CONTENT_DIR, '', $backup ), '/\\' ) : null,
+    ) );
 }
 
 /**
@@ -1023,8 +1236,19 @@ function claude_files_commit( $req ) {
         return new WP_Error( 'invalid_b64', 'Staged content is not valid base64.', array( 'status' => 500 ) );
     }
 
+    // PHP syntax check before committing assembled chunks.
+    $lint_error = claude_php_lint( $content, $rel );
+    if ( $lint_error ) {
+        // Clean up staged chunks so they don't linger.
+        for ( $i = 0; $i < $chunk_total; $i++ ) {
+            delete_transient( 'claude_stage_' . md5( $rel ) . '_' . $i );
+        }
+        return new WP_Error( 'php_syntax_error', $lint_error, array( 'status' => 422 ) );
+    }
+
     wp_mkdir_p( dirname( $path ) );
-    $bytes = file_put_contents( $path, $content ); // phpcs:ignore
+    $backup = claude_backup_file( $path ); // backup before overwrite
+    $bytes  = file_put_contents( $path, $content ); // phpcs:ignore
     if ( $bytes === false ) {
         return new WP_Error( 'write_failed', 'Could not write file.', array( 'status' => 500 ) );
     }
@@ -1033,7 +1257,11 @@ function claude_files_commit( $req ) {
         delete_transient( 'claude_stage_' . md5( $rel ) . '_' . $i );
     }
 
-    return new WP_REST_Response( array( 'written' => $rel, 'bytes' => $bytes ) );
+    return new WP_REST_Response( array(
+        'written' => $rel,
+        'bytes'   => $bytes,
+        'backup'  => $backup ? ltrim( str_replace( WP_CONTENT_DIR, '', $backup ), '/\\' ) : null,
+    ) );
 }
 
 function claude_files_delete( $req ) {
@@ -1057,11 +1285,28 @@ function claude_db_tables() {
 
 function claude_db_query( $req ) {
     global $wpdb;
-    $body  = (array) $req->get_json_params();
-    $query = $body['query'] ?? null;
-    $type  = strtolower( (string) ( $body['type'] ?? 'get_results' ) );
+    $body     = (array) $req->get_json_params();
+    $query    = $body['query'] ?? null;
+    $type     = strtolower( (string) ( $body['type'] ?? 'get_results' ) );
+    $readonly = ! empty( $body['readonly'] );
 
     if ( ! $query ) return new WP_Error( 'missing', 'Body must include "query".', array( 'status' => 400 ) );
+
+    // readonly mode: block anything that isn't a plain SELECT.
+    if ( $readonly && ! preg_match( '/^\s*SELECT\s/i', (string) $query ) ) {
+        return new WP_Error( 'readonly', 'Only SELECT queries are allowed in readonly mode.', array( 'status' => 403 ) );
+    }
+
+    // Warn if the query looks destructive (DROP / TRUNCATE / DELETE without WHERE).
+    $destructive = preg_match( '/^\s*(DROP|TRUNCATE)\s/i', (string) $query )
+        || ( preg_match( '/^\s*DELETE\s/i', (string) $query ) && ! preg_match( '/\bWHERE\b/i', (string) $query ) );
+    if ( $destructive && empty( $body['confirm_destructive'] ) ) {
+        return new WP_Error(
+            'destructive_query',
+            'This query looks destructive (DROP / TRUNCATE / DELETE without WHERE). Pass "confirm_destructive": true to proceed.',
+            array( 'status' => 400 )
+        );
+    }
 
     $allowed = array( 'get_results', 'get_row', 'get_var', 'get_col', 'query' );
     if ( ! in_array( $type, $allowed, true ) ) {
@@ -1096,15 +1341,7 @@ function claude_db_query( $req ) {
 function claude_log_access( $request, $response ) {
     global $wpdb;
 
-    // Real IP - check Cloudflare first, then common proxies, then REMOTE_ADDR.
-    $ip = '0.0.0.0';
-    foreach ( array( 'HTTP_CF_CONNECTING_IP', 'HTTP_X_FORWARDED_FOR', 'REMOTE_ADDR' ) as $key ) {
-        if ( ! empty( $_SERVER[ $key ] ) ) {
-            $ip = sanitize_text_field( trim( explode( ',', $_SERVER[ $key ] )[0] ) );
-            break;
-        }
-    }
-
+    $ip     = claude_get_request_ip();
     $status = is_a( $response, 'WP_REST_Response' ) ? $response->get_status() : 500;
 
     $wpdb->insert(
@@ -1212,6 +1449,87 @@ function claude_ajax_handler() {
         'body'     => $data['body']     ?? null,
         'id'       => 'ajax',
     ) ) );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+//  Encrypted mode  (AES-256-GCM payload — bypasses body-inspection WAFs)
+//
+//  How it works:
+//    1. The MCP server encrypts the command JSON with AES-256-GCM using a key
+//       derived from the site's API key (SHA-256 hash of the key → 32 bytes).
+//    2. The ciphertext is sent as a base64-encoded blob to admin-ajax.php.
+//    3. WordPress decrypts it here and dispatches internally — the WAF only
+//       ever sees random-looking base64, with no PHP code, SQL, or JSON
+//       patterns to trigger ModSecurity / Imunify360 rules.
+//
+//  This is the recommended mode for sites where Imunify360 or aggressive
+//  ModSecurity rulesets block even the Admin-AJAX mode.  No external server
+//  or Cloudflare account is needed — everything runs on your local PC.
+//
+//  Wire format (all fields base64url-safe after outer base64 encode):
+//    Bytes  0-11  : IV / nonce (12 bytes, random per request)
+//    Bytes 12-end : AES-256-GCM ciphertext + 16-byte auth tag appended
+//                   (matches WebCrypto SubtleCrypto AES-GCM output layout)
+// ──────────────────────────────────────────────────────────────────────────────
+
+add_action( 'wp_ajax_claude_enc',        'claude_enc_handler' );
+add_action( 'wp_ajax_nopriv_claude_enc', 'claude_enc_handler' );
+
+/**
+ * Decrypts an AES-256-GCM base64 payload using a 32-byte key derived from
+ * the site's API key (SHA-256).
+ *
+ * @param  string $ciphertext_b64  Base64-encoded IV + ciphertext + GCM tag.
+ * @param  string $api_key         Site API key (64-char hex).
+ * @return string|false            Decrypted plaintext, or false on failure.
+ */
+function claude_decrypt_payload( $ciphertext_b64, $api_key ) {
+    if ( ! function_exists( 'openssl_decrypt' ) ) {
+        return false;
+    }
+    $raw = base64_decode( $ciphertext_b64, true );
+    // Minimum: 12 (IV) + 16 (GCM tag) + 1 (data) = 29 bytes
+    if ( $raw === false || strlen( $raw ) < 29 ) {
+        return false;
+    }
+    $iv         = substr( $raw, 0, 12 );
+    // WebCrypto appends the 16-byte GCM tag to the ciphertext; split it off.
+    $ciphertext = substr( $raw, 12, -16 );
+    $tag        = substr( $raw, -16 );
+    $aes_key    = hash( 'sha256', $api_key, true ); // 32 raw bytes
+    return openssl_decrypt( $ciphertext, 'aes-256-gcm', $aes_key, OPENSSL_RAW_DATA, $iv, $tag );
+}
+
+/**
+ * Handles POST /wp-admin/admin-ajax.php?action=claude_enc.
+ *
+ * The request body is a JSON object: { "enc": "<base64 ciphertext>" }
+ * No X-Claude-Key header is needed — the correct API key is *implicit* in
+ * the ability to encrypt a payload that decrypts successfully.
+ */
+function claude_enc_handler() {
+    $raw  = (string) file_get_contents( 'php://input' ); // phpcs:ignore
+    $data = $raw ? json_decode( $raw, true ) : null;
+
+    if ( ! is_array( $data ) || empty( $data['enc'] ) ) {
+        wp_send_json( array( 'status' => 400, 'body' => array( 'error' => 'Invalid request: expected {"enc":"<base64>"}.' ) ) );
+        return;
+    }
+
+    $plain = claude_decrypt_payload( (string) $data['enc'], claude_get_api_key() );
+    if ( $plain === false ) {
+        // Wrong key or tampered payload — return the same generic error as a bad key.
+        wp_send_json( array( 'status' => 401, 'body' => array( 'error' => 'Decryption failed. Check your API key and mode.' ) ) );
+        return;
+    }
+
+    $command = json_decode( $plain, true );
+    if ( ! is_array( $command ) ) {
+        wp_send_json( array( 'status' => 400, 'body' => array( 'error' => 'Decrypted payload is not valid JSON.' ) ) );
+        return;
+    }
+
+    wp_send_json( claude_relay_execute( $command ) );
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1342,10 +1660,25 @@ function claude_wpcli( $req ) {
         return new WP_Error( 'missing', 'Body must include "args" (array) or "command" (string).', array( 'status' => 400 ) );
     }
 
-    // Block interactive sub-commands that hang waiting for input.
-    $blocked = array( 'shell', 'server' );
-    if ( in_array( strtolower( $args[0] ), $blocked, true ) ) {
-        return new WP_Error( 'blocked', "wp {$args[0]} is interactive and cannot run via this endpoint.", array( 'status' => 400 ) );
+    // Block dangerous or interactive sub-commands.
+    // - shell / server  : interactive, hang forever.
+    // - eval / eval-file : arbitrary PHP execution — use the REST API instead.
+    // - package         : installs untrusted WP-CLI packages from the internet.
+    // To run any of these locally, use your own terminal.
+    $blocked_top = array( 'shell', 'server', 'eval', 'eval-file', 'package' );
+    if ( in_array( strtolower( $args[0] ), $blocked_top, true ) ) {
+        return new WP_Error( 'blocked', "wp {$args[0]} is not allowed via this endpoint.", array( 'status' => 400 ) );
+    }
+
+    // Block dangerous sub-command + sub-subcommand combinations.
+    $blocked_sub = array(
+        'db'   => array( 'import' ), // could import a malicious SQL dump
+        'core' => array( 'download', 'update' ), // overwrites core files; do this intentionally via WP admin
+    );
+    $top = strtolower( $args[0] );
+    $sub = isset( $args[1] ) ? strtolower( $args[1] ) : '';
+    if ( isset( $blocked_sub[ $top ] ) && in_array( $sub, $blocked_sub[ $top ], true ) ) {
+        return new WP_Error( 'blocked', "wp {$top} {$sub} is not allowed via this endpoint.", array( 'status' => 400 ) );
     }
 
     return new WP_REST_Response( claude_wpcli_run( $args ) );
@@ -1472,28 +1805,10 @@ BASH;
         '{{MD_B64}}'  => $md_b64,
     ) );
 
-    // Wrap in a .terminal plist — Terminal.app opens these directly without
-    // needing execute permissions (unlike .command files which fail on download).
-    $script_b64 = base64_encode( $script );
-    $plist = '<?xml version="1.0" encoding="UTF-8"?>' . "\n"
-        . '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' . "\n"
-        . '<plist version="1.0"><dict>' . "\n"
-        . "\t<key>CommandString</key>\n"
-        . "\t<string>printf '%s' '" . $script_b64 . "' | base64 -d | bash</string>\n"
-        . "\t<key>ProfileCurrentVersion</key>\n"
-        . "\t<real>2.0600000000000001</real>\n"
-        . "\t<key>RunCommandAsShell</key>\n"
-        . "\t<false/>\n"
-        . "\t<key>name</key>\n"
-        . "\t<string>Claude Connector</string>\n"
-        . "\t<key>type</key>\n"
-        . "\t<string>Window Settings</string>\n"
-        . '</dict></plist>' . "\n";
-
     header( 'Content-Type: application/octet-stream' );
-    header( "Content-Disposition: attachment; filename=\"connect-{$slug}.terminal\"" );
+    header( "Content-Disposition: attachment; filename=\"connect-{$slug}.command\"" );
     header( 'X-Content-Type-Options: nosniff' );
-    echo $plist;
+    echo $script;
 }
 
 function claude_script_windows( $url, $key, $slug, $name ) {
