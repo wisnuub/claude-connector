@@ -87,8 +87,48 @@ async function ajaxCall(site, method, endpoint, params = null, body = null) {
   return data.body;
 }
 
+// ── Encrypted mode (AES-256-GCM) ─────────────────────────────────────────────
+//
+// Derives a 32-byte AES key from the API key (SHA-256), then encrypts the
+// command JSON so the WAF only ever sees opaque base64.  No X-Claude-Key
+// header is sent — the correct key is proved by successful decryption on the
+// WordPress side.
+//
+// Wire format: base64( IV[12] + GCM_ciphertext_with_tag_appended[n+16] )
+// This matches exactly what PHP's openssl_decrypt expects when given the tag
+// as the last 16 bytes of the ciphertext (WebCrypto AES-GCM layout).
+
+async function encryptPayload(plaintext, apiKey) {
+  const enc       = new TextEncoder();
+  const keyDigest = await crypto.subtle.digest('SHA-256', enc.encode(apiKey));
+  const aesKey    = await crypto.subtle.importKey('raw', keyDigest, { name: 'AES-GCM' }, false, ['encrypt']);
+  const iv        = crypto.getRandomValues(new Uint8Array(12));
+  const cipher    = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, enc.encode(plaintext));
+  // Combine IV + ciphertext (tag is already appended by WebCrypto)
+  const combined  = new Uint8Array(12 + cipher.byteLength);
+  combined.set(iv);
+  combined.set(new Uint8Array(cipher), 12);
+  return Buffer.from(combined).toString('base64');
+}
+
+async function encCall(site, method, endpoint, params = null, body = null) {
+  const payload = JSON.stringify({ method, endpoint, params: params || {}, body });
+  const enc     = await encryptPayload(payload, site.key);
+  const url     = `${site.url}/wp-admin/admin-ajax.php?action=claude_enc`;
+  const res     = await fetch(url, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ enc }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`Encrypted AJAX ${res.status}: ${JSON.stringify(data)}`);
+  if (data.status >= 400) throw new Error(`WP ${data.status}: ${JSON.stringify(data.body)}`);
+  return data.body;
+}
+
 function api(method, endpoint, params = null, body = null, siteName = null) {
   const site = getSite(siteName);
+  if (site.mode === 'enc')  return encCall(site, method, endpoint, params, body);
   if (site.mode === 'ajax') return ajaxCall(site, method, endpoint, params, body);
   const useRelay = !!(site.relayUrl && site.relayKey);
   return useRelay
@@ -107,7 +147,7 @@ async function safeCall(fn) {
 
 // ── MCP server ────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: 'claude-connector', version: '1.1.0' });
+const server = new McpServer({ name: 'claude-connector', version: '1.5.0' });
 
 const S = z.string().optional().describe(
   `Site name - one of: ${sites.map(s => s.name).join(', ')} (default: ${sites[0].name})`
@@ -314,11 +354,63 @@ server.tool('wp_cache_purge',
   ({ site }) => safeCall(async () => ok(await api('POST', '/cache/purge', null, null, site)))
 );
 
-// ACF - list groups
+// ACF/SCF - list groups
 server.tool('wp_acf_groups',
-  'List ACF field groups and their sync status (requires ACF plugin)',
+  'List ACF/SCF field groups and their sync status (requires ACF or Secure Custom Fields plugin)',
   { site: S },
   ({ site }) => safeCall(async () => ok(await api('GET', '/acf/groups', null, null, site)))
+);
+
+// ACF/SCF - export field group with all fields
+server.tool('wp_acf_group_export',
+  'Export an ACF/SCF field group (with all fields) as JSON — useful for inspecting schema or backing up before changes',
+  {
+    site: S,
+    key:  z.string().describe('Field group key, e.g. group_6123abc'),
+  },
+  ({ site, key }) => safeCall(async () => ok(await api('GET', `/acf/groups/${key}/export`, null, null, site)))
+);
+
+// ACF/SCF - read field values for a post
+server.tool('wp_acf_fields_get',
+  'Read all ACF/SCF field values for a post (any post type). Returns field names and their values.',
+  {
+    site:         S,
+    id:           z.number().int().describe('Post ID'),
+    format_value: z.boolean().optional().describe('Return formatted values (default: true). Pass false for raw DB values.'),
+  },
+  ({ site, id, format_value }) => safeCall(async () => {
+    const params = format_value === false ? { format_value: 'false' } : null;
+    return ok(await api('GET', `/acf/fields/${id}`, params, null, site));
+  })
+);
+
+// ACF/SCF - write field values for a post
+server.tool('wp_acf_fields_set',
+  'Write ACF/SCF field values for a post. Supports all field types including repeater and flexible content.',
+  {
+    site:   S,
+    id:     z.number().int().describe('Post ID'),
+    fields: z.record(z.any()).describe('Object of field_name (or field_key): value pairs, e.g. {"hero_title": "Hello", "field_abc123": "world"}'),
+  },
+  ({ site, id, fields }) => safeCall(async () => ok(await api('POST', `/acf/fields/${id}`, null, { fields }, site)))
+);
+
+// ACF/SCF - read options page fields
+server.tool('wp_acf_options_get',
+  'Read all ACF/SCF Options Page field values (requires an options page registered with acf_add_options_page)',
+  { site: S },
+  ({ site }) => safeCall(async () => ok(await api('GET', '/acf/options', null, null, site)))
+);
+
+// ACF/SCF - write options page fields
+server.tool('wp_acf_options_set',
+  'Write ACF/SCF Options Page field values',
+  {
+    site:   S,
+    fields: z.record(z.any()).describe('Object of field_name: value pairs for the ACF options page'),
+  },
+  ({ site, fields }) => safeCall(async () => ok(await api('POST', '/acf/options', null, { fields }, site)))
 );
 
 // Logs
