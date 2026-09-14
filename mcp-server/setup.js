@@ -56,6 +56,13 @@ function createSiteFolder(site) {
       `WordPress site managed via Claude Connector.\n\n` +
       `**URL:** ${site.url}  \n` +
       `**Mode:** ${modeDesc}\n\n` +
+      `## Shared knowledge base\n\n` +
+      `Before troubleshooting an unfamiliar WordPress/Elementor/Divi/hosting issue, call ` +
+      `\`wp_knowledge_search\` - it may already be documented from a previous site. After resolving ` +
+      `something non-obvious, call \`wp_knowledge_add\` with a generalized description (no ` +
+      `site-specific names, URLs, or secrets) so future sessions don't rediscover it. Writing requires ` +
+      `the GitHub CLI (\`gh\`) to be installed and logged in - if it isn't, mention that to the user ` +
+      `rather than skipping silently.\n\n` +
       `## Notes\n<!-- Theme, active plugins, custom post types, client context, etc. -->\n`
     );
   }
