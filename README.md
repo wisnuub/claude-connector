@@ -546,6 +546,18 @@ Fixes a data-loss bug and closes the verification loop. Derived from building a
   Optional `expect` assertions turn verification into one call. Every other
   endpoint reports database state; several classes of defect are only visible in
   the rendered output.
+- `POST /content/replace` — find and replace inside post content using **plain
+  HTML**, without needing to know how the builder escaped it. Block attributes
+  are JSON inside an HTML comment, so the HTML within them is escaped — and how
+  depends on the author: the Divi 5 visual builder writes `<h1>` while
+  keeping quotes as `\"`, whereas hand-written block JSON leaves the brackets
+  literal and escapes only the quotes. Both forms coexist on one site, so a
+  plain-HTML `REPLACE()` matches neither, and a SQL replace that matched nothing
+  is indistinguishable from one that worked. This endpoint tries every known
+  encoding, reports which matched and how many times, writes using the matching
+  one, revalidates the blocks and flushes Divi's CSS cache. Supports `dry_run`,
+  a single `id`, an `ids` list, or `all_builder`. When nothing matches it
+  returns every encoding it tried.
 - `GET /blocks/validate/{id}` — reports kses corruption, unbalanced block
   delimiters, and attribute JSON that fails to round-trip through
   `parse_blocks()`/`serialize_blocks()`. Divi 5 stores module attributes as JSON
