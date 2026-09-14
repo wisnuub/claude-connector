@@ -496,6 +496,7 @@ function claude_settings_page() {
         array( 'GET',    '/status',                   'Site info, WP/PHP version, active theme & plugins, acting-as user' ),
         array( 'GET',    '/render',                   'Fetch a page server-side and summarise its rendered health' ),
         array( 'GET',    '/blocks/validate/{id}',     'Check block markup for escaped delimiters / bad attribute JSON' ),
+        array( 'POST',   '/content/replace',          'Find/replace in content using plain HTML, builder-escaping aware' ),
         array( 'GET',    '/divi/audit',               'Find Divi pages with missing builder meta or mismatched CSS indices' ),
         array( 'POST',   '/divi/resave',              'Re-save builder posts so Divi regenerates its CSS cleanly' ),
         array( 'POST',   '/divi/meta/{id}',           'Repair Divi builder postmeta on an existing page' ),
@@ -781,6 +782,7 @@ add_action( 'rest_api_init', function () {
     register_rest_route( $ns, '/divi/meta/(?P<id>\d+)',          array( 'methods' => 'POST', 'callback' => 'claude_divi_meta_set', 'permission_callback' => $a ) );
     register_rest_route( $ns, '/render',                         array( 'methods' => 'GET',  'callback' => 'claude_page_render',   'permission_callback' => $a ) );
     register_rest_route( $ns, '/blocks/validate/(?P<id>\d+)',    array( 'methods' => 'GET',  'callback' => 'claude_blocks_validate', 'permission_callback' => $a ) );
+    register_rest_route( $ns, '/content/replace',                array( 'methods' => 'POST', 'callback' => 'claude_content_replace', 'permission_callback' => $a ) );
     register_rest_route( $ns, '/cache/purge',                    array( 'methods' => 'POST', 'callback' => 'claude_cache_purge',      'permission_callback' => $a ) );
     register_rest_route( $ns, '/posts',              array(
         array( 'methods' => 'GET',  'callback' => 'claude_posts_list',   'permission_callback' => $a ),
@@ -1421,6 +1423,166 @@ function claude_blocks_report( $post_id ) {
         'bytes'        => strlen( $content ),
         'issues'       => $issues,
     );
+}
+
+/**
+ * Every encoding a snippet of HTML might be stored in inside block markup.
+ *
+ * This exists because searching builder content for plain HTML does not work,
+ * and the reason is genuinely confusing: block attributes are JSON embedded in
+ * an HTML comment, so the HTML inside them is escaped - but *how* it is escaped
+ * depends on what wrote it.
+ *
+ *   raw               <h1>Hi</h1>
+ *                       plain text - a code module, or a non-block post
+ *   json               \u0022 not used; quotes escaped as \\" , angle brackets left as-is
+ *                       what you get from hand-written block JSON
+ *   block_attr_mixed   angle brackets as \u003c / \u003e, quotes still \\"
+ *                       seen in practice across Divi versions
+ *   block_attr         angle brackets, ampersands, quotes and -- all escaped
+ *                       to their \uXXXX forms - this is what WordPress's own
+ *                       serialize_block_attributes() emits, and therefore what
+ *                       the Divi 5 visual builder writes
+ *
+ * So the same heading can be sitting in the database in any of four forms, and
+ * a find/replace has to try all of them. Callers should never have to know
+ * this - they pass plain HTML and this works out the rest.
+ *
+ * @param  string $s
+ * @return array  encoding name => encoded string
+ */
+function claude_content_encodings( $s ) {
+    $out = array( 'raw' => $s );
+
+    // JSON-encode, then drop the wrapping quotes, to get the form a string
+    // takes inside a JSON document.
+    $json = wp_json_encode( $s, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
+    $json = ( is_string( $json ) && strlen( $json ) >= 2 ) ? substr( $json, 1, -1 ) : $s;
+    $out['json'] = $json;
+
+    // Angle brackets escaped but quotes left as \" .
+    $mixed = str_replace( array( '<', '>' ), array( '\\u003c', '\\u003e' ), $json );
+    $out['block_attr_mixed'] = $mixed;
+
+    // The full serialize_block_attributes() treatment, in its own order.
+    $attr = $json;
+    $attr = str_replace( '--',  '\\u002d\\u002d', $attr );
+    $attr = str_replace( '<',   '\\u003c', $attr );
+    $attr = str_replace( '>',   '\\u003e', $attr );
+    $attr = str_replace( '&',   '\\u0026', $attr );
+    $attr = str_replace( '\\"', '\\u0022', $attr );
+    $out['block_attr'] = $attr;
+
+    return $out;
+}
+
+/**
+ * POST /content/replace
+ *
+ * Find and replace inside post content, in plain HTML, without the caller
+ * having to know how the builder escaped it (see claude_content_encodings()).
+ *
+ * Body: {
+ *   search, replace,            - plain HTML / text
+ *   id | ids | all_builder,     - target
+ *   dry_run, resave, regex      - options
+ * }
+ */
+function claude_content_replace( $req ) {
+    $body    = (array) $req->get_json_params();
+    $search  = (string) ( $body['search'] ?? '' );
+    $replace = array_key_exists( 'replace', $body ) ? (string) $body['replace'] : null;
+
+    if ( '' === $search || null === $replace ) {
+        return new WP_Error( 'missing', 'Body must include "search" and "replace".', array( 'status' => 400 ) );
+    }
+
+    if ( ! empty( $body['id'] ) ) {
+        $ids = array( (int) $body['id'] );
+    } elseif ( ! empty( $body['ids'] ) && is_array( $body['ids'] ) ) {
+        $ids = array_map( 'intval', $body['ids'] );
+    } elseif ( ! empty( $body['all_builder'] ) ) {
+        $ids = claude_divi_builder_post_ids( true );
+    } else {
+        return new WP_Error( 'missing', 'Provide "id", "ids", or "all_builder": true.', array( 'status' => 400 ) );
+    }
+
+    $dry      = ! empty( $body['dry_run'] );
+    $s_vars   = claude_content_encodings( $search );
+    $r_vars   = claude_content_encodings( $replace );
+    $results  = array();
+    $total    = 0;
+
+    foreach ( $ids as $id ) {
+        $content = get_post_field( 'post_content', $id );
+        if ( ! is_string( $content ) ) continue;
+
+        $new     = $content;
+        $matched = array();
+        $seen    = array();
+
+        // Keys stay aligned between search and replace variants, so skipping a
+        // duplicate needle cannot pair the wrong replacement with it.
+        foreach ( $s_vars as $name => $needle ) {
+            if ( '' === $needle || isset( $seen[ $needle ] ) ) continue;
+            $seen[ $needle ] = true;
+
+            $hits = substr_count( $new, $needle );
+            if ( ! $hits ) continue;
+
+            $matched[ $name ] = $hits;
+            $total           += $hits;
+            $new              = str_replace( $needle, $r_vars[ $name ], $new );
+        }
+
+        if ( ! $matched ) continue;
+
+        $row = array(
+            'post_id'      => $id,
+            'slug'         => get_post_field( 'post_name', $id ),
+            'matched'      => $matched,
+            'bytes_before' => strlen( $content ),
+            'bytes_after'  => strlen( $new ),
+        );
+
+        if ( ! $dry ) {
+            wp_update_post( wp_slash( array( 'ID' => $id, 'post_content' => $new ) ) );
+
+            if ( $err = claude_assert_blocks_survived( $id ) ) return $err;
+
+            $report = claude_blocks_report( $id );
+            if ( ! is_wp_error( $report ) ) {
+                $row['blocks_valid']  = $report['valid'];
+                $row['blocks_issues'] = $report['issues'];
+            }
+
+            // A direct content write leaves Divi's cached CSS stale.
+            claude_divi_flush_post( $id );
+            if ( ! empty( $body['resave'] ) ) {
+                wp_update_post( array( 'ID' => $id ) );
+            }
+        }
+
+        $results[] = $row;
+    }
+
+    $response = array(
+        'dry_run'        => $dry,
+        'posts_searched' => count( $ids ),
+        'posts_matched'  => count( $results ),
+        'total_matches'  => $total,
+        'results'        => $results,
+    );
+
+    // Nothing matched: show what was actually looked for, so the caller can see
+    // whether it is an encoding problem or the string genuinely is not there.
+    if ( ! $total ) {
+        $response['tried_encodings'] = $s_vars;
+        $response['hint'] = 'None of the encodings matched. Check the string really is '
+            . 'present - GET /divi/data/{id} returns the raw stored content.';
+    }
+
+    return new WP_REST_Response( $response );
 }
 
 /**

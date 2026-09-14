@@ -659,6 +659,33 @@ server.tool('wp_page_render',
   })
 );
 
+// Content find/replace that understands builder escaping
+server.tool('wp_content_replace',
+  'Find and replace inside post content using PLAIN HTML, without needing to know how the builder '
+  + 'escaped it. Use this instead of hand-writing SQL REPLACE for builder content. '
+  + 'Divi 5 stores HTML inside block-attribute JSON, and the escaping differs by author: the visual '
+  + 'builder writes angle brackets as \\u003c / \\u003e (serialize_block_attributes), hand-written JSON '
+  + 'leaves them literal and escapes quotes as \\", and both variants exist on the same site. This tool '
+  + 'tries every known encoding, reports which one matched and how many times, then writes using the '
+  + 'matching encoding - and flushes Divi\'s CSS cache afterwards. '
+  + 'Always dry_run first and check total_matches. If nothing matches, the response lists every '
+  + 'encoding it tried so you can see whether it is an escaping problem or the string is simply absent.',
+  {
+    site:        S,
+    search:      z.string().describe('Plain HTML or text to find, e.g. <h1>Title</h1>'),
+    replace:     z.string().describe('Plain HTML or text to replace it with'),
+    id:          z.number().int().optional().describe('Single post ID'),
+    ids:         z.array(z.number().int()).optional().describe('Several post IDs'),
+    all_builder: z.boolean().optional().describe('Every builder post on the site'),
+    dry_run:     z.boolean().optional().describe('Report what would change without writing. Do this first.'),
+    resave:      z.boolean().optional().describe('Also re-save each post so Divi regenerates its CSS'),
+  },
+  ({ site, ...body }) => safeCall(async () => {
+    if (!body.id && !body.ids && !body.all_builder) throw new Error('Provide id, ids, or all_builder');
+    return ok(await api('POST', '/content/replace', null, body, site));
+  })
+);
+
 // Block validation
 server.tool('wp_blocks_validate',
   'Check a post\'s Gutenberg/Divi 5 block markup for damage: HTML-escaped delimiters (kses corruption), '

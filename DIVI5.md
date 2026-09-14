@@ -131,23 +131,34 @@ Make `wp_divi_audit` a habit after every plugin operation.
 
 ## 7. Editing text on live pages
 
-Use `wp_db_query` with bound `params` rather than escaping by hand — builder
-content contains backslash-escaped quotes and hand-escaping through JSON needs
-three levels.
+**Use `wp_content_replace`, not SQL.** Pass plain HTML and it handles the
+escaping:
 
-**Count before you replace.** Confirm the needle occurs exactly as many times as
-you expect, so you know the edit is scoped to what you intended:
-
-```sql
-SELECT (LENGTH(post_content) - LENGTH(REPLACE(post_content, %s, ''))) / LENGTH(%s)
-FROM wp_posts WHERE ID = %d
+```
+wp_content_replace({ id: 10, search: '<h1>Old</h1>', replace: '<h2>New</h2>', dry_run: true })
 ```
 
-Then `dry_run: true` to rehearse, check `changed_rows`, and run it for real.
-`changed_rows: 0` with `affected_rows: 1` means the row matched but your search
-string never appeared — the response says so explicitly.
+This matters more than it sounds. Block attributes are JSON inside an HTML
+comment, so the HTML in them is escaped — and *how* depends on what wrote it.
+The Divi 5 visual builder writes `<h1>` while keeping quotes as `\"`;
+hand-written block JSON leaves the brackets literal and escapes only the quotes.
+Both forms coexist on the same site. Searching for plain `<h1>` finds neither,
+and a SQL `REPLACE` that matches nothing looks identical to one that succeeded.
 
-Then `wp_divi_resave` for the pages you touched.
+`wp_content_replace` tries every known encoding, reports which matched
+(`{"block_attr_mixed": 1}` or `{"json": 11}`), writes using the matching one,
+revalidates the blocks and flushes Divi's CSS cache. When nothing matches it
+lists every encoding it tried, so you can tell an escaping problem from an
+absent string.
+
+**Always `dry_run: true` first** and check `total_matches` is the number you
+expect. That is the whole safety mechanism — it confirms the edit is scoped to
+what you intended before anything is written.
+
+If you do need raw SQL, use `wp_db_query` with bound `params` (never hand-built
+quotes), and read `matched_rows` vs `changed_rows`: matched 1 / changed 0 means
+the row was found but your search string was not in it. Then run
+`wp_divi_resave` on the pages you touched.
 
 ## 8. Migrating content from another WordPress site
 
@@ -180,5 +191,6 @@ wp_divi_data_set({ id, content })  # check blocks.valid
 wp_files_write / wp_files_fetch    # stylesheet
 wp_options_set et_divi.divi_integration_head
 wp_page_render({ id, expect })     # verify the rendered result
+wp_content_replace({ dry_run })    # any text edits, plain HTML
 wp_divi_audit()                    # after any plugin install, and at the end
 ```

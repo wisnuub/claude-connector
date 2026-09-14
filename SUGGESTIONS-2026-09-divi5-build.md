@@ -1,15 +1,20 @@
-# Claude Connector — suggested improvements
+# Claude Connector — field report and suggested improvements
 
-Portable issue list for the global suggestion file.
+> **Status: mostly implemented in 1.6.0.** This is a historical record of
+> problems found while using 1.5.0, kept because the reasoning and the
+> reproductions are useful. Items 1, 2, 4, 5, 6, 7, 8, 9, 10 and 11 were fixed
+> in 1.6.0 — see the changelog in [README.md](README.md). Item 3 (`wp_page_render`)
+> also shipped. Still open: item 12 (`wp_call` allowlist), item 13 (plugin-specific
+> post-write hints, partially done), item 14 (`backup: false`) and item 15
+> (`wp_options_search`). Do not read this as a list of current bugs.
 
 Derived from building a 44-page Divi 5 site end to end through the connector in
 Admin-AJAX mode: ~500KB of builder markup, 40 media imports, theme options,
 taxonomy, a Yoast migration and substantial raw SQL.
 
-**Findings are verified against the source** at `G:\GitHub\claude-connector`
-(plugin 1.5.0, matching the version installed on the target site). Line numbers
-refer to `claude-connector.php`. Where I could not verify something from the
-code I say so.
+**Findings were verified against the 1.5.0 source.** Line numbers refer to
+`claude-connector.php` as it stood at that version, so they will have drifted.
+Where I could not verify something from the code I say so.
 
 ---
 
@@ -180,8 +185,8 @@ build. It should not be the user's job.
 | `mcp-server/index.js` in the repo | 1.5.0 | 36 |
 | The MCP server my session actually loaded | **1.1.0** | **23** |
 
-The project's `.mcp.json` points at a copy kept outside the repo
-(`C:/Users/Wisnu/claude-sites/.mcp-server/index.js`), which was four minor
+The project's `.mcp.json` pointed at a copy of the MCP server kept outside the
+repo (the shared install path that `setup.js` writes to), which was four minor
 versions behind. Thirteen tools were missing, including all three Divi tools:
 
 ```
