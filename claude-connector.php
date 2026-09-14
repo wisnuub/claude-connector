@@ -3,7 +3,7 @@
  * Plugin Name:  Claude Connector
  * Plugin URI:   https://github.com/wisnuub/claude-connector
  * Description:  Secure REST API bridge for Claude AI - ACF sync, cache purge, file management, database queries, post CRUD, plugin/theme control, and more.
- * Version:      1.5.0
+ * Version:      1.6.0
  * Author:       Wisnuub
  * Author URI:   https://wisnuub.github.io
  * License:      GPL-2.0-or-later
@@ -17,9 +17,28 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'CLAUDE_CONNECTOR_VERSION', '1.5.0' );
+define( 'CLAUDE_CONNECTOR_VERSION', '1.6.0' );
 define( 'CLAUDE_CONNECTOR_NS',      'claude/v1' );
 define( 'CLAUDE_CONNECTOR_GH_REPO', 'wisnuub/claude-connector' );
+
+/**
+ * Postmeta a Divi 5 page needs in order to render through the builder.
+ *
+ * Without the full set WordPress falls back to the theme's default template,
+ * which shows the widget sidebar and a duplicated theme title. The page looks
+ * broken even though post_content is perfect, and the cause is not obvious
+ * from the database.
+ *
+ * _et_pb_use_builder is required for every Divi generation; the rest are
+ * Divi 5 layout defaults.
+ */
+define( 'CLAUDE_DIVI5_META', array(
+    '_et_pb_use_builder'   => 'on',
+    '_et_pb_use_divi_5'    => 'on',
+    '_et_pb_page_layout'   => 'et_no_sidebar',
+    '_et_pb_side_nav'      => 'off',
+    '_et_pb_post_hide_nav' => 'default',
+) );
 
 // PHP 7.x polyfills ────────────────────────────────────────────────────────────
 if ( ! function_exists( 'str_starts_with' ) ) {
@@ -241,7 +260,166 @@ function claude_auth( $req ) {
 
     // Success — clear the failure counter.
     delete_transient( $rl_key );
+
+    // Establish a WordPress user for the rest of the request. Without this the
+    // request runs as user 0 and kses destroys builder content - see
+    // claude_assume_user() for the full explanation.
+    $assumed = claude_assume_user();
+    if ( is_wp_error( $assumed ) ) {
+        return $assumed;
+    }
+
     return true;
+}
+
+/**
+ * Establish a WordPress user for the request.
+ *
+ * This is the single most important line in the plugin. Before it existed the
+ * request ran as user 0 (all three transports authenticate with an API key and
+ * relay through rest_do_request(), so claude_auth() is the only choke point),
+ * which meant:
+ *
+ *   1. kses_init() attaches wp_filter_post_kses to content_save_pre whenever
+ *      the current user lacks 'unfiltered_html'. For user 0 that is always
+ *      true, so wp_insert_post()/wp_update_post() HTML-escaped Gutenberg and
+ *      Divi block delimiters:
+ *
+ *          <!-- wp:divi/section {...} -->  ->  &lt;!-- wp:divi/section ... --&gt;
+ *
+ *      The call returned 200 with a normal-looking post object, the page then
+ *      rendered the escaped comment as visible text, and the builder could no
+ *      longer parse the layout. Silent, total data loss on every builder write.
+ *
+ *   2. post_author defaulted to 0 on created posts, orphaning them.
+ *
+ *   3. Every capability check inside core functions behaved as an anonymous
+ *      visitor.
+ *
+ * wp_set_current_user() fires the 'set_current_user' action, which core hooks
+ * kses_init() to, so the kses filters are re-evaluated against the new user and
+ * dropped for anyone holding unfiltered_html.
+ *
+ * Which account is used is controlled by the claude_connector_user_id option so
+ * the site owner stays in charge of it (and so the access log means something).
+ * It falls back to the lowest-numbered administrator.
+ *
+ * @return int|WP_Error  The assumed user ID, or WP_Error if none is available.
+ */
+function claude_assume_user() {
+    $user_id = (int) get_option( 'claude_connector_user_id', 0 );
+
+    if ( $user_id && ! get_userdata( $user_id ) ) {
+        $user_id = 0; // configured user has since been deleted
+    }
+
+    if ( ! $user_id ) {
+        $admins = get_users( array(
+            'role'    => 'administrator',
+            'number'  => 1,
+            'orderby' => 'ID',
+            'order'   => 'ASC',
+            'fields'  => 'ID',
+        ) );
+        $user_id = $admins ? (int) $admins[0] : 0;
+    }
+
+    if ( ! $user_id ) {
+        return new WP_Error(
+            'no_user',
+            'No administrator account available for the connector to act as. '
+            . 'Set one in Settings > Claude Connector.',
+            array( 'status' => 500 )
+        );
+    }
+
+    wp_set_current_user( $user_id );
+
+    // On multisite, ordinary administrators do NOT hold unfiltered_html - only
+    // super admins do - so kses_init() will have re-attached the filters above.
+    // Drop them explicitly, otherwise builder content is still corrupted.
+    if ( ! current_user_can( 'unfiltered_html' ) ) {
+        kses_remove_filters();
+    }
+
+    return $user_id;
+}
+
+/**
+ * True if a string looks like it contains Gutenberg/Divi 5 block markup.
+ *
+ * @param  mixed $content
+ * @return bool
+ */
+function claude_has_blocks( $content ) {
+    return is_string( $content ) && false !== strpos( $content, '<!-- wp:' );
+}
+
+/**
+ * True if a string looks like Divi 5 block markup specifically.
+ *
+ * @param  mixed $content
+ * @return bool
+ */
+function claude_has_divi5_blocks( $content ) {
+    return is_string( $content ) && false !== strpos( $content, '<!-- wp:divi/' );
+}
+
+/**
+ * Re-read a post after writing and confirm its block delimiters survived.
+ *
+ * Guards against the kses regression described in claude_assume_user(). Cheap
+ * enough to run on every content write, and it turns what used to be silent
+ * corruption into a loud error.
+ *
+ * @param  int $post_id
+ * @return WP_Error|null
+ */
+function claude_assert_blocks_survived( $post_id ) {
+    $written = get_post_field( 'post_content', $post_id );
+
+    if ( is_string( $written ) && false !== strpos( $written, '&lt;!-- wp:' ) ) {
+        return new WP_Error(
+            'block_corruption_detected',
+            'Block delimiters were HTML-escaped during the write, so the builder '
+            . 'can no longer parse this layout. The request is running without '
+            . 'the unfiltered_html capability. Check the account configured in '
+            . 'Settings > Claude Connector.',
+            array( 'status' => 500, 'post_id' => $post_id )
+        );
+    }
+
+    return null;
+}
+
+/**
+ * Apply the postmeta a Divi 5 page needs to render through the builder.
+ *
+ * @param  int  $post_id
+ * @param  bool $force  Overwrite existing layout choices. Defaults to false so
+ *                      an editor's own settings on an existing page survive.
+ * @return array        The meta keys that were written.
+ */
+function claude_divi5_apply_meta( $post_id, $force = false ) {
+    $written = array();
+
+    foreach ( CLAUDE_DIVI5_META as $key => $value ) {
+        // _et_pb_use_builder is load-bearing, so always assert it. The layout
+        // defaults are only filled in when absent.
+        $always = ( '_et_pb_use_builder' === $key || '_et_pb_use_divi_5' === $key );
+
+        if ( $force || $always || '' === (string) get_post_meta( $post_id, $key, true ) ) {
+            update_post_meta( $post_id, $key, $value );
+            $written[] = $key;
+        }
+    }
+
+    if ( defined( 'ET_BUILDER_PRODUCT_VERSION' ) ) {
+        update_post_meta( $post_id, '_et_builder_version', ET_BUILDER_PRODUCT_VERSION );
+        $written[] = '_et_builder_version';
+    }
+
+    return $written;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -278,6 +456,7 @@ function claude_settings_page() {
         update_option( 'claude_connector_logging', isset( $_POST['claude_logging_enabled'] ) ? 1 : 0, false );
         $custom_wp = sanitize_text_field( wp_unslash( $_POST['claude_wpcli_path'] ?? '' ) );
         update_option( 'claude_wpcli_path', $custom_wp, false );
+        update_option( 'claude_connector_user_id', (int) ( $_POST['claude_connector_user_id'] ?? 0 ), false );
         echo '<div class="notice notice-success"><p><strong>Settings saved.</strong></p></div>';
     }
 
@@ -290,6 +469,23 @@ function claude_settings_page() {
     }
 
     $logging_enabled = (bool) get_option( 'claude_connector_logging', 1 );
+    $acting_user_id  = (int) get_option( 'claude_connector_user_id', 0 );
+
+    // Resolve the account the connector will actually act as, and surface a
+    // capability problem here rather than letting it silently corrupt builder
+    // content on the next write. See claude_assume_user().
+    $acting_user = $acting_user_id ? get_userdata( $acting_user_id ) : null;
+    if ( ! $acting_user ) {
+        $fallback    = get_users( array( 'role' => 'administrator', 'number' => 1, 'orderby' => 'ID', 'order' => 'ASC' ) );
+        $acting_user = $fallback ? $fallback[0] : null;
+    }
+    if ( $acting_user && ! user_can( $acting_user, 'unfiltered_html' ) ) {
+        echo '<div class="notice notice-error"><p><strong>Warning:</strong> the account the connector acts as ('
+            . esc_html( $acting_user->user_login )
+            . ') does not have the <code>unfiltered_html</code> capability. Gutenberg and Divi block '
+            . 'delimiters will be HTML-escaped when content is written, which destroys builder layouts. '
+            . 'Pick an administrator account in the settings below.</p></div>';
+    }
 
     $key        = claude_get_api_key();
     $base_url   = rest_url( CLAUDE_CONNECTOR_NS );
@@ -297,7 +493,13 @@ function claude_settings_page() {
     $last_access = $wpdb->get_row( "SELECT * FROM {$wpdb->prefix}claude_log ORDER BY id DESC LIMIT 1", ARRAY_A );
 
     $endpoints = array(
-        array( 'GET',    '/status',                   'Site info, WP/PHP version, active theme & plugins' ),
+        array( 'GET',    '/status',                   'Site info, WP/PHP version, active theme & plugins, acting-as user' ),
+        array( 'GET',    '/render',                   'Fetch a page server-side and summarise its rendered health' ),
+        array( 'GET',    '/blocks/validate/{id}',     'Check block markup for escaped delimiters / bad attribute JSON' ),
+        array( 'GET',    '/divi/audit',               'Find Divi pages with missing builder meta or mismatched CSS indices' ),
+        array( 'POST',   '/divi/resave',              'Re-save builder posts so Divi regenerates its CSS cleanly' ),
+        array( 'POST',   '/divi/meta/{id}',           'Repair Divi builder postmeta on an existing page' ),
+        array( 'POST',   '/files/fetch',              'Download a URL straight into wp-content, server-side' ),
         array( 'GET',    '/acf/groups',               'List ACF/SCF field groups and sync status' ),
         array( 'POST',   '/acf/sync',                 'Sync field groups from local JSON' ),
         array( 'GET',    '/acf/groups/{key}/export',  'Export a field group with all fields as JSON' ),
@@ -408,6 +610,27 @@ function claude_settings_page() {
         <form method="post">
             <?php wp_nonce_field( 'claude_save_settings' ); ?>
             <table class="form-table" role="presentation">
+                <tr>
+                    <th>Act as user</th>
+                    <td>
+                        <?php
+                        wp_dropdown_users( array(
+                            'name'             => 'claude_connector_user_id',
+                            'selected'         => $acting_user_id,
+                            'show_option_none' => '- lowest-numbered administrator -',
+                            'option_none_value'=> 0,
+                            'role'             => 'administrator',
+                        ) );
+                        ?>
+                        <p class="description">
+                            The account API requests run as. It must be an administrator, because
+                            WordPress escapes Gutenberg and Divi block delimiters for any user without
+                            the <code>unfiltered_html</code> capability - which silently destroys
+                            builder layouts on write. This also sets the author of posts the connector
+                            creates, and is what appears in the access log.
+                        </p>
+                    </td>
+                </tr>
                 <tr>
                     <th>WP-CLI Path</th>
                     <td>
@@ -543,6 +766,21 @@ add_action( 'rest_api_init', function () {
         array( 'methods' => 'GET',  'callback' => 'claude_acf_options_get', 'permission_callback' => $a ),
         array( 'methods' => 'POST', 'callback' => 'claude_acf_options_set', 'permission_callback' => $a ),
     ) );
+    register_rest_route( $ns, '/elementor/widgets',              array( 'methods' => 'GET',  'callback' => 'claude_elementor_widgets', 'permission_callback' => $a ) );
+    register_rest_route( $ns, '/elementor/data/(?P<id>\d+)',     array(
+        array( 'methods' => 'GET',  'callback' => 'claude_elementor_data_get', 'permission_callback' => $a ),
+        array( 'methods' => 'POST', 'callback' => 'claude_elementor_data_set', 'permission_callback' => $a ),
+    ) );
+    register_rest_route( $ns, '/divi/modules',                   array( 'methods' => 'GET',  'callback' => 'claude_divi_modules',  'permission_callback' => $a ) );
+    register_rest_route( $ns, '/divi/data/(?P<id>\d+)',          array(
+        array( 'methods' => 'GET',  'callback' => 'claude_divi_data_get', 'permission_callback' => $a ),
+        array( 'methods' => 'POST', 'callback' => 'claude_divi_data_set', 'permission_callback' => $a ),
+    ) );
+    register_rest_route( $ns, '/divi/audit',                     array( 'methods' => 'GET',  'callback' => 'claude_divi_audit',    'permission_callback' => $a ) );
+    register_rest_route( $ns, '/divi/resave',                    array( 'methods' => 'POST', 'callback' => 'claude_divi_resave',   'permission_callback' => $a ) );
+    register_rest_route( $ns, '/divi/meta/(?P<id>\d+)',          array( 'methods' => 'POST', 'callback' => 'claude_divi_meta_set', 'permission_callback' => $a ) );
+    register_rest_route( $ns, '/render',                         array( 'methods' => 'GET',  'callback' => 'claude_page_render',   'permission_callback' => $a ) );
+    register_rest_route( $ns, '/blocks/validate/(?P<id>\d+)',    array( 'methods' => 'GET',  'callback' => 'claude_blocks_validate', 'permission_callback' => $a ) );
     register_rest_route( $ns, '/cache/purge',                    array( 'methods' => 'POST', 'callback' => 'claude_cache_purge',      'permission_callback' => $a ) );
     register_rest_route( $ns, '/posts',              array(
         array( 'methods' => 'GET',  'callback' => 'claude_posts_list',   'permission_callback' => $a ),
@@ -571,6 +809,7 @@ add_action( 'rest_api_init', function () {
         array( 'methods' => 'DELETE', 'callback' => 'claude_files_delete', 'permission_callback' => $a ),
     ) );
     register_rest_route( $ns, '/files/read',   array( 'methods' => 'GET',  'callback' => 'claude_files_read',   'permission_callback' => $a ) );
+    register_rest_route( $ns, '/files/fetch',  array( 'methods' => 'POST', 'callback' => 'claude_files_fetch',  'permission_callback' => $a ) );
     register_rest_route( $ns, '/files/stage',  array( 'methods' => 'POST', 'callback' => 'claude_files_stage',  'permission_callback' => $a ) );
     register_rest_route( $ns, '/files/commit', array( 'methods' => 'POST', 'callback' => 'claude_files_commit', 'permission_callback' => $a ) );
     register_rest_route( $ns, '/db/tables',    array( 'methods' => 'GET',  'callback' => 'claude_db_tables',    'permission_callback' => $a ) );
@@ -616,6 +855,23 @@ function claude_status() {
         'is_multisite'   => is_multisite(),
         'timezone'       => wp_timezone_string(),
         'endpoints'      => rest_url( CLAUDE_CONNECTOR_NS ),
+
+        // Identity of the account the connector acts as. If this is 0 or lacks
+        // unfiltered_html, builder content will be corrupted on write - see
+        // claude_assume_user().
+        'acting_as'      => array(
+            'user_id'         => get_current_user_id(),
+            'login'           => wp_get_current_user()->user_login ?: null,
+            'unfiltered_html' => current_user_can( 'unfiltered_html' ),
+        ),
+
+        // Lets the MCP server detect version skew between itself and the plugin.
+        'builder'        => array(
+            'divi_active'     => claude_divi_active(),
+            'divi_generation' => claude_divi_active() ? claude_divi_generation() : null,
+            'divi_version'    => defined( 'ET_BUILDER_PRODUCT_VERSION' ) ? ET_BUILDER_PRODUCT_VERSION : null,
+            'elementor'       => defined( 'ELEMENTOR_VERSION' ) ? ELEMENTOR_VERSION : null,
+        ),
     ) );
 }
 
@@ -786,10 +1042,887 @@ function claude_acf_options_set( $req ) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+//  Elementor
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /elementor/widgets
+ * Lists registered Elementor widget types with their editable settings schema, so
+ * Claude can build/edit `_elementor_data` trees using this site's real widget and
+ * control names (stock + Pro + third-party addons) instead of guessing.
+ */
+function claude_elementor_widgets() {
+    if ( ! class_exists( '\Elementor\Plugin' ) ) {
+        return new WP_Error( 'elementor_missing', 'Elementor is not active on this site.', array( 'status' => 422 ) );
+    }
+    $widgets = array();
+    foreach ( \Elementor\Plugin::$instance->widgets_manager->get_widget_types() as $name => $widget ) {
+        $controls = array();
+        if ( method_exists( $widget, 'get_controls' ) ) {
+            foreach ( $widget->get_controls() as $control_name => $control ) {
+                if ( ( $control['type'] ?? '' ) === 'section' ) {
+                    continue; // UI grouping marker, not an editable field.
+                }
+                $controls[] = array(
+                    'name'    => $control_name,
+                    'label'   => $control['label'] ?? '',
+                    'type'    => $control['type'] ?? '',
+                    'default' => $control['default'] ?? null,
+                );
+            }
+        }
+        $widgets[] = array(
+            'name'       => $name,
+            'title'      => method_exists( $widget, 'get_title' ) ? $widget->get_title() : $name,
+            'categories' => method_exists( $widget, 'get_categories' ) ? $widget->get_categories() : array(),
+            'controls'   => $controls,
+        );
+    }
+    return new WP_REST_Response( array( 'widgets' => $widgets, 'count' => count( $widgets ) ) );
+}
+
+/**
+ * GET /elementor/data/{id}
+ * Returns the decoded `_elementor_data` elements tree for a post, plus edit-mode
+ * and version meta.
+ */
+function claude_elementor_data_get( $req ) {
+    if ( ! class_exists( '\Elementor\Plugin' ) ) {
+        return new WP_Error( 'elementor_missing', 'Elementor is not active on this site.', array( 'status' => 422 ) );
+    }
+    $post_id = (int) $req['id'];
+    if ( ! get_post( $post_id ) ) {
+        return new WP_Error( 'not_found', 'Post not found.', array( 'status' => 404 ) );
+    }
+    $raw  = get_post_meta( $post_id, '_elementor_data', true );
+    $data = $raw ? json_decode( $raw, true ) : array();
+    return new WP_REST_Response( array(
+        'post_id'   => $post_id,
+        'elements'  => is_array( $data ) ? $data : array(),
+        'edit_mode' => get_post_meta( $post_id, '_elementor_edit_mode', true ),
+        'version'   => get_post_meta( $post_id, '_elementor_version', true ),
+    ) );
+}
+
+/**
+ * Recursively checks an Elementor elements tree and fills in any missing `id`
+ * (Elementor requires a unique id per element; a hand-built tree is likely to
+ * omit or duplicate these). Modifies $elements in place.
+ *
+ * @param array $elements
+ * @return string|null Error message, or null on success.
+ */
+function claude_elementor_normalize_elements( array &$elements ) {
+    foreach ( $elements as &$el ) {
+        if ( ! is_array( $el ) ) {
+            return 'Each element must be an object.';
+        }
+        if ( empty( $el['elType'] ) ) {
+            return 'Each element requires an "elType" (e.g. "section", "column", "widget").';
+        }
+        if ( empty( $el['id'] ) ) {
+            $el['id'] = substr( md5( uniqid( (string) wp_rand(), true ) ), 0, 7 );
+        }
+        if ( ! empty( $el['elements'] ) && is_array( $el['elements'] ) ) {
+            $error = claude_elementor_normalize_elements( $el['elements'] );
+            if ( $error ) {
+                return $error;
+            }
+        }
+    }
+    return null;
+}
+
+/**
+ * POST /elementor/data/{id}
+ * Writes an Elementor elements tree to `_elementor_data` and sets the meta
+ * Elementor needs to render it, then clears the CSS file cache so the change
+ * shows up on the frontend without a manual "regenerate CSS".
+ * Body: { "elements": [ { "id": "...", "elType": "section", "elements": [...] }, ... ] }
+ * `id` may be omitted - missing ids are generated automatically.
+ */
+function claude_elementor_data_set( $req ) {
+    if ( ! class_exists( '\Elementor\Plugin' ) ) {
+        return new WP_Error( 'elementor_missing', 'Elementor is not active on this site.', array( 'status' => 422 ) );
+    }
+    $post_id = (int) $req['id'];
+    if ( ! get_post( $post_id ) ) {
+        return new WP_Error( 'not_found', 'Post not found.', array( 'status' => 404 ) );
+    }
+    $body     = (array) $req->get_json_params();
+    $elements = $body['elements'] ?? null;
+    if ( ! is_array( $elements ) ) {
+        return new WP_Error( 'missing', 'Body must include "elements" as an array.', array( 'status' => 400 ) );
+    }
+    $error = claude_elementor_normalize_elements( $elements );
+    if ( $error ) {
+        return new WP_Error( 'invalid_elements', $error, array( 'status' => 400 ) );
+    }
+    // wp_slash() here counteracts update_metadata()'s internal wp_unslash() call, which
+    // would otherwise mangle backslash-escaped sequences inside the JSON (e.g. \" or \n)
+    // before it's stored - the same pattern Elementor's own Document::save() uses.
+    update_post_meta( $post_id, '_elementor_data', wp_slash( wp_json_encode( $elements ) ) );
+    update_post_meta( $post_id, '_elementor_edit_mode', 'builder' );
+    update_post_meta( $post_id, '_elementor_template_type', 'wp-post' );
+    if ( defined( 'ELEMENTOR_VERSION' ) ) {
+        update_post_meta( $post_id, '_elementor_version', ELEMENTOR_VERSION );
+    }
+    if ( isset( \Elementor\Plugin::$instance->files_manager )
+        && method_exists( \Elementor\Plugin::$instance->files_manager, 'clear_cache' ) ) {
+        \Elementor\Plugin::$instance->files_manager->clear_cache();
+    }
+    return new WP_REST_Response( array( 'post_id' => $post_id, 'elements' => count( $elements ) ) );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+//  Divi
+// ──────────────────────────────────────────────────────────────────────────────
+//
+// Divi has two generations with different content formats: classic Divi (D4)
+// stores nested shortcodes directly in post_content; Divi 5 (D5) introduced a
+// newer structured module model. Detection below is best-effort - it hasn't been
+// verified against a live Divi 5 install, so treat `generation` in responses as
+// informational and confirm against the actual site before relying on it.
+
+// ──────────────────────────────────────────────────────────────────────────────
+//  Rendered-page inspection
+//
+//  Every other endpoint reports database state. Several whole classes of defect
+//  are only visible in the rendered output: kses corruption, a page falling
+//  back to the wrong template, Divi CSS index mismatches, broken heading
+//  structure. This closes that loop server-side, which also avoids the auth and
+//  caching differences you get fetching the URL from a client machine.
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Fetch a URL over loopback HTTP as an anonymous visitor, cache-busted.
+ *
+ * @param  string $url
+ * @return string|WP_Error  Response body.
+ */
+function claude_fetch_rendered( $url ) {
+    if ( ! $url ) {
+        return new WP_Error( 'missing', 'No URL to fetch.', array( 'status' => 400 ) );
+    }
+
+    $res = wp_remote_get( add_query_arg( 'claude_cb', time(), $url ), array(
+        'timeout'    => 30,
+        'sslverify'  => false,   // staging hosts commonly have self-signed certs
+        'cookies'    => array(), // render as a logged-out visitor
+        'user-agent' => 'ClaudeConnector/' . CLAUDE_CONNECTOR_VERSION,
+    ) );
+
+    if ( is_wp_error( $res ) ) {
+        return new WP_Error(
+            'loopback_failed',
+            'Could not fetch the page from the server. The host may block loopback '
+            . 'HTTP requests. Underlying error: ' . $res->get_error_message(),
+            array( 'status' => 502 )
+        );
+    }
+
+    return (string) wp_remote_retrieve_body( $res );
+}
+
+/**
+ * Cheap structural health summary of a rendered page.
+ *
+ * @param  string $html
+ * @return array
+ */
+function claude_render_summary( $html ) {
+    $headings = array();
+    if ( preg_match_all( '/<h([1-6])[^>]*>(.*?)<\/h\1>/is', $html, $m, PREG_SET_ORDER ) ) {
+        foreach ( array_slice( $m, 0, 40 ) as $h ) {
+            $headings[] = 'h' . $h[1] . ': ' . trim( wp_strip_all_tags( $h[2] ) );
+        }
+    }
+
+    return array(
+        'title'            => preg_match( '/<title[^>]*>(.*?)<\/title>/is', $html, $m ) ? trim( wp_strip_all_tags( $m[1] ) ) : null,
+        'meta_description' => preg_match( '/<meta[^>]+name=["\']description["\'][^>]+content=["\'](.*?)["\']/is', $html, $m ) ? $m[1] : null,
+        'h1_count'         => preg_match_all( '/<h1[\s>]/i', $html ),
+        'heading_outline'  => $headings,
+        'sections'         => preg_match_all( '/et_pb_section[\s"\']/', $html ),
+        'images'           => preg_match_all( '/<img[\s]/i', $html ),
+        'images_no_alt'    => preg_match_all( '/<img(?![^>]*\salt=)[^>]*>/i', $html ),
+        'empty_paragraphs' => preg_match_all( '/<p>\s*(?:&nbsp;)?\s*<\/p>/i', $html ),
+        'kses_corruption'  => (bool) preg_match( '/&lt;!--\s*wp:/', $html ),
+        'has_sidebar'      => (bool) preg_match( '/id=["\']sidebar["\']/', $html ),
+        'bytes'            => strlen( $html ),
+    );
+}
+
+/**
+ * GET /render
+ *
+ * Params: id | url, include_html, expect (JSON object of summary assertions).
+ */
+function claude_page_render( $req ) {
+    $id  = (int) ( $req->get_param( 'id' ) ?? 0 );
+    $url = $id ? get_permalink( $id ) : (string) ( $req->get_param( 'url' ) ?? '' );
+
+    if ( $id && ! $url ) {
+        return new WP_Error( 'not_found', 'Post not found, or it has no permalink.', array( 'status' => 404 ) );
+    }
+    if ( ! $url ) {
+        return new WP_Error( 'missing', 'Provide ?id= or ?url=.', array( 'status' => 400 ) );
+    }
+
+    $html = claude_fetch_rendered( $url );
+    if ( is_wp_error( $html ) ) return $html;
+
+    $summary  = claude_render_summary( $html );
+    $response = array(
+        'url'     => $url,
+        'summary' => $summary,
+    );
+
+    // Optional assertions, so a check is one call instead of a fetch plus a read.
+    $expect = $req->get_param( 'expect' );
+    if ( is_string( $expect ) ) {
+        $expect = json_decode( $expect, true );
+    }
+    if ( is_array( $expect ) && $expect ) {
+        $failed = array();
+        foreach ( $expect as $key => $want ) {
+            if ( ! array_key_exists( $key, $summary ) ) {
+                $failed[] = "{$key}: not a known summary field";
+                continue;
+            }
+            $got = $summary[ $key ];
+            // Loose compare so JSON true/false and 1/0 behave sensibly.
+            if ( is_bool( $want ) ? ( (bool) $got !== $want ) : ( (string) $got !== (string) $want ) ) {
+                $failed[] = sprintf(
+                    '%s: expected %s, got %s',
+                    $key,
+                    var_export( $want, true ),
+                    var_export( $got, true )
+                );
+            }
+        }
+        $response['ok']     = empty( $failed );
+        $response['failed'] = $failed;
+    }
+
+    // Full HTML is opt-in: a rendered Divi page is routinely 100KB+ and the
+    // summary usually answers the question on its own.
+    if ( $req->get_param( 'include_html' ) ) {
+        $response['html'] = $html;
+    }
+
+    return new WP_REST_Response( $response );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+//  Block validation
+//
+//  Divi 5 stores module attributes as JSON inside HTML comments, so a single
+//  unbalanced brace corrupts a page with no parse error - the module just
+//  renders with defaults. These checks catch that class of damage cheaply, and
+//  run automatically on every content write.
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Inspect a post's block markup and report anything malformed.
+ *
+ * @param  int $post_id
+ * @return array|WP_Error
+ */
+function claude_blocks_report( $post_id ) {
+    $content = get_post_field( 'post_content', $post_id );
+    if ( ! is_string( $content ) ) {
+        return new WP_Error( 'not_found', 'Post not found.', array( 'status' => 404 ) );
+    }
+
+    $issues = array();
+
+    if ( false !== strpos( $content, '&lt;!-- wp:' ) ) {
+        $issues[] = array(
+            'type'  => 'kses_corruption',
+            'fatal' => true,
+            'hint'  => 'Block delimiters were HTML-escaped on write. See claude_assume_user().',
+        );
+    }
+
+    $blocks = parse_blocks( $content );
+
+    // Validate each block's attribute JSON directly.
+    //
+    // parse_blocks() silently sets attrs to null when the JSON is malformed, so
+    // a single unbalanced brace produces a module that renders with defaults and
+    // reports nothing. Checking the JSON is exact; comparing
+    // serialize_blocks(parse_blocks($c)) against $c is NOT a valid test, because
+    // serialize_block_attributes() deliberately re-encodes the JSON - it escapes
+    // "<" and "--" to their unicode forms so the result is safe inside an HTML
+    // comment - which means perfectly valid content fails a round-trip
+    // comparison. That check produced false positives and has been removed.
+    if ( preg_match_all( '/<!--\s+wp:([a-z0-9\/-]+)\s+(\{.*?\})\s*\/?-->/is', $content, $m, PREG_SET_ORDER ) ) {
+        foreach ( $m as $i => $match ) {
+            json_decode( $match[2], true );
+            if ( JSON_ERROR_NONE !== json_last_error() ) {
+                $issues[] = array(
+                    'type'    => 'invalid_attribute_json',
+                    'block'   => $match[1],
+                    'index'   => $i,
+                    'error'   => json_last_error_msg(),
+                    'excerpt' => substr( $match[2], 0, 200 ),
+                );
+            }
+        }
+    }
+
+    // Delimiter balance, counted directly - a truncated write can leave an
+    // opener without its closer, which parse_blocks() silently tolerates.
+    $opens      = preg_match_all( '/<!--\s+wp:[a-z0-9\/-]+/i', $content );
+    $closes     = preg_match_all( '/<!--\s+\/wp:[a-z0-9\/-]+/i', $content );
+    $selfclose  = preg_match_all( '/<!--\s+wp:[a-z0-9\/-]+(?:\s+\{.*?\})?\s+\/-->/is', $content );
+    if ( ( $opens - $selfclose ) !== $closes ) {
+        $issues[] = array(
+            'type'        => 'delimiter_imbalance',
+            'open'        => $opens,
+            'close'       => $closes,
+            'self_closing'=> $selfclose,
+            'hint'        => 'Unclosed block. Expected open-minus-self-closing to equal close.',
+        );
+    }
+
+    $counts = array();
+    $walk   = function ( $bs, $path ) use ( &$walk, &$issues, &$counts ) {
+        foreach ( $bs as $i => $b ) {
+            $name = $b['blockName'];
+
+            if ( null === $name ) {
+                if ( '' !== trim( (string) $b['innerHTML'] ) ) {
+                    $issues[] = array(
+                        'type'    => 'unparsed_or_freeform',
+                        'path'    => $path . '/' . $i,
+                        'excerpt' => substr( trim( (string) $b['innerHTML'] ), 0, 160 ),
+                    );
+                }
+            } else {
+                $counts[ $name ] = ( $counts[ $name ] ?? 0 ) + 1;
+            }
+
+            if ( ! empty( $b['innerBlocks'] ) ) {
+                $walk( $b['innerBlocks'], $path . '/' . $i );
+            }
+        }
+    };
+    $walk( $blocks, '' );
+
+    ksort( $counts );
+
+    return array(
+        'post_id'      => (int) $post_id,
+        'valid'        => empty( $issues ),
+        'block_counts' => $counts,
+        'top_level'    => count( $blocks ),
+        'bytes'        => strlen( $content ),
+        'issues'       => $issues,
+    );
+}
+
+/**
+ * GET /blocks/validate/{id}
+ */
+function claude_blocks_validate( $req ) {
+    $report = claude_blocks_report( (int) $req['id'] );
+    if ( is_wp_error( $report ) ) return $report;
+    return new WP_REST_Response( $report );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+//  Divi
+// ──────────────────────────────────────────────────────────────────────────────
+
+function claude_divi_active() {
+    return class_exists( 'ET_Builder_Element' ) || defined( 'ET_CORE_VERSION' ) || function_exists( 'et_setup_theme' );
+}
+
+function claude_divi_generation() {
+    if ( defined( 'ET_BUILDER_PRODUCT_VERSION' ) && version_compare( ET_BUILDER_PRODUCT_VERSION, '5.0', '>=' ) ) {
+        return 'd5_json';
+    }
+    return 'd4_shortcode';
+}
+
+/**
+ * GET /divi/modules
+ * Lists known Divi module types. Full dynamic schema discovery (field names,
+ * style groups) is only wired up for classic Divi's ET_Builder_Element registry;
+ * Divi 5's module schema needs confirming against a live D5 site.
+ */
+function claude_divi_modules() {
+    if ( ! claude_divi_active() ) {
+        return new WP_Error( 'divi_missing', 'Divi is not active on this site.', array( 'status' => 422 ) );
+    }
+    $generation = claude_divi_generation();
+    if ( $generation === 'd4_shortcode' && class_exists( 'ET_Builder_Element' ) && method_exists( 'ET_Builder_Element', 'get_modules' ) ) {
+        $modules = array();
+        foreach ( ET_Builder_Element::get_modules() as $slug => $module ) {
+            $modules[] = array(
+                'slug' => $slug,
+                'name' => method_exists( $module, 'get_name' ) ? $module->get_name() : $slug,
+            );
+        }
+        return new WP_REST_Response( array( 'generation' => $generation, 'modules' => $modules ) );
+    }
+    return new WP_REST_Response( array(
+        'generation' => $generation,
+        'modules'    => array(),
+        'note'       => 'Dynamic module schema discovery for this Divi generation is not implemented yet - needs verifying against a live site running it.',
+    ) );
+}
+
+/**
+ * GET /divi/data/{id}
+ * Returns the current builder content (post_content) plus Divi meta for a post.
+ */
+function claude_divi_data_get( $req ) {
+    if ( ! claude_divi_active() ) {
+        return new WP_Error( 'divi_missing', 'Divi is not active on this site.', array( 'status' => 422 ) );
+    }
+    $post_id = (int) $req['id'];
+    $post    = get_post( $post_id );
+    if ( ! $post ) {
+        return new WP_Error( 'not_found', 'Post not found.', array( 'status' => 404 ) );
+    }
+    return new WP_REST_Response( array(
+        'post_id'         => $post_id,
+        'generation'      => claude_divi_generation(),
+        'use_builder'     => get_post_meta( $post_id, '_et_pb_use_builder', true ),
+        'builder_version' => get_post_meta( $post_id, '_et_builder_version', true ),
+        'content'         => $post->post_content,
+    ) );
+}
+
+/**
+ * POST /divi/data/{id}
+ * Writes builder content for a post. `content` is opaque from the API's point of
+ * view - the caller is responsible for sending the right shape for this site's
+ * Divi generation (shortcode markup for D4, module JSON for D5).
+ * Body: { "content": "..." }
+ */
+function claude_divi_data_set( $req ) {
+    if ( ! claude_divi_active() ) {
+        return new WP_Error( 'divi_missing', 'Divi is not active on this site.', array( 'status' => 422 ) );
+    }
+    $post_id = (int) $req['id'];
+    if ( ! get_post( $post_id ) ) {
+        return new WP_Error( 'not_found', 'Post not found.', array( 'status' => 404 ) );
+    }
+    $body    = (array) $req->get_json_params();
+    $content = $body['content'] ?? null;
+    if ( ! is_string( $content ) || $content === '' ) {
+        return new WP_Error( 'missing', 'Body must include "content" as a non-empty string.', array( 'status' => 400 ) );
+    }
+    // wp_update_post() expects pre-slashed input - see claude_posts_create().
+    wp_update_post( wp_slash( array( 'ID' => $post_id, 'post_content' => $content ) ) );
+
+    $generation = claude_divi_generation();
+
+    if ( 'd5_json' === $generation ) {
+        // Divi 5 needs the full meta set, not just _et_pb_use_builder, or the
+        // page renders on the theme's default template with a widget sidebar.
+        $meta_written = claude_divi5_apply_meta( $post_id, (bool) ( $body['force_meta'] ?? false ) );
+    } else {
+        update_post_meta( $post_id, '_et_pb_use_builder', 'on' );
+        $meta_written = array( '_et_pb_use_builder' );
+        if ( defined( 'ET_BUILDER_PRODUCT_VERSION' ) ) {
+            update_post_meta( $post_id, '_et_builder_version', ET_BUILDER_PRODUCT_VERSION );
+            $meta_written[] = '_et_builder_version';
+        }
+    }
+
+    // Fail loudly rather than leaving a corrupted layout behind.
+    if ( claude_has_blocks( $content ) ) {
+        if ( $err = claude_assert_blocks_survived( $post_id ) ) return $err;
+    }
+
+    $response = array(
+        'post_id'      => $post_id,
+        'generation'   => $generation,
+        'meta_written' => $meta_written,
+    );
+
+    if ( claude_has_blocks( $content ) ) {
+        $report = claude_blocks_report( $post_id );
+        if ( ! is_wp_error( $report ) ) $response['blocks'] = $report;
+    }
+
+    // Divi regenerates per-post CSS on save. Invalidate the caches that a
+    // direct write leaves stale, unless the caller opts out.
+    if ( empty( $body['skip_cache_flush'] ) ) {
+        claude_divi_flush_post( $post_id );
+        $response['cache_flushed'] = true;
+    }
+
+    return new WP_REST_Response( $response );
+}
+
+/**
+ * Invalidate Divi's cached CSS for one post.
+ *
+ * Divi caches per-post CSS in wp-content/et-cache/<id>/ and in
+ * _divi_dynamic_assets_cached_* postmeta. Neither is invalidated by a direct
+ * SQL or wp_update_post() write, so the page keeps serving stale styles and you
+ * conclude your edit did not work.
+ *
+ * @param int $post_id
+ */
+function claude_divi_flush_post( $post_id ) {
+    global $wpdb;
+
+    $wpdb->query( $wpdb->prepare(
+        "DELETE FROM {$wpdb->postmeta}
+         WHERE post_id = %d AND meta_key LIKE %s",
+        $post_id,
+        '_divi_dynamic_assets_cached%'
+    ) );
+
+    if ( class_exists( 'ET_Core_PageResource' ) && method_exists( 'ET_Core_PageResource', 'remove_static_resources' ) ) {
+        ET_Core_PageResource::remove_static_resources( $post_id, 'all' );
+    }
+}
+
+/**
+ * Divi's internal builder post types - Theme Builder templates, the library,
+ * and its prerender/speculation helper posts.
+ *
+ * These hold builder markup but are not pages: they have no public permalink
+ * and page-level layout meta (_et_pb_page_layout, _et_pb_side_nav) does not
+ * apply to them, so auditing them produces nothing but false positives.
+ */
+function claude_divi_internal_post_types() {
+    return array(
+        'et_header_layout', 'et_body_layout', 'et_footer_layout',
+        'et_theme_builder_layout', 'et_template', 'et_pb_layout',
+        '_et_pb_speculation',
+    );
+}
+
+/**
+ * Every published post whose content is Divi builder markup, either generation.
+ *
+ * @param  bool $include_internal  Also return Theme Builder templates and the
+ *                                 library. Useful for a CSS-regenerating
+ *                                 re-save, wrong for an audit.
+ * @return int[]
+ */
+function claude_divi_builder_post_ids( $include_internal = false ) {
+    global $wpdb;
+
+    $types = array_values( get_post_types( array( 'public' => true ) ) );
+    $types = array_diff( $types, array( 'attachment' ) );
+
+    if ( $include_internal ) {
+        $types = array_merge( $types, claude_divi_internal_post_types() );
+    }
+    $types = array_values( array_unique( $types ) );
+    if ( ! $types ) return array();
+
+    $placeholders = implode( ', ', array_fill( 0, count( $types ), '%s' ) );
+
+    $sql = $wpdb->prepare(
+        "SELECT ID FROM {$wpdb->posts}
+         WHERE post_status = 'publish'
+           AND post_type IN ( {$placeholders} )
+           AND ( post_content LIKE %s OR post_content LIKE %s )
+         ORDER BY ID ASC",
+        array_merge( $types, array( '%<!-- wp:divi/%', '%[et_pb_section%' ) )
+    ); // phpcs:ignore
+
+    return array_map( 'intval', $wpdb->get_col( $sql ) ); // phpcs:ignore
+}
+
+/**
+ * GET /divi/audit
+ *
+ * Two checks that between them cover the failure modes that are invisible from
+ * the database:
+ *
+ *   1. Builder content with missing postmeta - the page renders on the theme's
+ *      default template (widget sidebar, duplicated title) even though
+ *      post_content is correct.
+ *
+ *   2. Divi's generated per-module CSS not matching the rendered markup.
+ *      Installing or updating a plugin invalidates Divi's caches, and the
+ *      regeneration can emit selectors whose indices are offset by the page's
+ *      own module count - the stylesheet targets .et_pb_text_0 while the markup
+ *      renders .et_pb_text_12. The result is that no Divi-attribute styling
+ *      applies anywhere on the site, with nothing wrong in the database.
+ *      The remedy is POST /divi/resave.
+ */
+function claude_divi_audit( $req ) {
+    if ( ! claude_divi_active() ) {
+        return new WP_Error( 'divi_missing', 'Divi is not active on this site.', array( 'status' => 422 ) );
+    }
+
+    $generation = claude_divi_generation();
+    $ids        = claude_divi_builder_post_ids();
+
+    // ---- 1. missing builder meta -------------------------------------------
+    //
+    // Only two of the five keys actually break a page when absent. Divi falls
+    // back to sensible defaults for the three layout keys, so reporting those
+    // at the same severity produces noise on pages that render perfectly well.
+    $critical = ( 'd5_json' === $generation )
+        ? array( '_et_pb_use_builder', '_et_pb_use_divi_5' )
+        : array( '_et_pb_use_builder' );
+
+    $advisory = array_values( array_diff( array_keys( CLAUDE_DIVI5_META ), $critical ) );
+
+    $missing_meta  = array();
+    $advisory_meta = array();
+
+    foreach ( $ids as $id ) {
+        $absent_critical = array();
+        foreach ( $critical as $key ) {
+            if ( '' === (string) get_post_meta( $id, $key, true ) ) {
+                $absent_critical[] = $key;
+            }
+        }
+        if ( $absent_critical ) {
+            $missing_meta[] = array(
+                'post_id' => $id,
+                'slug'    => get_post_field( 'post_name', $id ),
+                'missing' => $absent_critical,
+                'effect'  => 'Renders on the theme default template instead of the builder layout.',
+            );
+            continue;
+        }
+
+        if ( 'd5_json' !== $generation ) continue;
+
+        $absent_advisory = array();
+        foreach ( $advisory as $key ) {
+            if ( '' === (string) get_post_meta( $id, $key, true ) ) {
+                $absent_advisory[] = $key;
+            }
+        }
+        if ( $absent_advisory ) {
+            $advisory_meta[] = array(
+                'post_id' => $id,
+                'slug'    => get_post_field( 'post_name', $id ),
+                'missing' => $absent_advisory,
+            );
+        }
+    }
+
+    // ---- 2. CSS index check on a sample ------------------------------------
+    $sample_size = max( 0, min( 25, (int) ( $req->get_param( 'css_sample' ) ?? 5 ) ) );
+    $css_checked = array();
+
+    foreach ( array_slice( $ids, 0, $sample_size ) as $id ) {
+        $check = claude_divi_css_index_check( $id );
+        if ( ! is_wp_error( $check ) ) {
+            $css_checked[] = $check;
+        }
+    }
+
+    $css_mismatched = array_values( array_filter( $css_checked, function ( $c ) {
+        return ! $c['ok'];
+    } ) );
+
+    return new WP_REST_Response( array(
+        'generation'         => $generation,
+        'builder_posts'      => count( $ids ),
+        'critical_meta'      => $critical,
+        'missing_meta'       => $missing_meta,
+        'missing_meta_count' => count( $missing_meta ),
+        // Absent layout defaults. Harmless on their own - listed so you can
+        // normalise them if you want to, not because anything is broken.
+        'advisory_meta'      => $advisory_meta,
+        'advisory_count'     => count( $advisory_meta ),
+        'css_checked'        => $css_checked,
+        'css_mismatched'     => $css_mismatched,
+        'healthy'            => empty( $missing_meta ) && empty( $css_mismatched ),
+        'remedy'             => ( $missing_meta || $css_mismatched )
+            ? 'POST /divi/resave re-saves every builder post, which rewrites the '
+              . 'builder meta and forces Divi to regenerate its CSS cleanly.'
+            : null,
+    ) );
+}
+
+/**
+ * Compare the module indices in Divi's generated CSS for one post against the
+ * indices actually present in its rendered markup.
+ *
+ * @param  int $post_id
+ * @return array|WP_Error
+ */
+function claude_divi_css_index_check( $post_id ) {
+    $html = claude_fetch_rendered( get_permalink( $post_id ) );
+    if ( is_wp_error( $html ) ) return $html;
+
+    // Classes present in the markup.
+    $in_markup = array();
+    if ( preg_match_all( '/class=["\']([^"\']*)["\']/', $html, $m ) ) {
+        foreach ( $m[1] as $attr ) {
+            foreach ( preg_split( '/\s+/', $attr ) as $cls ) {
+                if ( preg_match( '/^et_pb_[a-z0-9_]+_\d+$/', $cls ) ) {
+                    $in_markup[ $cls ] = true;
+                }
+            }
+        }
+    }
+
+    // Selectors Divi emitted, from inline <style> blocks plus its own
+    // stylesheets. Only Divi's own CSS is considered - a theme or plugin may
+    // legitimately reference indices that are not on this page.
+    $css = '';
+    if ( preg_match_all( '/<style[^>]*>(.*?)<\/style>/is', $html, $m ) ) {
+        $css .= implode( "\n", $m[1] );
+    }
+    if ( preg_match_all( '/<link[^>]+href=["\']([^"\']*(?:et-cache|et-core|et-divi|et_builder)[^"\']*)["\']/i', $html, $m ) ) {
+        foreach ( array_slice( array_unique( $m[1] ), 0, 6 ) as $href ) {
+            $sheet = wp_remote_get( $href, array( 'timeout' => 15, 'sslverify' => false ) );
+            if ( ! is_wp_error( $sheet ) ) {
+                $css .= "\n" . wp_remote_retrieve_body( $sheet );
+            }
+        }
+    }
+
+    $in_css = array();
+    if ( preg_match_all( '/\.(et_pb_[a-z0-9_]+_\d+)/', $css, $m ) ) {
+        foreach ( $m[1] as $cls ) {
+            $in_css[ $cls ] = true;
+        }
+    }
+
+    // Group both sides into module-type => set-of-indices.
+    //
+    // A plain "selector in CSS but not in markup" test is far too noisy to be
+    // useful: Divi's global stylesheet carries column-fraction utility classes
+    // (et_pb_column_1_2, et_pb_column_2_3, ...) and rules for modules used
+    // elsewhere on the site, none of which appear in this page's markup.
+    //
+    // The offset bug has a much more specific fingerprint. For a given module
+    // type the two index sets become entirely DISJOINT - the CSS styles
+    // et_pb_text_0..11 while the markup rendered et_pb_text_12..23. Normal
+    // pages always overlap. So only flag a module type that is present in the
+    // markup, has CSS rules, and shares not a single index with them.
+    $split = function ( $classes ) {
+        $out = array();
+        foreach ( array_keys( $classes ) as $cls ) {
+            $pos = strrpos( $cls, '_' );
+            if ( false === $pos ) continue;
+            $type  = substr( $cls, 0, $pos );
+            $index = substr( $cls, $pos + 1 );
+            if ( ! is_numeric( $index ) ) continue;
+            $out[ $type ][ (int) $index ] = true;
+        }
+        return $out;
+    };
+
+    $css_types    = $split( $in_css );
+    $markup_types = $split( $in_markup );
+
+    $mismatches = array();
+    foreach ( $markup_types as $type => $markup_idx ) {
+        if ( empty( $css_types[ $type ] ) ) {
+            continue; // module type present but unstyled - not a mismatch
+        }
+        $css_idx = $css_types[ $type ];
+        if ( array_intersect_key( $css_idx, $markup_idx ) ) {
+            continue; // indices overlap - healthy
+        }
+        $mismatches[] = array(
+            'module'        => $type,
+            'css_indices'   => array_slice( array_keys( $css_idx ), 0, 12 ),
+            'markup_indices'=> array_slice( array_keys( $markup_idx ), 0, 12 ),
+        );
+    }
+
+    return array(
+        'post_id'           => (int) $post_id,
+        'slug'              => get_post_field( 'post_name', $post_id ),
+        'markup_selectors'  => count( $in_markup ),
+        'css_selectors'     => count( $in_css ),
+        'module_types'      => count( $markup_types ),
+        'mismatched_modules'=> $mismatches,
+        'ok'                => empty( $mismatches ),
+    );
+}
+
+/**
+ * POST /divi/meta/{id}
+ *
+ * Applies the builder postmeta to an existing post without touching its
+ * content. Use this to repair a page that was created through a route which did
+ * not set it, and is therefore rendering on the theme's default template.
+ *
+ * Body: { "force": true }  - also overwrite existing layout choices.
+ */
+function claude_divi_meta_set( $req ) {
+    if ( ! claude_divi_active() ) {
+        return new WP_Error( 'divi_missing', 'Divi is not active on this site.', array( 'status' => 422 ) );
+    }
+    $post_id = (int) $req['id'];
+    if ( ! get_post( $post_id ) ) {
+        return new WP_Error( 'not_found', 'Post not found.', array( 'status' => 404 ) );
+    }
+
+    $body    = (array) $req->get_json_params();
+    $written = claude_divi5_apply_meta( $post_id, (bool) ( $body['force'] ?? false ) );
+
+    claude_divi_flush_post( $post_id );
+    wp_update_post( array( 'ID' => $post_id ) );   // regenerate CSS with the new template
+
+    return new WP_REST_Response( array(
+        'post_id'      => $post_id,
+        'generation'   => claude_divi_generation(),
+        'meta_written' => $written,
+        'meta'         => array_map(
+            function ( $k ) use ( $post_id ) { return get_post_meta( $post_id, $k, true ); },
+            array_combine( array_keys( CLAUDE_DIVI5_META ), array_keys( CLAUDE_DIVI5_META ) )
+        ),
+    ) );
+}
+
+/**
+ * POST /divi/resave
+ *
+ * Re-saves builder posts so Divi regenerates their CSS. This is the standing
+ * remedy for the module-index mismatch described in claude_divi_audit(), and
+ * the required follow-up after editing post_content with raw SQL.
+ *
+ * Body: { "ids": [1,2,3] }  - omit to re-save every builder post.
+ */
+function claude_divi_resave( $req ) {
+    if ( ! claude_divi_active() ) {
+        return new WP_Error( 'divi_missing', 'Divi is not active on this site.', array( 'status' => 422 ) );
+    }
+
+    $body = (array) $req->get_json_params();
+    // Re-saving the Theme Builder templates too is harmless and regenerates
+    // their CSS as well, so the resave path includes them.
+    $ids  = ! empty( $body['ids'] ) && is_array( $body['ids'] )
+        ? array_map( 'intval', $body['ids'] )
+        : claude_divi_builder_post_ids( true );
+
+    $resaved = array();
+    foreach ( $ids as $id ) {
+        if ( ! get_post( $id ) ) continue;
+        claude_divi_flush_post( $id );
+        wp_update_post( array( 'ID' => $id ) );   // triggers CSS regeneration
+        $resaved[] = $id;
+    }
+
+    return new WP_REST_Response( array(
+        'resaved'       => count( $resaved ),
+        'ids'           => $resaved,
+        'next'          => 'Run GET /divi/audit to confirm the CSS indices now match.',
+    ) );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 //  Cache
 // ──────────────────────────────────────────────────────────────────────────────
 
-function claude_cache_purge() {
+function claude_cache_purge( $req = null ) {
+    $opts   = ( $req && method_exists( $req, 'get_json_params' ) ) ? (array) $req->get_json_params() : array();
     $purged = array();
     wp_cache_flush();
     $purged[] = 'wp_object_cache';
@@ -808,6 +1941,41 @@ function claude_cache_purge() {
     if ( function_exists( 'wp_cache_clear_cache' ) ) { wp_cache_clear_cache();    $purged[] = 'wp_super_cache'; }
     if ( function_exists( 'rocket_clean_domain' ) )  { rocket_clean_domain();     $purged[] = 'wp_rocket'; }
     if ( class_exists( 'LiteSpeed_Cache_API' ) )     { LiteSpeed_Cache_API::purge_all(); $purged[] = 'litespeed'; }
+
+    // Page-builder caches. These live outside the object cache and are NOT
+    // invalidated by a raw SQL write, so the page keeps serving stale CSS.
+    if ( ! empty( $opts['builder'] ) ) {
+        global $wpdb;
+
+        if ( class_exists( 'ET_Core_PageResource' ) && method_exists( 'ET_Core_PageResource', 'remove_static_resources' ) ) {
+            ET_Core_PageResource::remove_static_resources( 'all', 'all' );
+            $purged[] = 'divi_static_resources';
+        }
+        if ( function_exists( 'et_core_clear_wp_cache' ) ) {
+            et_core_clear_wp_cache();
+            $purged[] = 'divi_core_cache';
+        }
+        $removed = $wpdb->query(
+            "DELETE FROM {$wpdb->postmeta} WHERE meta_key LIKE '_divi_dynamic_assets_cached%'"
+        );
+        if ( $removed ) $purged[] = 'divi_dynamic_assets_meta:' . (int) $removed;
+
+        if ( class_exists( '\Elementor\Plugin' ) && isset( \Elementor\Plugin::$instance->files_manager ) ) {
+            \Elementor\Plugin::$instance->files_manager->clear_cache();
+            $purged[] = 'elementor_css';
+        }
+    }
+
+    // Clearing the caches is not always enough on Divi: regeneration can emit
+    // module indices that do not match the rendered markup until each post is
+    // re-saved. See claude_divi_audit().
+    if ( ! empty( $opts['resave_builder_posts'] ) && claude_divi_active() ) {
+        $ids = claude_divi_builder_post_ids();
+        foreach ( $ids as $id ) {
+            wp_update_post( array( 'ID' => $id ) );
+        }
+        $purged[] = 'resaved_builder_posts:' . count( $ids );
+    }
 
     return new WP_REST_Response( array( 'purged' => $purged ) );
 }
@@ -882,9 +2050,34 @@ function claude_posts_create( $req ) {
     if ( empty( $data['post_title'] ) && empty( $data['post_content'] ) ) {
         return new WP_Error( 'missing', 'post_title or post_content is required.', array( 'status' => 400 ) );
     }
-    $id = wp_insert_post( $data, true );
+    // wp_insert_post() calls wp_unslash() internally and expects pre-slashed input,
+    // same as update_post_meta() - without this, literal backslashes in content or
+    // meta_input values (Windows paths, regex, escaped quotes) get silently stripped.
+    $id = wp_insert_post( wp_slash( $data ), true );
     if ( is_wp_error( $id ) ) return $id;
-    return new WP_REST_Response( claude_format_post( get_post( $id ) ), 201 );
+
+    $content  = (string) ( $data['post_content'] ?? '' );
+    $response = claude_format_post( get_post( $id ) );
+    $notes    = array();
+
+    if ( claude_has_blocks( $content ) ) {
+        if ( $err = claude_assert_blocks_survived( $id ) ) return $err;
+
+        // A new page carrying Divi 5 blocks needs the builder postmeta or it
+        // renders on the theme's default template instead. Infer it rather than
+        // making the caller remember five meta keys.
+        if ( claude_has_divi5_blocks( $content ) && claude_divi_active() ) {
+            $written = claude_divi5_apply_meta( $id );
+            $notes[] = 'Detected Divi 5 blocks; applied builder postmeta (' . implode( ', ', $written ) . ').';
+        }
+
+        $report = claude_blocks_report( $id );
+        if ( ! is_wp_error( $report ) ) $response['blocks'] = $report;
+    }
+
+    if ( $notes ) $response['notes'] = $notes;
+
+    return new WP_REST_Response( $response, 201 );
 }
 
 function claude_posts_update( $req ) {
@@ -894,9 +2087,30 @@ function claude_posts_update( $req ) {
                          'post_name', 'menu_order', 'page_template', 'comment_status', 'meta_input' );
     $data       = array_intersect_key( (array) $req->get_json_params(), array_flip( $allowed ) );
     $data['ID'] = $post->ID;
-    $id         = wp_update_post( $data, true );
+    // See claude_posts_create() - wp_update_post() expects pre-slashed input too.
+    $id         = wp_update_post( wp_slash( $data ), true );
     if ( is_wp_error( $id ) ) return $id;
-    return new WP_REST_Response( claude_format_post( get_post( $id ) ) );
+
+    $response = claude_format_post( get_post( $id ) );
+    $notes    = array();
+
+    if ( array_key_exists( 'post_content', $data ) && claude_has_blocks( $data['post_content'] ) ) {
+        if ( $err = claude_assert_blocks_survived( $id ) ) return $err;
+
+        if ( claude_has_divi5_blocks( $data['post_content'] ) && claude_divi_active() ) {
+            $written = claude_divi5_apply_meta( $id );
+            if ( $written ) {
+                $notes[] = 'Detected Divi 5 blocks; asserted builder postmeta (' . implode( ', ', $written ) . ').';
+            }
+        }
+
+        $report = claude_blocks_report( $id );
+        if ( ! is_wp_error( $report ) ) $response['blocks'] = $report;
+    }
+
+    if ( $notes ) $response['notes'] = $notes;
+
+    return new WP_REST_Response( $response );
 }
 
 function claude_posts_delete( $req ) {
@@ -921,9 +2135,57 @@ function claude_blocked_options() {
     );
 }
 
+/**
+ * Walk a dotted path into a serialised option value.
+ *
+ * Themes routinely bury dozens of settings inside one serialised array - Divi
+ * keeps divi_integration_head inside et_divi, for example - so a flat
+ * get_option() returns false for the key you actually want, and fetching the
+ * parent means pulling a 12KB blob to read one string.
+ *
+ * @param  mixed    $value
+ * @param  string[] $parts
+ * @return array           { found: bool, value: mixed }
+ */
+function claude_option_walk( $value, $parts ) {
+    foreach ( $parts as $part ) {
+        if ( is_array( $value ) && array_key_exists( $part, $value ) ) {
+            $value = $value[ $part ];
+        } elseif ( is_object( $value ) && isset( $value->$part ) ) {
+            $value = $value->$part;
+        } else {
+            return array( 'found' => false, 'value' => null );
+        }
+    }
+    return array( 'found' => true, 'value' => $value );
+}
+
 function claude_options_get( $req ) {
     $key = sanitize_text_field( (string) $req->get_param( 'key' ) );
-    if ( ! $key ) return new WP_Error( 'missing', 'Provide ?key=option_name.', array( 'status' => 400 ) );
+    if ( ! $key ) return new WP_Error( 'missing', 'Provide ?key=option_name (dotted paths supported, e.g. et_divi.divi_integration_head).', array( 'status' => 400 ) );
+
+    // Dotted path: read a single value out of a serialised option.
+    if ( false !== strpos( $key, '.' ) ) {
+        $parts = explode( '.', $key );
+        $root  = array_shift( $parts );
+
+        // The blocklist has to be enforced on the ROOT key, or it is trivially
+        // bypassed by asking for "auth_key.anything".
+        if ( in_array( $root, claude_blocked_options(), true ) ) {
+            return new WP_Error( 'blocked', "Option '{$root}' is protected and cannot be read via API.", array( 'status' => 403 ) );
+        }
+
+        $walk = claude_option_walk( get_option( $root ), $parts );
+
+        return new WP_REST_Response( array(
+            'key'   => $key,
+            'root'  => $root,
+            'path'  => $parts,
+            'found' => $walk['found'],
+            'value' => $walk['value'],
+        ) );
+    }
+
     if ( in_array( $key, claude_blocked_options(), true ) ) {
         return new WP_Error( 'blocked', "Option '{$key}' is protected and cannot be read via API.", array( 'status' => 403 ) );
     }
@@ -934,7 +2196,48 @@ function claude_options_set( $req ) {
     $body  = (array) $req->get_json_params();
     $key   = sanitize_text_field( (string) ( $body['key'] ?? '' ) );
     $value = $body['value'] ?? null;
-    if ( ! $key ) return new WP_Error( 'missing', 'Body must include "key".', array( 'status' => 400 ) );
+    if ( ! $key ) return new WP_Error( 'missing', 'Body must include "key" (dotted paths supported).', array( 'status' => 400 ) );
+
+    // Dotted path: patch one value inside a serialised option, leaving the rest
+    // of the array untouched.
+    if ( false !== strpos( $key, '.' ) ) {
+        $parts = explode( '.', $key );
+        $root  = array_shift( $parts );
+
+        if ( in_array( $root, claude_blocked_options(), true ) ) {
+            return new WP_Error( 'blocked', "Option '{$root}' is protected and cannot be modified via API.", array( 'status' => 403 ) );
+        }
+
+        $existing = get_option( $root );
+        if ( ! is_array( $existing ) ) {
+            if ( false !== $existing && null !== $existing ) {
+                return new WP_Error(
+                    'not_an_array',
+                    "Option '{$root}' is not an array, so '{$key}' cannot be patched into it.",
+                    array( 'status' => 409 )
+                );
+            }
+            $existing = array();
+        }
+
+        // Build a reference down the path, creating intermediate arrays.
+        $cursor = &$existing;
+        foreach ( $parts as $part ) {
+            if ( ! is_array( $cursor ) ) $cursor = array();
+            if ( ! array_key_exists( $part, $cursor ) ) $cursor[ $part ] = array();
+            $cursor = &$cursor[ $part ];
+        }
+        $cursor = $value;
+        unset( $cursor );
+
+        return new WP_REST_Response( array(
+            'key'     => $key,
+            'root'    => $root,
+            'path'    => $parts,
+            'updated' => update_option( $root, $existing ),
+        ) );
+    }
+
     if ( in_array( $key, claude_blocked_options(), true ) ) {
         return new WP_Error( 'blocked', "Option '{$key}' is protected and cannot be modified via API.", array( 'status' => 403 ) );
     }
@@ -1166,6 +2469,80 @@ function claude_files_write( $req ) {
 }
 
 /**
+ * POST /files/fetch
+ *
+ * Downloads a URL straight to a path inside wp-content, server-side.
+ *
+ * Without this, the only way to get a file onto the server is to send its bytes
+ * as a tool parameter, which means every byte of generated content round-trips
+ * through the model's context - twice, if it was generated locally. On a large
+ * build that is the dominant cost and it scales linearly with page count.
+ *
+ * Body: { url, path, timeout?, max_bytes? }
+ */
+function claude_files_fetch( $req ) {
+    $body = (array) $req->get_json_params();
+    $url  = (string) ( $body['url']  ?? '' );
+    $rel  = (string) ( $body['path'] ?? '' );
+
+    if ( ! $url || ! $rel ) {
+        return new WP_Error( 'missing', 'Body must include "url" and "path".', array( 'status' => 400 ) );
+    }
+    if ( ! wp_http_validate_url( $url ) ) {
+        return new WP_Error( 'invalid_url', 'URL failed validation.', array( 'status' => 400 ) );
+    }
+
+    $path = claude_safe_path( $rel );
+    if ( ! $path ) {
+        return new WP_Error( 'forbidden', 'Path is outside wp-content.', array( 'status' => 403 ) );
+    }
+
+    require_once ABSPATH . 'wp-admin/includes/file.php';
+
+    $tmp = download_url( $url, (int) ( $body['timeout'] ?? 60 ) );
+    if ( is_wp_error( $tmp ) ) return $tmp;
+
+    $max = (int) ( $body['max_bytes'] ?? 20 * MB_IN_BYTES );
+    if ( filesize( $tmp ) > $max ) {
+        @unlink( $tmp ); // phpcs:ignore
+        return new WP_Error(
+            'too_large',
+            sprintf( 'Downloaded %d bytes, which exceeds max_bytes (%d).', filesize( $tmp ), $max ),
+            array( 'status' => 413 )
+        );
+    }
+
+    // Same syntax guard as files_write, so a fetched PHP file cannot white-screen
+    // the site either.
+    $lint_error = claude_php_lint( (string) file_get_contents( $tmp ), $rel ); // phpcs:ignore
+    if ( $lint_error ) {
+        @unlink( $tmp ); // phpcs:ignore
+        return new WP_Error( 'php_syntax_error', $lint_error, array( 'status' => 422 ) );
+    }
+
+    wp_mkdir_p( dirname( $path ) );
+    $backup = claude_backup_file( $path );
+
+    // rename() fails across filesystem boundaries on some hosts; fall back to copy.
+    if ( ! @rename( $tmp, $path ) ) { // phpcs:ignore
+        if ( ! @copy( $tmp, $path ) ) { // phpcs:ignore
+            @unlink( $tmp ); // phpcs:ignore
+            return new WP_Error( 'write_failed', 'Could not write the downloaded file.', array( 'status' => 500 ) );
+        }
+        @unlink( $tmp ); // phpcs:ignore
+    }
+
+    return new WP_REST_Response( array(
+        'written' => $rel,
+        'source'  => $url,
+        'bytes'   => filesize( $path ),
+        // Lets the caller verify the transfer without spending context reading it back.
+        'sha256'  => hash_file( 'sha256', $path ),
+        'backup'  => $backup ? ltrim( str_replace( WP_CONTENT_DIR, '', $backup ), '/\\' ) : null,
+    ) );
+}
+
+/**
  * Stage one chunk of base64-encoded file content as a transient.
  * Chunk the file on the client side when the plain POST is blocked by a WAF.
  * Call /files/commit once all chunks are staged.
@@ -1313,6 +2690,28 @@ function claude_db_query( $req ) {
         return new WP_Error( 'invalid_type', 'type must be one of: ' . implode( ', ', $allowed ), array( 'status' => 400 ) );
     }
 
+    // Bound parameters. Builder content is JSON inside post_content, so the
+    // column literally contains \" - matching that by hand through a JSON tool
+    // envelope needs three levels of backslash escaping, and getting it wrong
+    // silently matches nothing. %s / %d / %f placeholders remove that entirely.
+    if ( ! empty( $body['params'] ) && is_array( $body['params'] ) ) {
+        $query = $wpdb->prepare( $query, $body['params'] ); // phpcs:ignore
+        if ( ! $query ) {
+            return new WP_Error(
+                'prepare_failed',
+                'Could not bind params. Check that the number of %s/%d/%f placeholders matches the params array.',
+                array( 'status' => 400 )
+            );
+        }
+    }
+
+    // Rehearsal mode for write statements: run it, report what it would change,
+    // then roll back. InnoDB only.
+    $dry_run = ! empty( $body['dry_run'] ) && 'query' === $type;
+    if ( $dry_run ) {
+        $wpdb->query( 'START TRANSACTION' ); // phpcs:ignore
+    }
+
     // Replaced PHP 8.0 match() with switch for PHP 7.4 compatibility.
     switch ( $type ) {
         case 'get_row':     $result = $wpdb->get_row( $query, ARRAY_A ); break;  // phpcs:ignore
@@ -1322,12 +2721,54 @@ function claude_db_query( $req ) {
         default:            $result = $wpdb->get_results( $query, ARRAY_A );     // phpcs:ignore
     }
 
+    // MySQL's affected-rows count for an UPDATE reports rows actually CHANGED,
+    // not rows matched, so a statement that found its row but altered nothing
+    // returns 0 - indistinguishable from a statement that matched nothing.
+    // mysqli_info() reports both: "Rows matched: 1  Changed: 0  Warnings: 0".
+    $matched = null;
+    $changed = null;
+    if ( 'query' === $type && isset( $wpdb->dbh ) && $wpdb->dbh instanceof mysqli ) {
+        $info = (string) mysqli_info( $wpdb->dbh );
+        if ( preg_match( '/Rows matched: (\d+)/', $info, $m ) ) {
+            $matched = (int) $m[1];
+        }
+        if ( preg_match( '/Changed: (\d+)/', $info, $m ) ) {
+            $changed = (int) $m[1];
+        }
+    }
+
+    if ( $dry_run ) {
+        $wpdb->query( 'ROLLBACK' ); // phpcs:ignore
+    }
+
     if ( $wpdb->last_error ) return new WP_Error( 'db_error', $wpdb->last_error, array( 'status' => 500 ) );
-    return new WP_REST_Response( array(
+
+    $response = array(
         'result'     => $result,
         'rows'       => is_array( $result ) ? count( $result ) : null,
         'last_query' => $wpdb->last_query,
-    ) );
+    );
+
+    if ( 'query' === $type ) {
+        $response['affected_rows'] = is_int( $result ) ? $result : null;
+        $response['matched_rows']  = $matched;
+        $response['changed_rows']  = $changed;
+        $response['insert_id']     = $wpdb->insert_id ?: null;
+        if ( $dry_run ) {
+            $response['dry_run']     = true;
+            $response['rolled_back'] = true;
+        }
+        // The case worth shouting about: the WHERE clause found rows but the
+        // statement altered none of them. For a REPLACE() that means the search
+        // string was never present - usually an escaping mistake.
+        if ( 0 === $changed && $matched > 0 ) {
+            $response['warning'] = 'Matched ' . $matched . ' row(s) but changed none. '
+                . 'If this was a REPLACE(), the search string did not appear in them - '
+                . 'check your escaping, or use params with %s placeholders.';
+        }
+    }
+
+    return new WP_REST_Response( $response );
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1721,6 +3162,13 @@ function claude_script_claude_md( $name, $url ) {
         . "- \"List recent posts\" - runs wp_posts_list\n"
         . "- \"Run wp plugin list\" - runs wp_wpcli\n"
         . "- \"Read the file themes/mytheme/functions.php\" - runs wp_files_read\n\n"
+        . "## Shared knowledge base\n\n"
+        . "Before troubleshooting an unfamiliar WordPress/Elementor/Divi/hosting issue, call "
+        . "`wp_knowledge_search` - it may already be documented from a previous site. After resolving "
+        . "something non-obvious, call `wp_knowledge_add` with a generalized description (no "
+        . "site-specific names, URLs, or secrets) so future sessions don't rediscover it. Writing "
+        . "requires the GitHub CLI (`gh`) to be installed and logged in - if it isn't, mention that to "
+        . "the user rather than skipping silently.\n\n"
         . "## Site notes\n"
         . "<!-- Add client notes, active theme, key plugins, custom post types, etc. here -->\n";
 }

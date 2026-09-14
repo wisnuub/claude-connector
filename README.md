@@ -55,6 +55,29 @@ The script installs the MCP bridge, creates a workspace folder for the site, wri
 
 ---
 
+## Shared knowledge base
+
+Every generated `CLAUDE.md` tells Claude to check a running knowledge base ([KNOWLEDGE.md](KNOWLEDGE.md))
+before troubleshooting an unfamiliar WordPress/Elementor/Divi/hosting issue, and to record a fix there
+after solving something non-obvious - so the next site doesn't start from zero. This is two MCP tools,
+not a WordPress REST endpoint, so it works the same regardless of which site you're connected to:
+
+- **`wp_knowledge_search`** - reads `KNOWLEDGE.md` straight from GitHub (public, no auth needed) and
+  returns matching entries.
+- **`wp_knowledge_add`** - records a new entry. What happens depends on your [GitHub CLI](https://cli.github.com/)
+  (`gh`) login:
+  - **Not installed / not logged in** - the entry is saved locally only; Claude will tell you to run
+    `gh auth login` if you want fixes shared.
+  - **Logged in, no push access to this repo** - the entry is queued locally and opened as a single
+    GitHub issue summarizing everything queued so far, at most once per calendar day (checked whenever
+    a new finding comes in, not on a background timer).
+  - **Logged in with push access** (the maintainer) - committed straight to `KNOWLEDGE.md`.
+
+No GitHub token is stored anywhere - `gh` handles its own authentication, and a duplicate check against
+existing entries runs before every write to avoid spamming the repo with near-identical findings.
+
+---
+
 ## Configuration
 
 After activation, go to **WP Admin → Settings → Claude Connector** to find your API key and the base URL.
@@ -122,6 +145,76 @@ POST /acf/sync
 // Sync specific groups only:
 { "groups": ["group_abc123", "group_def456"] }
 ```
+
+---
+
+### Elementor
+
+```
+GET  /elementor/widgets
+GET  /elementor/data/{id}
+POST /elementor/data/{id}
+```
+
+Lets Claude build and edit pages using Elementor's own native widget/module format
+(`_elementor_data`), instead of writing raw HTML into `post_content`.
+
+`GET /elementor/widgets` - lists every registered widget type on this site (stock Elementor,
+Elementor Pro, and any third-party addon widgets) with its editable settings/control schema, so
+Claude uses real field names instead of guessing.
+
+`GET /elementor/data/{id}` - returns the decoded elements tree for a post plus edit-mode/version meta.
+
+`POST /elementor/data/{id}` - writes an elements tree and clears Elementor's CSS cache so the change
+renders immediately.
+
+```json
+// POST /elementor/data/42
+{
+  "elements": [
+    {
+      "id": "a1b2c3d",
+      "elType": "section",
+      "elements": [
+        {
+          "id": "e4f5g6h",
+          "elType": "column",
+          "elements": [
+            { "id": "i7j8k9l", "elType": "widget", "widgetType": "heading", "settings": { "title": "Hello" } }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+Requires the Elementor plugin to be active; returns `422` otherwise.
+
+---
+
+### Divi
+
+```
+GET  /divi/modules
+GET  /divi/data/{id}
+POST /divi/data/{id}
+```
+
+Same idea as the Elementor endpoints, for Divi. Divi has two generations with different content
+formats - classic Divi (shortcodes in `post_content`) and Divi 5 (a newer structured module model) -
+so responses include a `generation` field (`d4_shortcode` or `d5_json`). Module schema discovery is
+currently only wired up for classic Divi; Divi 5 support is best-effort and may need adjusting
+against a live site.
+
+`GET /divi/modules` - lists known module types for the detected generation.
+
+`GET /divi/data/{id}` - returns `post_content` plus Divi builder meta and the detected generation.
+
+`POST /divi/data/{id}` - writes builder content. `content` must already match the site's detected
+generation's format (shortcode markup for classic Divi, module JSON for Divi 5).
+
+Requires Divi to be active; returns `422` otherwise.
 
 ---
 
@@ -414,6 +507,93 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 ---
 
 ## Changelog
+
+### 1.6.0 — Divi 5 hardening
+
+Fixes a data-loss bug and closes the verification loop. Derived from building a
+44-page Divi 5 site end to end through the connector.
+
+**Fixed**
+
+- **Builder content is no longer destroyed on write.** None of the three
+  transports called `wp_set_current_user()`, so every request ran as user 0.
+  WordPress attaches the kses filters whenever the current user lacks
+  `unfiltered_html`, so `wp_insert_post()`/`wp_update_post()` HTML-escaped block
+  delimiters — `<!-- wp:divi/section -->` became `&lt;!-- wp:divi/section --&gt;`
+  — which silently made the layout unparseable while returning HTTP 200. The
+  connector now assumes a real user (configurable, defaulting to the
+  lowest-numbered administrator) at the single auth choke point, and explicitly
+  drops the kses filters on multisite where administrators don't hold
+  `unfiltered_html`. This also fixes `post_author` defaulting to 0.
+- **Every content write is verified.** Block markup is re-read after writing and
+  the request fails loudly if the delimiters were escaped, so this can never
+  regress silently again.
+- **`POST /divi/data/{id}` now applies the full Divi 5 postmeta set.** It set
+  only `_et_pb_use_builder`, which is enough for Divi 4 but leaves a Divi 5 page
+  rendering on the theme's default template with a widget sidebar and a
+  duplicated title. `wp_posts_create`/`wp_posts_update` infer the same when they
+  detect `<!-- wp:divi/` in the content.
+- **`GET /options` and `POST /options` accept dotted paths**
+  (`et_divi.divi_integration_head`), so a single value inside a serialised theme
+  options array can be read or patched without pulling and rewriting the whole
+  blob. The protected-options blocklist is enforced on the root key.
+
+**Added**
+
+- `GET /render` — fetch a page server-side as an anonymous visitor and return a
+  structural health summary (h1 count, heading outline, sections, images missing
+  alt, empty paragraphs, escaped-delimiter detection, sidebar presence).
+  Optional `expect` assertions turn verification into one call. Every other
+  endpoint reports database state; several classes of defect are only visible in
+  the rendered output.
+- `GET /blocks/validate/{id}` — reports kses corruption, unbalanced block
+  delimiters, and attribute JSON that fails to round-trip through
+  `parse_blocks()`/`serialize_blocks()`. Divi 5 stores module attributes as JSON
+  inside HTML comments, so one unbalanced brace corrupts a page with no parse
+  error.
+- `GET /divi/audit` — finds builder pages with missing postmeta, and pages where
+  Divi's generated per-module CSS indices don't match the rendered markup. The
+  latter happens after a plugin install/update invalidates Divi's caches and
+  makes *all* attribute styling stop applying sitewide, with nothing wrong in
+  the database.
+- `POST /divi/resave` — the standing remedy for the above, and the required
+  follow-up after editing `post_content` with raw SQL.
+- `POST /divi/meta/{id}` — repair builder postmeta on an existing page without
+  touching its content.
+- `POST /files/fetch` — download a URL straight into `wp-content` server-side,
+  so generated content no longer has to be transmitted through the model's
+  context. Returns a `sha256` for verification without a read-back. Runs the
+  same `php -l` guard as `/files`.
+- **`POST /db/query` improvements:** `params` for `$wpdb->prepare()` bound
+  placeholders (builder content contains backslash-escaped quotes, and
+  hand-escaping through JSON needs three levels); `changed_rows` in the response,
+  which is what distinguishes a real edit from a statement that matched a row
+  but altered nothing; `dry_run` to rehearse a write inside a transaction and
+  roll it back; and an explicit warning when rows matched but none changed.
+- **`POST /cache/purge` is builder-aware:** `builder: true` also clears Divi's
+  `et-cache` directory and `_divi_dynamic_assets_cached_*` postmeta plus
+  Elementor's generated CSS — none of which a raw SQL write invalidates.
+  `resave_builder_posts: true` additionally forces clean CSS regeneration.
+- **`GET /status` reports `acting_as`** (user, login, whether it holds
+  `unfiltered_html`) and a `builder` block, so misconfiguration is visible
+  before it corrupts anything.
+- **MCP server version handshake.** The server compares its own version against
+  the plugin's on startup and in `wp_status`, and warns on mismatch. A stale copy
+  of `mcp-server/index.js` silently fails to register newer tools, which is much
+  harder to notice than an error — during the build this report came from, three
+  Divi tools were missing for exactly that reason.
+- Tool descriptions now document that `wp_wpcli` should be called with `args`
+  (array) rather than `command` (string) for anything containing quotes,
+  newlines or shell metacharacters, and list the blocked subcommands
+  (`shell`, `server`, `eval`, `eval-file`, `package`).
+- `KNOWLEDGE.md` gains a filled-in Divi section covering the CSS index bug, the
+  Divi 5 postmeta set, attribute-path traps, the Integration → Head specificity
+  problem, and hero/first-section scoping.
+
+### Unreleased
+- **Elementor native module support**: new `/elementor/widgets`, `/elementor/data/{id}` endpoints let Claude read/write pages using Elementor's own `_elementor_data` format and real widget/control names, instead of raw HTML.
+- **Divi native module support**: new `/divi/modules`, `/divi/data/{id}` endpoints, generation-aware (`d4_shortcode` vs `d5_json`); Divi 5 module schema discovery is best-effort pending verification against a live site.
+- **Shared knowledge base**: `wp_knowledge_search` / `wp_knowledge_add` MCP tools let Claude check for and record WordPress/Elementor/Divi/hosting fixes across sites via a `KNOWLEDGE.md` in this repo, using the GitHub CLI's own auth (maintainers commit directly; others queue into a daily digest issue). See [Shared knowledge base](#shared-knowledge-base).
 
 ### 1.4.1
 - **Security hardening**: the API key is now accepted only via the `X-Claude-Key` header - the `?_key=` URL parameter fallback (and the admin-ajax `$_REQUEST` fallback, which also read cookies) has been removed, since query strings can leak into server logs, browser history, and Referer headers.
