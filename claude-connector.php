@@ -3376,11 +3376,19 @@ if [ ! -d "$MCP_DIR/node_modules" ]; then
   echo "→ Downloading MCP server..."
   mkdir -p "$MCP_DIR"
   curl -sL "{{REPO}}/index.js"     -o "$MCP_DIR/index.js"
+  # index.js imports ./knowledge.js, so the server will not start without it.
+  curl -sL "{{REPO}}/knowledge.js" -o "$MCP_DIR/knowledge.js"
   curl -sL "{{REPO}}/package.json" -o "$MCP_DIR/package.json"
   echo "→ Installing dependencies..."
   (cd "$MCP_DIR" && npm install --silent)
 else
-  echo "→ MCP server already installed."
+  echo "→ MCP server already installed, refreshing it..."
+  # Refresh even on an existing install: a stale index.js silently fails to
+  # register newer tools, which is far harder to notice than an error.
+  curl -sL "{{REPO}}/index.js"     -o "$MCP_DIR/index.js"
+  curl -sL "{{REPO}}/knowledge.js" -o "$MCP_DIR/knowledge.js"
+  curl -sL "{{REPO}}/package.json" -o "$MCP_DIR/package.json"
+  (cd "$MCP_DIR" && npm install --silent)
 fi
 
 # Site workspace
@@ -3494,11 +3502,19 @@ if (-not (Test-Path "$McpDir\node_modules")) {
     Write-Host "-> Downloading MCP server..."
     New-Item -ItemType Directory -Force -Path $McpDir | Out-Null
     Get-FileWithRetry "{{REPO}}/index.js"     "$McpDir\index.js"
+    # index.js imports ./knowledge.js, so the server will not start without it.
+    Get-FileWithRetry "{{REPO}}/knowledge.js" "$McpDir\knowledge.js"
     Get-FileWithRetry "{{REPO}}/package.json" "$McpDir\package.json"
     Write-Host "-> Installing dependencies..."
     Push-Location $McpDir; npm install --silent; Pop-Location
 } else {
-    Write-Host "-> MCP server already installed."
+    Write-Host "-> MCP server already installed, refreshing it..."
+    # Refresh even on an existing install: a stale index.js silently fails to
+    # register newer tools, which is far harder to notice than an error.
+    Get-FileWithRetry "{{REPO}}/index.js"     "$McpDir\index.js"
+    Get-FileWithRetry "{{REPO}}/knowledge.js" "$McpDir\knowledge.js"
+    Get-FileWithRetry "{{REPO}}/package.json" "$McpDir\package.json"
+    Push-Location $McpDir; npm install --silent; Pop-Location
 }
 
 # Site workspace
