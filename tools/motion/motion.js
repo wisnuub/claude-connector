@@ -16,6 +16,11 @@
  *   m-fill       statement text: words fill from faint to full as it scrolls through
  *   m-horizontal children slide sideways while the parent section is pinned (>=900px)
  *   m-magnetic   button/link drifts toward the cursor (fine pointers only)
+ *   m-pin        holds a section in place: with m-fill inside, until every word has
+ *                filled; with m-steps inside, until every step has been shown
+ *   m-steps      (desktop) activates its children one at a time while pinned; the
+ *                matching child of an m-steps-media element crossfades in
+ *   m-steps-media  the images that change per step (hide children 2+ in CSS)
  *   m-smooth     on any element: turn on Lenis smooth scrolling for the page
  *
  * Needs gsap + ScrollTrigger (+ SplitText for m-split, Lenis for m-smooth).
@@ -63,6 +68,19 @@
     });
   };
   var trig = function (el, start) { return { trigger: el, start: start || 'top 88%', once: true }; };
+  // Bottom edge of a fixed/sticky site header (Divi Theme Builder, Elementor
+  // header templates...), so pinned blocks can be centred in the space below it
+  // instead of sliding under it. Anything covering >40% of the screen is not a
+  // header (e.g. another pin that is currently fixed) and is ignored.
+  var headerOffset = function () {
+    var el = document.elementFromPoint(window.innerWidth / 2, 2), best = 0;
+    while (el && el !== document.body && el !== root) {
+      var cs = getComputedStyle(el), r = el.getBoundingClientRect();
+      if ((cs.position === 'fixed' || cs.position === 'sticky') && r.top <= 1) best = Math.max(best, r.bottom);
+      el = el.parentElement;
+    }
+    return best > window.innerHeight * 0.4 ? 0 : best;
+  };
 
   // Always fromTo(... -> autoAlpha:1), never from(): the loader's CSS hides these
   // elements until setup() finishes, and from() would read that hidden opacity as
@@ -156,10 +174,17 @@
       var target = inner(el, 'h1,h2,h3,h4,h5,h6,.elementor-heading-title,p');
       if (!window.SplitText) return;
       var split = new window.SplitText(target, { type: 'words', wordsClass: 'm-word' });
-      gsap.fromTo(split.words, { opacity: 0.16 }, {
-        opacity: 1, ease: 'none', stagger: 0.1,
-        scrollTrigger: { trigger: el, start: 'top 80%', end: 'bottom 45%', scrub: true },
-      });
+      // pinSpacing: true is explicit on every pin here: ScrollTrigger turns it OFF
+      // by default when the pinned element's parent is a flex container - which
+      // every Divi 5 section and Elementor container is - and the next section
+      // then slides up over the pinned one.
+      // Inside an m-pin element, the section holds still until every word has
+      // filled, then releases - instead of filling while it scrolls past.
+      var pinEl = el.classList.contains('m-pin') ? el : el.closest('.m-pin');
+      var st = pinEl
+        ? { trigger: pinEl, start: 'top top', end: function () { return '+=' + Math.round(window.innerHeight * 1.4); }, pin: pinEl, pinSpacing: true, scrub: true, invalidateOnRefresh: true }
+        : { trigger: el, start: 'top 80%', end: 'bottom 45%', scrub: true };
+      gsap.fromTo(split.words, { opacity: 0.16 }, { opacity: 1, ease: 'none', stagger: 0.1, scrollTrigger: st });
     });
 
     // Pinned horizontal strip: the element's children slide sideways while its
@@ -175,8 +200,56 @@
         var distance = function () { return Math.max(0, track.scrollWidth - el.clientWidth); };
         gsap.to(track, {
           x: function () { return -distance(); }, ease: 'none',
-          scrollTrigger: { trigger: pinTarget, start: 'top top', end: function () { return '+=' + distance(); }, pin: pinTarget, scrub: 0.8, invalidateOnRefresh: true },
+          scrollTrigger: { trigger: pinTarget, start: 'top top', end: function () { return '+=' + distance(); }, pin: pinTarget, pinSpacing: true, scrub: 0.8, invalidateOnRefresh: true },
         });
+      });
+    });
+
+    // Scrollytelling steps: the m-pin element (or the section) holds still while
+    // the m-steps list activates its items one at a time, and the matching
+    // child of an m-steps-media element crossfades in. Desktop only; without
+    // JS, on phones or with reduced motion, the stacked layout is used instead
+    // (keep media children 2+ hidden in your CSS so only the first shows).
+    mm.add('(min-width: 900px)', function () {
+      all('.m-steps').forEach(function (list) {
+        var pinEl = list.closest('.m-pin') || list.closest('.et_pb_section, .e-con.e-parent, section') || list.parentElement;
+        var items = kids(list);
+        if (items.length < 2) return;
+        var media = pinEl.querySelector('.m-steps-media');
+        var frames = media ? Array.prototype.slice.call((media.querySelector(':scope > .e-con-inner') || media).children) : [];
+        if (media) {
+          var box = media.querySelector(':scope > .e-con-inner') || media;
+          box.style.display = 'grid';
+          frames.forEach(function (f) { f.style.gridArea = '1 / 1'; f.style.display = 'block'; });
+          gsap.set(frames, { autoAlpha: 0 });
+          gsap.set(frames[0], { autoAlpha: 1 });
+        }
+        gsap.set(items, { opacity: 0.22 });
+        gsap.set(items[0], { opacity: 1 });
+        // No snap: it fights Lenis smooth scroll (snap moves the page, Lenis eases
+        // it back). Instead each step holds steady for most of its scroll
+        // distance and crossfades only in the last part, so the reader never
+        // stops between two half-visible steps; the last step holds before release.
+        var tl = gsap.timeline({ scrollTrigger: {
+          trigger: pinEl, pin: pinEl, pinSpacing: true, scrub: 0.5, invalidateOnRefresh: true,
+          // Centre the pinned block in the viewport space below any fixed header.
+          start: function () {
+            var off = headerOffset(), avail = window.innerHeight - off;
+            return 'top ' + Math.round(off + Math.max(0, (avail - pinEl.offsetHeight) / 2)) + 'px';
+          },
+          end: function () { return '+=' + Math.round(items.length * window.innerHeight * 0.6); },
+        } });
+        items.forEach(function (item, i) {
+          if (i === 0) return;
+          var at = (i - 1) + 0.6;
+          tl.to(items[i - 1], { opacity: 0.22, duration: 0.4 }, at)
+            .to(item, { opacity: 1, duration: 0.4 }, at);
+          if (frames[i]) tl.to(frames[i - 1], { autoAlpha: 0, duration: 0.4 }, at).to(frames[i], { autoAlpha: 1, duration: 0.4 }, at);
+        });
+        tl.to({}, { duration: 0.6 });
+        return function () {
+          if (media) frames.forEach(function (f) { f.style.gridArea = ''; f.style.display = ''; });
+        };
       });
     });
 
@@ -199,6 +272,9 @@
 
     // Initial states are set; it's now safe to stop hiding content.
     finish();
+    // Pins created in a different order from their position on the page would
+    // compute their start points without the spacing earlier pins add.
+    ST.sort();
     ST.refresh();
   }
 
