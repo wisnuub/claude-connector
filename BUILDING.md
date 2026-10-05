@@ -58,7 +58,10 @@ wp_page_screenshot(url) of home + an inner page, desktop and mobile
 
 ## 3. The design system
 
-Write tokens down before building. Both reference builds used the same recipe:
+First pick a style archetype from [DESIGN-STYLES.md](DESIGN-STYLES.md) (luxury
+editorial, bold graphic, minimal Swiss, cinematic 3D, product tech, abstract
+experimental, corporate premium) and say which one you chose. Then write tokens
+down before building. Both reference builds used the same recipe:
 
 | Token | Rule |
 |---|---|
@@ -132,6 +135,9 @@ Elementor: Advanced → CSS Classes):
 | `m-parallax-bg` | background image drifts | statement sections, CTA cards |
 | `m-clip` | media opens from an inset clip as it enters | hero / feature media |
 | `m-marquee` | content loops sideways, follows scroll direction | service words, client names |
+| `m-fill` | statement words fill from faint to full while scrolling | one statement paragraph per page |
+| `m-horizontal` | pins the parent section and slides the row sideways (≥900px) | galleries, project rows (fixed-width children) |
+| `m-magnetic` | button drifts toward the cursor | primary CTAs |
 | `m-smooth` | Lenis smooth scrolling for the page | put once, on the hero |
 
 **Setup.** Self-host the libraries in `wp-content/uploads` with
