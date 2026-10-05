@@ -13,6 +13,9 @@
  *   m-clip       media opens from an inset clip as it scrolls into view
  *   m-count      the first number inside counts up from 0 (final value stays in the HTML)
  *   m-marquee    contents scroll sideways forever; direction follows scroll direction
+ *   m-fill       statement text: words fill from faint to full as it scrolls through
+ *   m-horizontal children slide sideways while the parent section is pinned (>=900px)
+ *   m-magnetic   button/link drifts toward the cursor (fine pointers only)
  *   m-smooth     on any element: turn on Lenis smooth scrolling for the page
  *
  * Needs gsap + ScrollTrigger (+ SplitText for m-split, Lenis for m-smooth).
@@ -147,6 +150,52 @@
         gsap.to(tween, { timeScale: self.direction === -1 ? -1 : 1, duration: 0.6, overwrite: true });
       } });
     });
+
+    // Statement text: words fill from faint to full ink as it scrolls through.
+    all('.m-fill').forEach(function (el) {
+      var target = inner(el, 'h1,h2,h3,h4,h5,h6,.elementor-heading-title,p');
+      if (!window.SplitText) return;
+      var split = new window.SplitText(target, { type: 'words', wordsClass: 'm-word' });
+      gsap.fromTo(split.words, { opacity: 0.16 }, {
+        opacity: 1, ease: 'none', stagger: 0.1,
+        scrollTrigger: { trigger: el, start: 'top 80%', end: 'bottom 45%', scrub: true },
+      });
+    });
+
+    // Pinned horizontal strip: the element's children slide sideways while its
+    // parent section stays pinned. Desktop only - on narrow screens the builder's
+    // normal stacked layout is the better experience.
+    var mm = gsap.matchMedia();
+    mm.add('(min-width: 900px)', function () {
+      all('.m-horizontal').forEach(function (el) {
+        var pinTarget = el.parentElement && el.parentElement.closest('.et_pb_section, .e-con.e-parent, section') || el.parentElement;
+        el.style.flexWrap = 'nowrap';
+        var track = el.querySelector(':scope > .e-con-inner') || el;
+        track.style.flexWrap = 'nowrap';
+        var distance = function () { return Math.max(0, track.scrollWidth - el.clientWidth); };
+        gsap.to(track, {
+          x: function () { return -distance(); }, ease: 'none',
+          scrollTrigger: { trigger: pinTarget, start: 'top top', end: function () { return '+=' + distance(); }, pin: pinTarget, scrub: 0.8, invalidateOnRefresh: true },
+        });
+      });
+    });
+
+    // Magnetic buttons/links: drift toward the cursor, spring back on leave.
+    if (window.matchMedia('(pointer: fine)').matches) {
+      all('.m-magnetic').forEach(function (el) {
+        var target = inner(el, 'a,button,.elementor-button,.et_pb_button');
+        var xTo = gsap.quickTo(target, 'x', { duration: 0.5, ease: 'power3.out' });
+        var yTo = gsap.quickTo(target, 'y', { duration: 0.5, ease: 'power3.out' });
+        target.addEventListener('pointermove', function (e) {
+          var r = target.getBoundingClientRect();
+          xTo((e.clientX - (r.left + r.width / 2)) * 0.35);
+          yTo((e.clientY - (r.top + r.height / 2)) * 0.35);
+        });
+        target.addEventListener('pointerleave', function () {
+          gsap.to(target, { x: 0, y: 0, duration: 0.9, ease: 'elastic.out(1, 0.4)' });
+        });
+      });
+    }
 
     // Initial states are set; it's now safe to stop hiding content.
     finish();

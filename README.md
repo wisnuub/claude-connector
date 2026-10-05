@@ -8,7 +8,7 @@ Install it once on any WordPress site. Then tell Claude:
 
 Claude can then manage ACF field groups, flush caches, read and write theme files, query the database, create posts, and more - all through a secure REST API.
 
-It can also **design and build pages in Divi 4/5 and Elementor** with native modules, to the standard of a hand-built site, and look at the result in a real browser while it works. See [BUILDING.md](BUILDING.md) for the method and the safety rules for working on a client's live site.
+It can also **design and build pages in Divi 4/5 and Elementor** with native modules, to the standard of a hand-built site, and look at the result in a real browser while it works. See [BUILDING.md](BUILDING.md) for the method and the safety rules for working on a client's live site, and [DESIGN-STYLES.md](DESIGN-STYLES.md) for the award-site style archetypes to choose from.
 
 ---
 
