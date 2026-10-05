@@ -35,12 +35,17 @@ function block(name, attrs, children) {
   return `${open} -->\n${[].concat(children).join('\n')}\n<!-- /wp:divi/${name} -->`;
 }
 
-/** Section. opts.bg = image URL set natively (stays editable in the builder). */
+/**
+ * Section. Backgrounds are set natively, so they stay editable in the builder:
+ * opts.bg = image URL; opts.video = { mp4, webm } background video (the image,
+ * if also given, shows until the video plays).
+ */
 export function section(cls, children, opts = {}) {
   const attrs = withClass({}, cls);
-  if (opts.bg) {
-    attrs.module.decoration = { background: d({ image: { url: opts.bg } }) };
-  }
+  const bg = {};
+  if (opts.bg) bg.image = { url: opts.bg };
+  if (opts.video) bg.video = { ...opts.video };
+  if (opts.bg || opts.video) (attrs.module = attrs.module || {}).decoration = { background: d(bg) };
   return block('section', attrs, children);
 }
 

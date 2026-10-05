@@ -102,6 +102,14 @@ it can't be malformed. Generate, write, screenshot, repeat.
   the module's children.
 - Use `wp_divi_modules_list({ name })` for attribute groups; the CSS class
   lives at `module.advanced.htmlAttributes`.
+- Background video: `section(cls, rows, { video: { mp4, webm } })` sets it
+  natively (reuse the client's own hero video). Divi wraps it in
+  `.et-pb-background-video`, which paints over a `::before` overlay - give it
+  `z-index:-1` inside an `isolation:isolate` section.
+- A transparent header over a dark hero: check how the client's homepage turns
+  the menu links light - it is often a `.home` rule that won't apply to a new
+  page. Repeat it for pages carrying your hero, e.g.
+  `body:has(.x-hero) #et-boc .header-class li a`.
 
 ### Elementor
 
@@ -141,6 +149,7 @@ Elementor: Advanced → CSS Classes):
 | `m-pin` | holds a section still: with `m-fill` inside until every word has filled; with `m-steps` inside until every step has shown | statement sections, program/service lists |
 | `m-steps` + `m-steps-media` | (desktop) list items activate one by one while pinned; the matching image crossfades in; stopping mid-crossfade glides to the next whole step. Hide media children 2+ in CSS so phones and no-JS show the first image. To make the image as tall as the list, stretch the row and give the media column `display:grid; grid-template-rows:minmax(0,1fr)` and the images `height:100%; object-fit:cover` | "what we do" lists, process steps |
 | `m-smooth` | Lenis smooth scrolling for the page | put once, on the hero |
+| `m-load` | reveals inside play on page load instead of on scroll | the hero section - its lower lines (lead, buttons) can sit below the scroll trigger line on a short screen and would otherwise wait for a scroll |
 
 **Setup.** Self-host the libraries in `wp-content/uploads` with
 `wp_files_fetch` (URLs in `tools/motion/loader.mjs` → `MOTION_FILES`) and write
