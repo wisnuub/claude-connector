@@ -8,6 +8,8 @@ Install it once on any WordPress site. Then tell Claude:
 
 Claude can then manage ACF field groups, flush caches, read and write theme files, query the database, create posts, and more - all through a secure REST API.
 
+It can also **design and build pages in Divi 4/5 and Elementor** with native modules, to the standard of a hand-built site, and look at the result in a real browser while it works. See [BUILDING.md](BUILDING.md) for the method and the safety rules for working on a client's live site.
+
 ---
 
 ## Why this exists
@@ -152,6 +154,7 @@ POST /acf/sync
 
 ```
 GET  /elementor/widgets
+GET  /elementor/kit
 GET  /elementor/data/{id}
 POST /elementor/data/{id}
 ```
@@ -165,8 +168,14 @@ Claude uses real field names instead of guessing.
 
 `GET /elementor/data/{id}` - returns the decoded elements tree for a post plus edit-mode/version meta.
 
+`GET /elementor/kit` - the active kit's global colours and typography: the site's own design tokens.
+
 `POST /elementor/data/{id}` - writes an elements tree and clears Elementor's CSS cache so the change
-renders immediately.
+renders immediately. Optional `page_settings` (merged into `_elementor_page_settings`, e.g.
+`{"hide_title":"yes"}`), `page_template` and `template_type`. On an `elementor_library` post the
+template type defaults to `page` and the library term is set, so the item appears in My Templates.
+The response's `warnings` flag settings that save fine but render wrong - an Image widget with no
+`image.url` (renders nothing), an overlay with no `background_overlay_opacity` (renders at 50%).
 
 ```json
 // POST /elementor/data/42
@@ -196,18 +205,25 @@ Requires the Elementor plugin to be active; returns `422` otherwise.
 ### Divi
 
 ```
-GET  /divi/modules
+GET  /divi/modules[?name=divi/button]
 GET  /divi/data/{id}
 POST /divi/data/{id}
+POST /divi/library
 ```
 
 Same idea as the Elementor endpoints, for Divi. Divi has two generations with different content
-formats - classic Divi (shortcodes in `post_content`) and Divi 5 (a newer structured module model) -
-so responses include a `generation` field (`d4_shortcode` or `d5_json`). Module schema discovery is
-currently only wired up for classic Divi; Divi 5 support is best-effort and may need adjusting
-against a live site.
+formats - classic Divi (shortcodes in `post_content`) and Divi 5 (block markup with JSON
+attributes) - so responses include a `generation` field (`d4_shortcode` or `d5_json`). See
+[DIVI5.md](DIVI5.md) for the Divi 5 write workflow.
 
-`GET /divi/modules` - lists known module types for the detected generation.
+`GET /divi/modules` - on Divi 5, every module from the schema Divi itself ships
+(`_all_modules_metadata.php`): name, title, category, Divi 4 shortcode. Add `?name=divi/button` for
+that module's attribute groups and paths (`button.innerContent`, `module.decoration.spacing` ...).
+On Divi 4, the `ET_Builder_Element` registry.
+
+`POST /divi/library` - saves a layout to the Divi Library with the terms and meta the library needs
+(`{ "title", "content", "layout_type": "layout|section|row|module", "id"? }`). A library item changes
+nothing until someone loads it into a page.
 
 `GET /divi/data/{id}` - returns `post_content` plus Divi builder meta and the detected generation.
 
@@ -507,6 +523,49 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 ---
 
 ## Changelog
+
+### 1.7.0 — Builder design tooling
+
+From building two redesign concepts on live client sites (Divi 5 and Elementor 4)
+to the standard of a hand-built Next.js site. The method is in [BUILDING.md](BUILDING.md).
+
+**Added**
+
+- **`wp_page_screenshot`** (MCP): screenshots a page in a real local browser at
+  desktop or mobile width and returns the images, including password-protected
+  preview pages, full-page slices and `scroll_to`. Every real defect in those builds
+  was invisible in database state and obvious in a screenshot. Uses
+  `playwright-core` with the machine's own Chrome/Edge - no browser download.
+- **Divi 5 module schema**: `/divi/modules` now reads Divi's own
+  `_all_modules_metadata.php`; `?name=` returns a module's attribute paths.
+- **`POST /divi/library`** / `wp_divi_library_save`: save a layout to the Divi
+  Library, correctly tagged.
+- **`GET /elementor/kit`** / `wp_elementor_kit`: the site's global colours and typography.
+- **`/elementor/data`**: `page_settings`, `page_template`, `template_type`,
+  automatic library tagging, and lint `warnings` for silent render failures.
+- **`post_password`** on post create/update, for the safe preview workflow
+  (draft → password → noindex → publish).
+- `tools/divi5.mjs` and `tools/elementor.mjs`: generators that build builder
+  markup from plain JS, escaped exactly as WordPress/Divi write it.
+- **Motion for builder pages** (`tools/motion/`): a class-driven runtime on GSAP +
+  ScrollTrigger + SplitText (+ Lenis). Put `m-split`, `m-reveal`, `m-stagger`,
+  `m-count`, `m-parallax`, `m-clip`, `m-marquee` on native Divi modules or
+  Elementor widgets; libraries are self-hosted in uploads and loaded from the
+  layout itself, so motion travels with the library template. Content is never
+  stuck hidden (3s fail-safe), `prefers-reduced-motion` is respected, and counters
+  keep the real figure in the HTML. Tested locally (12 checks) and live.
+- [BUILDING.md](BUILDING.md) (now including motion) and fourteen new [KNOWLEDGE.md](KNOWLEDGE.md) entries.
+
+**Fixed**
+
+- The knowledge-base parser skipped every entry in a CRLF (Windows) checkout.
+- File writes/fetches into a **new subfolder** of wp-content were refused as
+  "outside wp-content": the path check required the direct parent to exist. It
+  now checks the nearest existing ancestor and rejects any `..` in the part that
+  doesn't exist yet; write/fetch/commit already created missing folders.
+- `wp_page_screenshot` no longer downloads video by default (`allow_video` to
+  opt in): repeated runs pulling a 20MB+ hero video tripped a shared host's
+  per-IP bandwidth throttling.
 
 ### 1.6.0 — Divi 5 hardening
 

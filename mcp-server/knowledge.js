@@ -59,7 +59,9 @@ async function readKnowledgeText() {
 function parseEntries(md) {
   let category = 'general';
   const entries = [];
-  for (const line of md.split('\n')) {
+  // \r?\n: a Windows checkout (core.autocrlf) has CRLF, and `.`/`$` in the
+  // entry regex don't match across \r - every entry would silently be skipped.
+  for (const line of md.split(/\r?\n/)) {
     const heading = line.match(/^##\s+(.*)/);
     if (heading) {
       const title = heading[1].trim().toLowerCase();

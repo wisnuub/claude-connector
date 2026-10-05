@@ -2,6 +2,9 @@
 
 Workflow notes for Claude. The gotchas behind these steps are in
 [KNOWLEDGE.md](KNOWLEDGE.md#divi); this file is just the order to do things in.
+For the design side - and the safety rules for building on a client's live
+site - read [BUILDING.md](BUILDING.md) first. `tools/divi5.mjs` generates the
+block markup described below, and `wp_page_screenshot` shows you the result.
 
 Requires plugin **1.6.0+** on the site and a matching `mcp-server/index.js`.
 Run `wp_status` first and check three fields:

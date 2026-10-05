@@ -151,7 +151,7 @@ async function safeCall(fn) {
 // Kept in step with CLAUDE_CONNECTOR_VERSION in claude-connector.php. The two
 // halves ship together, and a stale copy of this file silently hides whole
 // tools - which is much harder to notice than an outright error.
-const MCP_VERSION = '1.6.0';
+const MCP_VERSION = '1.7.0';
 
 const server = new McpServer({ name: 'claude-connector', version: MCP_VERSION });
 
@@ -270,6 +270,7 @@ server.tool('wp_posts_create', 'Create a new WordPress post, page, or custom pos
   post_parent:   z.number().int().optional(),
   page_template: z.string().optional(),
   meta_input:    z.record(z.any()).optional().describe('Post meta as key-value pairs'),
+  post_password: z.string().optional().describe('Password-protect the post - see wp_page_screenshot for the safe preview workflow'),
 }, ({ site, ...body }) => safeCall(async () => ok(await api('POST', '/posts', null, body, site)))
 );
 
@@ -289,6 +290,7 @@ server.tool('wp_posts_update',
   menu_order:    z.number().int().optional(),
   page_template: z.string().optional(),
   meta_input:    z.record(z.any()).optional(),
+  post_password: z.string().optional().describe('Set (or "" to remove) the post password'),
 }, ({ site, id, ...fields }) => safeCall(async () => ok(await api('PUT', `/posts/${id}`, null, fields, site)))
 );
 
@@ -549,20 +551,53 @@ server.tool('wp_elementor_data_get',
 
 // Elementor - write post's element tree
 server.tool('wp_elementor_data_set',
-  'Write an Elementor elements tree to a post, using real widget/control names from wp_elementor_widgets_list',
+  'Write an Elementor elements tree to a post, using real widget/control names from wp_elementor_widgets_list. '
+  + 'Works for pages and for library templates (an elementor_library post gets template type "page" and the '
+  + 'matching library term automatically). Check "warnings" in the response: it flags settings that save fine '
+  + 'but render wrong (image widget with no image.url renders nothing; an overlay without '
+  + 'background_overlay_opacity renders at 50%). See BUILDING.md for the full design workflow.',
   {
-    site:     S,
-    id:       z.number().int().describe('Post ID'),
-    elements: z.array(z.any()).describe('Elementor elements tree, e.g. [{ id, elType, widgetType?, settings, elements }]'),
+    site:          S,
+    id:            z.number().int().describe('Post ID'),
+    elements:      z.array(z.any()).describe('Elementor elements tree, e.g. [{ id, elType, widgetType?, settings, elements }]'),
+    page_settings: z.record(z.any()).optional().describe('Merged into _elementor_page_settings, e.g. {"hide_title":"yes"} plus theme switches'),
+    page_template: z.string().optional().describe('Sets _wp_page_template, e.g. elementor_header_footer or a theme template file'),
+    template_type: z.string().optional().describe('Override _elementor_template_type (default wp-post; page for library items)'),
   },
-  ({ site, id, elements }) => safeCall(async () => ok(await api('POST', `/elementor/data/${id}`, null, { elements }, site)))
+  ({ site, id, ...body }) => safeCall(async () => ok(await api('POST', `/elementor/data/${id}`, null, body, site)))
 );
 
-// Divi - discover module types
-server.tool('wp_divi_modules_list',
-  'List known Divi module types for this site (requires Divi). Dynamic schema discovery is best-effort for Divi 5.',
+// Elementor - design tokens
+server.tool('wp_elementor_kit',
+  'Read the active Elementor kit: global colours and typography - the site\'s own design tokens. Read this '
+  + 'before designing a page so the layout uses the brand\'s real values.',
   { site: S },
-  ({ site }) => safeCall(async () => ok(await api('GET', '/divi/modules', null, null, site)))
+  ({ site }) => safeCall(async () => ok(await api('GET', '/elementor/kit', null, null, site)))
+);
+
+// Divi - discover module types / one module's schema
+server.tool('wp_divi_modules_list',
+  'List Divi modules. On Divi 5 this reads the schema Divi itself ships (_all_modules_metadata.php): pass '
+  + 'name (e.g. "divi/button") to get that module\'s attribute groups and paths (button.innerContent, '
+  + 'module.decoration.spacing ...). Values are per-breakpoint {"desktop":{"value":...}}; read a page built '
+  + 'in the Divi UI for real value shapes.',
+  { site: S, name: z.string().optional().describe('One module, e.g. divi/button') },
+  ({ site, name }) => safeCall(async () => ok(await api('GET', '/divi/modules', name ? { name } : null, null, site)))
+);
+
+// Divi - save to the Divi Library
+server.tool('wp_divi_library_save',
+  'Save a layout to the Divi Library (et_pb_layout) with the terms and meta the library needs. A library item '
+  + 'changes nothing on the site until someone loads it into a page, so this is the safe way to hand over a '
+  + 'design. Pass id to update an existing library item. The response includes a "blocks" report.',
+  {
+    site:        S,
+    title:       z.string(),
+    content:     z.string().describe('Divi builder markup (Divi 5 block markup or Divi 4 shortcodes)'),
+    layout_type: z.enum(['layout', 'section', 'row', 'module']).optional().describe('Default layout (a full page)'),
+    id:          z.number().int().optional().describe('Existing library item to update'),
+  },
+  ({ site, ...body }) => safeCall(async () => ok(await api('POST', '/divi/library', null, body, site)))
 );
 
 // Divi - read post's builder content
@@ -656,6 +691,51 @@ server.tool('wp_page_render',
     if (expect) params.expect = JSON.stringify(expect);
     if (include_html) params.include_html = '1';
     return ok(await api('GET', '/render', params, null, site));
+  })
+);
+
+// Real-browser screenshot - see what you built
+server.tool('wp_page_screenshot',
+  'Screenshot a page in a real local browser (desktop 1440px or mobile 390px) and return the images, so you '
+  + 'can SEE what a write produced. Use after every meaningful design change: specificity fights with theme '
+  + 'CSS, wrong templates, images that never load, half-opacity overlays and wrapping columns are invisible in '
+  + 'database state but obvious here. Drafts are not visible to an anonymous browser - for a safe preview, give '
+  + 'the page a post_password and Yoast noindex meta FIRST, then publish, then pass password here. '
+  + 'full_page returns consecutive slices (sticky elements appear pinned in slices - use scroll_to to check them).',
+  {
+    site:       S,
+    id:         z.number().int().optional().describe('Post ID (or pass url)'),
+    url:        z.string().optional().describe('Absolute URL (or pass id)'),
+    password:   z.string().optional().describe('Post password for a protected preview page'),
+    device:     z.enum(['desktop', 'mobile']).optional().describe('Default desktop'),
+    full_page:  z.boolean().optional().describe('Capture the whole page as slices (default: first viewport only)'),
+    max_slices: z.number().int().min(1).max(8).optional().describe('Cap on full-page slices (default 4)'),
+    scroll_to:  z.string().optional().describe('CSS selector - capture the viewport scrolled to this element'),
+    allow_video: z.boolean().optional().describe('Also download video (default false: big hero videos can trip a host\'s per-IP bandwidth throttling on repeated runs)'),
+  },
+  ({ site, id, url, password, device, full_page, max_slices, scroll_to, allow_video }) => safeCall(async () => {
+    if (!id && !url) throw new Error('Provide id or url');
+    let target = url;
+    if (!target) {
+      const post = await api('GET', `/posts/${id}`, null, null, site);
+      if (post.status && post.status !== 'publish') {
+        throw new Error(`Post ${id} is "${post.status}" - an anonymous browser cannot see it. Set post_password and noindex, then publish, then retry with password.`);
+      }
+      target = post.permalink;
+    }
+    const { screenshot } = await import('./screenshot.js');
+    const shot = await screenshot({ url: target, password, device, fullPage: full_page, maxSlices: max_slices, scrollTo: scroll_to, allowVideo: allow_video });
+    const summary = {
+      url: shot.url, device: shot.device, page_height: shot.height, title: shot.title, slices: shot.images.length,
+      broken_images: shot.brokenImages,
+      ...(shot.locked ? { warning: 'Still showing the password form - wrong or missing password.' } : {}),
+    };
+    return {
+      content: [
+        { type: 'text', text: JSON.stringify(summary, null, 2) },
+        ...shot.images.map(data => ({ type: 'image', data, mimeType: 'image/jpeg' })),
+      ],
+    };
   })
 );
 
