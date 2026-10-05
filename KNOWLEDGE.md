@@ -65,6 +65,10 @@ Entries are generalized on purpose — no site names, URLs, or secrets.
 
 - **Symptom:** A pinned section sits too low under a fixed site header (a gap above it, its bottom cut off) on some screen widths, although the header offset is measured. **Fix:** Measure the header again after scrolling has settled (and on resize), and refresh ScrollTrigger if it changed. **Why:** Divi's fixed Theme Builder header (and many others) shrinks once the page scrolls - on gariconsultants.com it's 172px at the top of the page at 1024px wide and 104px scrolled. A measurement taken at load is the unscrolled height, but pins are only ever seen scrolled.
 
+- **Symptom:** A dark gradient overlay on a Divi 5 section with a background video doesn't show - the video plays at full brightness over it. **Fix:** Put the section in its own stacking context (`isolation:isolate`) and give `.et-pb-background-video` `z-index:-1`; overlay `::before` at `z-index:0`, rows at `z-index:1`. **Why:** Divi renders the video in an absolutely positioned `<span class="et-pb-background-video">` with `z-index:auto` after the `::before`, so at the same stacking level it paints on top.
+
+- **Symptom:** On a new page with a dark hero, the fixed header's menu links are dark and unreadable at the top of the page, although the homepage's header has white links over its video. **Fix:** Find the rule that does it on the homepage and repeat it for the new page, scoped to pages carrying the hero (`body:has(.x-hero)`). **Why:** Header colour states are often page-scoped - on gariconsultants.com it's `.home #et-boc .pa-header li a{color:#fff}`, with a site script adding `.pa-fixed-header` (white background, dark links) after 100px of scroll.
+
 ## WP-CLI & Database
 
 ## General

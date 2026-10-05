@@ -22,6 +22,7 @@
  *                matching child of an m-steps-media element crossfades in
  *   m-steps-media  the images that change per step (hide children 2+ in CSS)
  *   m-smooth     on any element: turn on Lenis smooth scrolling for the page
+ *   m-load       on an element or section: its reveals play on page load, not on scroll
  *
  * Needs gsap + ScrollTrigger (+ SplitText for m-split, Lenis for m-smooth).
  * Content is never hidden unless this script is running: the loader adds
@@ -67,7 +68,10 @@
       return c.nodeType === 1 && !/^(STYLE|SCRIPT|LINK)$/.test(c.tagName) && c.offsetParent !== null;
     });
   };
-  var trig = function (el, start) { return { trigger: el, start: start || 'top 88%', once: true }; };
+  // m-load on the element or an ancestor (e.g. the hero section): play on page
+  // load, not when scrolled into view - a hero's lower lines can sit below the
+  // trigger line on a short screen and would wait for a scroll.
+  var trig = function (el, start) { return el.closest('.m-load') ? undefined : { trigger: el, start: start || 'top 88%', once: true }; };
   // Bottom edge of a fixed/sticky site header (Divi Theme Builder, Elementor
   // header templates...), so pinned blocks can be centred in the space below it
   // instead of sliding under it. Anything covering >40% of the screen is not a
