@@ -110,6 +110,11 @@ it can't be malformed. Generate, write, screenshot, repeat.
   the menu links light - it is often a `.home` rule that won't apply to a new
   page. Repeat it for pages carrying your hero, e.g.
   `body:has(.x-hero) #et-boc .header-class li a`.
+  The logo needs the same treatment. If the client has no light version, make
+  one (recolour the dark ink to white, keep the brand colour), upload it as a
+  new file, and swap it in with CSS only while the header is see-through: logo
+  wrapper background + `img{opacity:0}`. Check phones separately - mobile
+  headers often have a solid light background, where the dark logo must stay.
 
 ### Elementor
 
