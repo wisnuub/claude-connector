@@ -139,7 +139,7 @@ Elementor: Advanced → CSS Classes):
 | `m-horizontal` | pins the parent section and slides the row sideways (≥900px) | galleries, project rows (fixed-width children) |
 | `m-magnetic` | button drifts toward the cursor | primary CTAs |
 | `m-pin` | holds a section still: with `m-fill` inside until every word has filled; with `m-steps` inside until every step has shown | statement sections, program/service lists |
-| `m-steps` + `m-steps-media` | (desktop) list items activate one by one while pinned; the matching image crossfades in. Hide media children 2+ in CSS so phones and no-JS show the first image | "what we do" lists, process steps |
+| `m-steps` + `m-steps-media` | (desktop) list items activate one by one while pinned; the matching image crossfades in; stopping mid-crossfade glides to the next whole step. Hide media children 2+ in CSS so phones and no-JS show the first image. To make the image as tall as the list, stretch the row and give the media column `display:grid; grid-template-rows:minmax(0,1fr)` and the images `height:100%; object-fit:cover` | "what we do" lists, process steps |
 | `m-smooth` | Lenis smooth scrolling for the page | put once, on the hero |
 
 **Setup.** Self-host the libraries in `wp-content/uploads` with
@@ -161,6 +161,12 @@ site, get explicit agreement before making it sitewide.
   Counter / Divi's Number Counter widgets: those render `0` in the page source
   and animate to the value in JS, so search engines, link previews and no-JS
   visitors see "0".
+- Pins are centred in the space below a fixed header, measured after scrolling
+  (headers often shrink once scrolled). The runtime publishes that height as
+  `--m-header` on `<html>`; a full-screen section uses `min-height:100svh;
+  padding-top:calc(var(--m-header, 104px) + 24px)` so its content clears the
+  header. The pinned block must fit in the viewport minus the header at laptop
+  sizes (1024×768) — tighten its spacing there or the last item is cut off.
 - SplitText reverts after the reveal, so the final DOM is the original markup.
   Line masks are padded so descenders aren't clipped at tight line-heights.
 

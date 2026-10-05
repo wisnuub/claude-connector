@@ -81,6 +81,18 @@
     }
     return best > window.innerHeight * 0.4 ? 0 : best;
   };
+  // The header height pins and layouts use. Many headers shrink once the page
+  // scrolls (Divi's fixed header: 172px at the top, 104px scrolled), and pins
+  // are only ever seen scrolled, so it is re-measured after scrolling settles.
+  // Published as --m-header for CSS (e.g. padding-top: var(--m-header, 104px)).
+  var header = 0;
+  var measureHeader = function () {
+    var h = Math.round(headerOffset());
+    if (Math.abs(h - header) < 2) return false;
+    header = h;
+    root.style.setProperty('--m-header', h + 'px');
+    return true;
+  };
 
   // Always fromTo(... -> autoAlpha:1), never from(): the loader's CSS hides these
   // elements until setup() finishes, and from() would read that hidden opacity as
@@ -226,15 +238,13 @@
         }
         gsap.set(items, { opacity: 0.22 });
         gsap.set(items[0], { opacity: 1 });
-        // No snap: it fights Lenis smooth scroll (snap moves the page, Lenis eases
-        // it back). Instead each step holds steady for most of its scroll
-        // distance and crossfades only in the last part, so the reader never
-        // stops between two half-visible steps; the last step holds before release.
+        // Each step holds steady for most of its scroll distance and crossfades
+        // only in the last part; the last step holds before release.
         var tl = gsap.timeline({ scrollTrigger: {
           trigger: pinEl, pin: pinEl, pinSpacing: true, scrub: 0.5, invalidateOnRefresh: true,
           // Centre the pinned block in the viewport space below any fixed header.
           start: function () {
-            var off = headerOffset(), avail = window.innerHeight - off;
+            var off = header, avail = window.innerHeight - off;
             return 'top ' + Math.round(off + Math.max(0, (avail - pinEl.offsetHeight) / 2)) + 'px';
           },
           end: function () { return '+=' + Math.round(items.length * window.innerHeight * 0.6); },
@@ -247,7 +257,26 @@
           if (frames[i]) tl.to(frames[i - 1], { autoAlpha: 0, duration: 0.4 }, at).to(frames[i], { autoAlpha: 1, duration: 0.4 }, at);
         });
         tl.to({}, { duration: 0.6 });
+
+        // Snapping that works WITH smooth scrolling: when scrolling stops inside
+        // a crossfade, glide to the next clean step in the direction of travel
+        // (or back to the previous one when scrolling up). Stopping while a
+        // step is fully shown is left alone. Goes through Lenis when present -
+        // ScrollTrigger's own snap scrolls natively and Lenis eases it back.
+        var st = tl.scrollTrigger, T = tl.duration();
+        var snapToStep = function () {
+          if (!st || !st.isActive) return;
+          var t = st.progress * T, frac = t - Math.floor(t), eps = 0.02;
+          if (frac <= 0.6 + eps || frac >= 1 - eps) return; // a step is fully shown
+          var target = st.direction > 0 ? Math.ceil(t) : Math.floor(t) + 0.6;
+          var y = st.start + (st.end - st.start) * (target / T);
+          if (window.__claudeLenis) window.__claudeLenis.scrollTo(y, { duration: 0.6 });
+          else window.scrollTo({ top: y, behavior: 'smooth' });
+        };
+        ST.addEventListener('scrollEnd', snapToStep);
+
         return function () {
+          ST.removeEventListener('scrollEnd', snapToStep);
           if (media) frames.forEach(function (f) { f.style.gridArea = ''; f.style.display = ''; });
         };
       });
@@ -288,6 +317,15 @@
   }
 
   function start() {
+    measureHeader();
+    var rt, ht;
+    var remeasure = function () { if (measureHeader()) ST.refresh(); };
+    window.addEventListener('resize', function () { clearTimeout(rt); rt = setTimeout(remeasure, 150); });
+    // After the header's own shrink transition has finished.
+    ST.addEventListener('scrollEnd', function () {
+      if (window.scrollY < 50) return;
+      clearTimeout(ht); ht = setTimeout(remeasure, 400);
+    });
     smooth();
     var fonts = document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve();
     // Don't let a slow font hold the hero back: lines split before the font
