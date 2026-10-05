@@ -59,6 +59,10 @@ Entries are generalized on purpose — no site names, URLs, or secrets.
 
 - **Symptom:** After a session of screenshot/browser testing, every page of a client site takes 25-60s to load from your machine - including pages you never touched and static files like jquery.min.js - and it looks like you broke the site. **Fix:** Break the request into phases (`curl -w` dns/connect/tls/ttfb/total) and test from an independent location (check-host.net) before touching anything. If time-to-first-byte is normal but transfer crawls at a few KB/s, and other locations load in a few seconds, it is per-IP bandwidth throttling of your machine, not a site problem; stop hammering it and it lifts on its own. Keep browser test runs light: skip video (`wp_page_screenshot` does by default) and avoid repeated full-page runs. **Why:** Shared LiteSpeed/CloudLinux hosts throttle a single IP that pulls lots of data quickly; a 20MB+ hero video downloaded on every test run gets there fast.
 
+- **Symptom:** A GSAP ScrollTrigger pin holds a builder section in place, but the next section slides up over it while it's pinned, and later pins start too early. **Fix:** Set `pinSpacing: true` explicitly on every pin. **Why:** ScrollTrigger turns pin spacing OFF by default when the pinned element's parent is a flex container - and every Divi 5 section and Elementor Flexbox Container is one - so the page never gets the extra scroll length the pin needs. A test page with plain block sections won't reproduce it.
+
+- **Symptom:** A pinned, scroll-driven step sequence jitters or lands on the wrong step when scrolling stops, on a page with smooth scrolling (Lenis). **Fix:** Don't use ScrollTrigger `snap` together with Lenis; instead give each step a steady phase and crossfade only at the end of its scroll segment, so there's never a half-way state to stop on. **Why:** snap scrolls the window natively while Lenis owns the scroll position and eases it back - the two fight. In tests, move the scroll with `lenis.scrollTo(y, {immediate:true})`, not `window.scrollTo`.
+
 ## WP-CLI & Database
 
 ## General
