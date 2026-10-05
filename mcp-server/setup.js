@@ -56,6 +56,11 @@ function createSiteFolder(site) {
       `WordPress site managed via Claude Connector.\n\n` +
       `**URL:** ${site.url}  \n` +
       `**Mode:** ${modeDesc}\n\n` +
+      `## Designing or building pages\n\n` +
+      `Before building anything in Divi or Elementor, read the playbook: ` +
+      `https://github.com/wisnuub/claude-connector/blob/main/BUILDING.md - it covers the design method and ` +
+      `the safety rules for a live client site (new page only, password + noindex preview, library templates). ` +
+      `Use \`wp_page_screenshot\` to look at what you built, desktop and mobile, after every meaningful change.\n\n` +
       `## Shared knowledge base\n\n` +
       `Before troubleshooting an unfamiliar WordPress/Elementor/Divi/hosting issue, call ` +
       `\`wp_knowledge_search\` - it may already be documented from a previous site. After resolving ` +
