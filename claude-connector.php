@@ -999,7 +999,9 @@ function claude_acf_fields_set( $req ) {
     $failed  = array();
     foreach ( $fields as $key => $value ) {
         // update_field() returns false only on a genuine failure (field not found or type mismatch).
-        $result = update_field( sanitize_text_field( $key ), $value, $post_id );
+        // ACF stores through update_metadata(), which wp_unslash()es - slash first or
+        // backslashes in values (paths, regex, escaped JSON) are silently stripped.
+        $result = update_field( sanitize_text_field( $key ), wp_slash( $value ), $post_id );
         if ( $result !== false ) {
             $updated[] = $key;
         } else {
@@ -1042,7 +1044,8 @@ function claude_acf_options_set( $req ) {
     }
     $updated = array();
     foreach ( $fields as $key => $value ) {
-        update_field( sanitize_text_field( $key ), $value, 'option' );
+        // ACF wp_unslash()es option values too (acf_update_metadata) - see claude_acf_fields_set().
+        update_field( sanitize_text_field( $key ), wp_slash( $value ), 'option' );
         $updated[] = $key;
     }
     return new WP_REST_Response( array( 'updated' => $updated ) );
