@@ -69,6 +69,8 @@ Entries are generalized on purpose — no site names, URLs, or secrets.
 
 - **Symptom:** On a new page with a dark hero, the fixed header's menu links are dark and unreadable at the top of the page, although the homepage's header has white links over its video. **Fix:** Find the rule that does it on the homepage and repeat it for the new page, scoped to pages carrying the hero (`body:has(.x-hero)`). **Why:** Header colour states are often page-scoped - on gariconsultants.com it's `.home #et-boc .pa-header li a{color:#fff}`, with a site script adding `.pa-fixed-header` (white background, dark links) after 100px of scroll.
 
+- **Symptom:** Image crossfades in a scroll sequence (or any image first shown mid-animation) stutter. **Fix:** Serve right-sized files - a 6016x4016 original shown in a 624px box is 24 megapixels to decode on first paint - and load + `img.decode()` every frame up front (builders mark them `loading="lazy"`). Converting to WebP without resizing cuts bytes but not decode cost. **Why:** On gariconsultants.com two 4MB Unsplash originals caused it; after resizing to 2560px WebP (via wp-image-optimizer with resize on) and decoding ahead, the slowest frame through the sequence was 6ms.
+
 ## WP-CLI & Database
 
 ## General

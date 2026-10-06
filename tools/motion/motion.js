@@ -12,7 +12,8 @@
  *   m-parallax-bg  section/container background image drifts while scrolling
  *   m-clip       media opens from an inset clip as it scrolls into view
  *   m-count      the first number inside counts up from 0 (final value stays in the HTML)
- *   m-marquee    contents scroll sideways forever; direction follows scroll direction
+ *   m-marquee    contents scroll sideways forever, right to left (add m-reverse for
+ *                left to right; m-follow to reverse while the page scrolls up)
  *   m-fill       statement text: words fill from faint to full as it scrolls through
  *   m-horizontal children slide sideways while the parent section is pinned (>=900px)
  *   m-magnetic   button/link drifts toward the cursor (fine pointers only)
@@ -185,8 +186,11 @@
       Array.prototype.slice.call(copy.childNodes).forEach(function (c) { track.appendChild(c); });
       host.appendChild(track);
       host.style.overflow = 'hidden';
-      var tween = gsap.to(track, { xPercent: -50, ease: 'none', duration: Math.max(18, track.scrollWidth / 90), repeat: -1 });
-      ST.create({ trigger: el, start: 'top bottom', end: 'bottom top', onUpdate: function (self) {
+      // One steady direction (items travel right to left); m-reverse flips it.
+      // m-follow makes it reverse while the page scrolls up.
+      var rev = el.classList.contains('m-reverse');
+      var tween = gsap.fromTo(track, { xPercent: rev ? -50 : 0 }, { xPercent: rev ? 0 : -50, ease: 'none', duration: Math.max(18, track.scrollWidth / 90), repeat: -1 });
+      if (el.classList.contains('m-follow')) ST.create({ trigger: el, start: 'top bottom', end: 'bottom top', onUpdate: function (self) {
         gsap.to(tween, { timeScale: self.direction === -1 ? -1 : 1, duration: 0.6, overwrite: true });
       } });
     });
@@ -242,8 +246,17 @@
         if (media) {
           var box = media.querySelector(':scope > .e-con-inner') || media;
           box.style.display = 'grid';
-          frames.forEach(function (f) { f.style.gridArea = '1 / 1'; f.style.display = 'block'; });
-          gsap.set(frames, { autoAlpha: 0 });
+          frames.forEach(function (f) {
+            f.style.gridArea = '1 / 1'; f.style.display = 'block';
+            // Fetch and decode every step image now: builders mark them
+            // loading="lazy", and a photo decoded on first show stutters its
+            // crossfade (badly for multi-megapixel originals).
+            Array.prototype.forEach.call(f.querySelectorAll('img'), function (img) {
+              img.loading = 'eager';
+              if (img.decode) img.decode().catch(function () {});
+            });
+          });
+          gsap.set(frames, { autoAlpha: 0, willChange: 'opacity' });
           gsap.set(frames[0], { autoAlpha: 1 });
         }
         gsap.set(items, { opacity: 0.22 });
