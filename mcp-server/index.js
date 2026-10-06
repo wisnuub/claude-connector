@@ -151,7 +151,7 @@ async function safeCall(fn) {
 // Kept in step with CLAUDE_CONNECTOR_VERSION in claude-connector.php. The two
 // halves ship together, and a stale copy of this file silently hides whole
 // tools - which is much harder to notice than an outright error.
-const MCP_VERSION = '1.7.0';
+const MCP_VERSION = '1.7.1';
 
 const server = new McpServer({ name: 'claude-connector', version: MCP_VERSION });
 
