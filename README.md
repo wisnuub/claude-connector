@@ -524,6 +524,51 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 
 ## Changelog
 
+### 1.7.1 — ACF backslash fix, scroll storytelling
+
+**Fixed**
+
+- **ACF field writes silently stripped backslashes.** `wp_acf_fields_set` and
+  `wp_acf_options_set` passed values to `update_field()` unslashed, but ACF
+  `wp_unslash()`es them on save (through `update_metadata()` for posts and
+  explicitly for options), so `C:\path`, regex and escaped JSON lost their
+  backslashes. Values are now slashed first, like every other write path.
+
+**Verified** - the escaping of every builder write path, with deliberately hostile
+content (quotes, Windows paths, regex, a literal `\u0022`, `-->` and fake block
+comments, `<script>`, CSS custom properties, emoji, CJK, RTL, entities):
+`tools/divi5.mjs` output parsed by WordPress's own block parser (8/8); posts,
+meta, updates, find-and-replace and files round-tripped byte-exact on a live
+site; Divi 5 and Divi 4 pages written, read back byte-exact and rendered with
+no escaping debris on live sites.
+
+**Motion** (`tools/motion/`)
+
+- `m-pin` + `m-steps` / `m-steps-media`: scroll storytelling - a section holds
+  still while list items activate one by one and the matching image crossfades
+  in; stopping mid-crossfade glides to the next whole step (works with Lenis).
+  Step images are loaded and decoded up front so crossfades don't stutter.
+- `m-pin` + `m-fill`: a statement holds until every word has filled.
+- `m-load`: a hero's reveals play on page load instead of on scroll.
+- `m-fill`, `m-horizontal`, `m-magnetic` effects.
+- Pins centre below a fixed header, re-measured once scrolled (many headers
+  shrink); the height is published as `--m-header` for full-screen sections.
+- `m-marquee` keeps one steady direction (`m-reverse` flips it, `m-follow`
+  reverses while scrolling up) and loops list items with even spacing.
+- Pin spacing is forced on: ScrollTrigger turns it off inside flex parents
+  (every Divi 5 section and Elementor container), letting the next section
+  slide over the pinned one.
+
+**Builder tooling and docs**
+
+- `tools/divi5.mjs`: `section(..., { video: { mp4, webm } })` sets a native
+  background video.
+- [DESIGN-STYLES.md](DESIGN-STYLES.md): seven style archetypes from an
+  Awwwards study, so a build starts from a named direction.
+- [BUILDING.md](BUILDING.md): full-screen sections under a fixed header,
+  transparent headers over dark heroes (link colours and a reversed logo),
+  background-video overlays; new [KNOWLEDGE.md](KNOWLEDGE.md) entries.
+
 ### 1.7.0 — Builder design tooling
 
 From building two redesign concepts on live client sites (Divi 5 and Elementor 4)
