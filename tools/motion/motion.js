@@ -50,7 +50,9 @@
     '.m-parallax,.m-parallax .et_pb_image_wrap,.m-parallax .elementor-widget-container{overflow:hidden}' +
     '.m-parallax img{will-change:transform}' +
     '.m-marquee{overflow:hidden}.m-marquee-track{display:flex;width:max-content;will-change:transform}' +
-    '.m-marquee-track>*{flex:none;margin-right:var(--m-gap,56px)}' +
+    // !important: the loop maths needs the same space after every item, and page
+    // CSS (e.g. ul/li{margin:0} at #et-boc specificity) would otherwise win.
+    '.m-marquee-track>*{flex:none;margin:0 var(--m-gap,56px) 0 0!important}' +
     // SplitText wraps each line in <line-class>-mask with overflow:clip; pad it so
     // descenders (g, y, q) aren't cut off at a tight hero line-height.
     '.m-line-mask{padding-bottom:.26em;margin-bottom:-.26em}' +
@@ -169,8 +171,12 @@
 
     // Marquees: duplicate the content once, slide by half its width, loop.
     all('.m-marquee').forEach(function (el) {
-      var host = inner(el, 'ul,ol,.elementor-widget-container,.et_pb_text_inner');
-      if (host.querySelector('.m-marquee-track')) return;
+      if (el.querySelector('.m-marquee-track')) return;
+      // Loop the actual items: descend through single-child wrappers (builder
+      // inner divs, a lone <ul>) so a list's <li>s become the track's children.
+      // Looping the whole list as one block leaves no gap where the copies meet.
+      var host = el;
+      while (host.children.length === 1 && /^(DIV|UL|OL|SECTION)$/.test(host.firstElementChild.tagName)) host = host.firstElementChild;
       var track = document.createElement('div');
       track.className = 'm-marquee-track';
       while (host.firstChild) track.appendChild(host.firstChild);
