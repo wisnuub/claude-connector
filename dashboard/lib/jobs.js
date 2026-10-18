@@ -8,6 +8,7 @@ import crypto from 'crypto';
 import { call, externalCheck, LONG, WPError } from './wp.js';
 import { getSite, getSettings, siteState, patchSiteState, addHistory, agencyFor } from './store.js';
 import { runFormTest } from './formtest.js';
+import { appendTextLog, notify, summarize } from './log.js';
 
 export const bus = new EventEmitter();
 bus.setMaxListeners(100);
@@ -98,7 +99,9 @@ function startJob(spec, worker) {
     } finally {
       busySites.delete(id);
       entry.finishedAt = new Date().toISOString();
-      addHistory({ jobId: job.id, type: job.type, title: job.title, site: id, siteName: entry.name, status: entry.status, summary: entry.summary, steps: entry.steps, at: entry.finishedAt });
+      const record = { jobId: job.id, type: job.type, title: job.title, site: id, siteName: entry.name, status: entry.status, summary: entry.summary, steps: entry.steps, at: entry.finishedAt };
+      addHistory(record);
+      appendTextLog(record);
       if (job.type === 'maintain') patchSiteState(id, { lastRun: { status: entry.status, summary: entry.summary, at: entry.finishedAt, jobId: job.id } });
       emitJob(job);
     }
@@ -121,6 +124,14 @@ function startJob(spec, worker) {
       : Object.values(job.sites).some(s => s.status === 'warning') ? 'warning' : 'done';
     job.finishedAt = new Date().toISOString();
     emitJob(job);
+    if (getSettings().notifyOnFailure !== false && job.status === 'failed') {
+      const bad = Object.values(job.sites).filter(s => s.status === 'failed');
+      const what = bad.map(s => {
+        const f = summarize(s).failed[0];
+        return `${s.name}: ${f ? f.label : s.summary || 'failed'}`;
+      });
+      notify(`${job.title}: ${bad.length} site${bad.length === 1 ? '' : 's'} failed`, what.join(' · '));
+    }
   });
   return publicJob(job);
 }
@@ -132,17 +143,19 @@ function makeCtx(job, id, spec) {
     spec,
     failed: false,
     warned: false,
-    step(label, status = 'running', detail = null) {
-      const s = { label, status, detail, at: new Date().toISOString() };
+    // meta: { kind, result: updated|skipped|failed|current|ok, name, from, to } - what the Log reads.
+    step(label, status = 'running', detail = null, meta = null) {
+      const s = { label, status, detail, at: new Date().toISOString(), ...(meta ? { meta } : {}) };
       entry.steps.push(s);
       if (status === 'failed') ctx.failed = true;
       if (status === 'warning') ctx.warned = true;
       emitJob(job);
       return {
-        set(status2, label2, detail2) {
+        set(status2, label2, detail2, meta2) {
           s.status = status2;
           if (label2) s.label = label2;
           if (detail2 !== undefined) s.detail = detail2;
+          if (meta2) s.meta = { ...(s.meta || {}), ...meta2 };
           if (status2 === 'failed') ctx.failed = true;
           if (status2 === 'warning') ctx.warned = true;
           emitJob(job);
@@ -159,25 +172,39 @@ function makeCtx(job, id, spec) {
 const label = r => r.name || r.item;
 
 /** One update request, recorded as a step. Returns the result or null on failure. */
+/** Installed and offered version of an item, from the cached overview. */
+function versionsOf(siteId, type, item) {
+  const ov = siteState(siteId).overview;
+  if (!ov) return {};
+  if (type === 'plugin') { const p = ov.plugins.find(x => x.file === item); return { from: p?.version, to: p?.update?.version }; }
+  if (type === 'theme') { const t = ov.themes.find(x => x.stylesheet === item); return { from: t?.version, to: t?.update?.version }; }
+  if (type === 'core') return { from: ov.core.version, to: ov.core.minor?.version || ov.core.major?.version };
+  return {};
+}
+
+/** One update request, recorded as a step. Returns the result or null on failure. */
 async function updateStep(ctx, type, item, name, extra = {}) {
-  const st = ctx.step(`Updating ${name}…`);
+  const v = versionsOf(ctx.site.id, type, item);
+  const meta = { kind: type, name, item, from: v.from, to: v.to };
+  const st = ctx.step(`Updating ${name}…`, 'running', null, meta);
   try {
     const r = await ctx.api('POST', '/maintenance/update', { body: { type, item, ...extra }, timeout: LONG });
     if (r.status === 'up_to_date') {
-      st.set('ok', `${name}: already up to date${r.note ? ` - ${r.note}` : ''}`);
+      st.set('ok', `${name}: already up to date${r.note ? ` - ${r.note}` : ''}`, undefined, { result: 'current' });
       return r;
     }
     const h = r.health?.status;
     const ver = r.from && r.to ? ` ${r.from} → ${r.to}` : r.count != null ? ` (${r.count} of ${r.of})` : '';
-    if (h === 'unverified') st.set('warning', `${label(r)}${ver} - updated, but the site could not be checked from the inside`, r.health.message);
-    else if (h === 'fatal') st.set('failed', `${label(r)}${ver} - updated, and the site now shows a fatal error`, r.health.message);
-    else st.set('ok', `${label(r)}${ver}`);
+    const done = { result: 'updated', from: r.from ?? meta.from, to: r.to ?? meta.to };
+    if (h === 'unverified') st.set('warning', `${label(r)}${ver} - updated, but the site could not be checked from the inside`, r.health.message, done);
+    else if (h === 'fatal') st.set('failed', `${label(r)}${ver} - updated, and the site now shows a fatal error`, r.health.message, { ...done, result: 'failed' });
+    else st.set('ok', `${label(r)}${ver}`, null, done);
     return r;
   } catch (e) {
     const i = errInfo(e);
-    if (i.code === 'update_rolled_back') st.set('failed', `${name}: the new version broke the site - rolled back to ${i.data?.from}`, i.message);
-    else if (i.code === 'no_package') st.set('warning', `${name}: update needs a licence key - skipped`, i.message);
-    else st.set('failed', `${name}: ${i.message}`, i.data ? JSON.stringify(i.data).slice(0, 500) : null);
+    if (i.code === 'update_rolled_back') st.set('failed', `${name} ${i.data?.to || meta.to || ''}: broke the site - rolled back to ${i.data?.from || meta.from}`, i.message, { result: 'failed' });
+    else if (i.code === 'no_package') st.set('warning', `${name} ${meta.to || ''}: not updated - needs a licence key`, i.message, { result: 'skipped', reason: 'licence' });
+    else st.set('failed', `${name}${meta.to ? ` → ${meta.to}` : ''}: ${i.message}`, i.data ? JSON.stringify(i.data).slice(0, 500) : null, { result: 'failed' });
     return null;
   }
 }
@@ -194,7 +221,7 @@ async function healthStep(ctx, title = 'Site health') {
   if (inside.status !== 'ok') bits.push(`inside: ${inside.message || inside.status}`);
   if (outside.status !== 'ok') bits.push(`homepage: ${outside.message}`);
   if (inside.stuck_maintenance) bits.push('a .maintenance file from an interrupted update is still in place');
-  st.set(fatal ? 'failed' : warn ? 'warning' : 'ok', `${title}: ${fatal ? 'broken' : warn ? 'check needed' : `ok (homepage ${outside.code}, ${outside.ms} ms)`}`, bits.join(' · ') || null);
+  st.set(fatal ? 'failed' : warn ? 'warning' : 'ok', `${title}: ${fatal ? 'broken' : warn ? 'check needed' : `ok (homepage ${outside.code}, ${outside.ms} ms)`}`, bits.join(' · ') || null, { kind: 'health', result: fatal ? 'failed' : 'ok' });
   const health = { inside, outside, status: fatal ? 'fatal' : warn ? 'warning' : 'ok', at: new Date().toISOString() };
   patchSiteState(ctx.site.id, { health });
   return health;
@@ -252,14 +279,19 @@ async function formStep(ctx, { url } = {}) {
     error: ['failed', 'Form test could not run'],
   };
   const [status, text] = map[r.status] || ['warning', `Form test: ${r.status}`];
-  st.set(status, text, [r.message, mailer?.warning].filter(Boolean).join(' · ') || null);
+  st.set(status, text, [r.message, mailer?.warning].filter(Boolean).join(' · ') || null, { kind: 'form', result: status === 'failed' ? 'failed' : 'ok', ref, form: r.status });
   return r;
 }
 
 // ── Job types ────────────────────────────────────────────────────────────────
 
 /** Everything: health → plugins → themes → core → translations → Claude Connector → health → form. */
-export function startMaintain({ sites, allowMajorCore, formTest }) {
+/**
+ * @param {object}   o
+ * @param {string[]} o.sites
+ * @param {object}   [o.exclude]  { siteId: [keys] } left out of this run, e.g. "plugin:akismet/akismet.php", "theme:astra", "core", "translations"
+ */
+export function startMaintain({ sites, allowMajorCore, formTest, exclude = {} }) {
   const settings = getSettings();
   allowMajorCore = allowMajorCore ?? settings.allowMajorCore;
   // formTest: 'now' | 'queue' | 'off' (true/false accepted from older callers).
@@ -273,33 +305,49 @@ export function startMaintain({ sites, allowMajorCore, formTest }) {
       return o;
     })();
 
-    const pre = await healthStep(ctx, 'Health before updating');
-    if (pre.status === 'fatal') {
-      ctx.step('Not updating: the site was already broken before any change', 'failed');
-      return 'Site was already broken - nothing updated';
-    }
+    // Everything there is to do, so whatever is not reached is logged as not done.
+    const planned = [
+      ...ov0.plugins.filter(p => p.update && !p.self).map(p => ({ key: `plugin:${p.file}`, type: 'plugin', item: p.file, name: p.name, from: p.version, to: p.update.version, u: p.update })),
+      ...ov0.themes.filter(t => t.update).map(t => ({ key: `theme:${t.stylesheet}`, type: 'theme', item: t.stylesheet, name: t.name, from: t.version, to: t.update.version, u: t.update })),
+      ...((ov0.core.minor || (allowMajorCore && ov0.core.major)) ? [{ key: 'core', type: 'core', item: '', name: 'WordPress', from: ov0.core.version, to: (allowMajorCore && ov0.core.major ? ov0.core.major : ov0.core.minor).version }] : []),
+      ...(ov0.translations > 0 ? [{ key: 'translations', type: 'translations', item: '', name: 'Translations' }] : []),
+      // The connector last: if it changes something, every other update is already in.
+      ...ov0.plugins.filter(p => p.update && p.self).map(p => ({ key: `plugin:${p.file}`, type: 'plugin', item: p.file, name: p.name, from: p.version, to: p.update.version, u: p.update })),
+    ];
+    const handled = new Set();
+    const notDone = (it, why, reason) => {
+      handled.add(it.key);
+      ctx.step(`${it.name}${it.to ? ` ${it.to}` : ''}: not updated - ${why}`, 'warning', null, { kind: it.type, name: it.name, item: it.item, from: it.from, to: it.to, result: 'skipped', reason });
+    };
 
-    let done = 0, failed = 0, skipped = 0;
-    const count = r => { if (r === null) failed++; else if (r.status === 'updated') done++; };
-    const plugins = ov0.plugins.filter(p => p.update && !p.self);
-    for (const p of plugins) {
-      if (!p.update.php_ok) { ctx.step(`${p.name}: ${p.update.version} needs PHP ${p.update.requires_php} - skipped`, 'warning'); skipped++; continue; }
-      if (!p.update.package) { ctx.step(`${p.name}: ${p.update.version} needs a licence key - skipped`, 'warning'); skipped++; continue; }
-      count(await updateStep(ctx, 'plugin', p.file, p.name));
+    let done = 0, failed = 0, skipped = 0, left = 0;
+    const held = new Set(siteState(ctx.site.id).held || []);
+    const excluded = new Set(exclude[ctx.site.id] || []);
+    let pre;
+    try {
+      pre = await healthStep(ctx, 'Health before updating');
+      if (pre.status === 'fatal') {
+        ctx.step('Not updating: the site was already broken before any change', 'failed');
+        for (const it of planned) notDone(it, 'the site was already broken', 'broken-before');
+        return 'Site was already broken - nothing updated';
+      }
+      if (ov0.core.major && !allowMajorCore) {
+        ctx.step(`WordPress ${ov0.core.major.version}: not updated - major update (allow it in Settings or update core on its own)`, 'ok', null,
+          { kind: 'core', name: 'WordPress', from: ov0.core.version, to: ov0.core.major.version, result: 'skipped', reason: 'major' });
+      }
+      for (const it of planned) {
+        if (held.has(it.key)) { notDone(it, `held - kept at ${it.from || 'the installed version'} on purpose`, 'held'); left++; continue; }
+        if (excluded.has(it.key)) { notDone(it, 'left out of this run', 'excluded'); left++; continue; }
+        if (it.u && it.u.php_ok === false) { notDone(it, `needs PHP ${it.u.requires_php} (site runs ${ov0.php_version})`, 'php'); skipped++; continue; }
+        if (it.u && !it.u.package) { notDone(it, 'needs a licence key', 'licence'); skipped++; continue; }
+        handled.add(it.key);
+        const r = await updateStep(ctx, it.type, it.item, it.name, it.type === 'core' ? { allow_major: !!allowMajorCore } : {});
+        if (r === null) failed++; else if (r.status === 'updated') done++;
+      }
+    } finally {
+      // A run that stopped part-way (lost connection, timeout) still says what it did not get to.
+      for (const it of planned) if (!handled.has(it.key)) notDone(it, 'the run stopped before reaching it', 'stopped');
     }
-    for (const t of ov0.themes.filter(t => t.update)) {
-      if (!t.update.package) { ctx.step(`${t.name}: ${t.update.version} needs a licence key - skipped`, 'warning'); skipped++; continue; }
-      count(await updateStep(ctx, 'theme', t.stylesheet, t.name));
-    }
-    if (ov0.core.minor || (allowMajorCore && ov0.core.major)) {
-      count(await updateStep(ctx, 'core', '', 'WordPress', { allow_major: !!allowMajorCore }));
-    } else if (ov0.core.major) {
-      ctx.step(`WordPress ${ov0.core.major.version} is a major update - skipped (allow it in Settings or update core on its own)`, 'ok');
-    }
-    if (ov0.translations > 0) count(await updateStep(ctx, 'translations', '', 'Translations'));
-    // The connector last: if it changes something, every other update is already in.
-    const self = ov0.plugins.find(p => p.update && p.self);
-    if (self) count(await updateStep(ctx, 'plugin', self.file, self.name));
 
     await refreshOverview(ctx.site.id).catch(() => {});
     const post = await healthStep(ctx, 'Health after updating');
@@ -314,6 +362,7 @@ export function startMaintain({ sites, allowMajorCore, formTest }) {
     const parts = [`${done} updated`];
     if (failed) parts.push(`${failed} failed`);
     if (skipped) parts.push(`${skipped} skipped`);
+    if (left) parts.push(`${left} left out`);
     if (post.status !== 'ok') parts.push(`health: ${post.status}`);
     if (form) parts.push(`form: ${form.status}`);
     if (formTest === 'queue' && post.status !== 'fatal') parts.push('form test queued');
@@ -351,7 +400,8 @@ export function startPluginAction({ sites, action, files, slug, version, activat
       const st = ctx.step(`Installing ${slug}${version ? ` ${version}` : ''}…`);
       try {
         const r = await ctx.api('POST', '/plugins', { body: { action: 'install', slug, version: version || undefined, activate: !!activate, overwrite: !!version }, timeout: LONG });
-        st.set('ok', `${r.name} ${r.version} ${r.status === 'replaced' ? `installed over ${r.from}` : 'installed'}${r.active ? ' and activated' : ''}`);
+        st.set('ok', `${r.name} ${r.version} ${r.status === 'replaced' ? `installed over ${r.from}` : 'installed'}${r.active ? ' and activated' : ''}`, null,
+          { kind: 'install', name: r.name, item: r.file, from: r.from || null, to: r.version, result: 'updated' });
       } catch (e) {
         const i = errInfo(e);
         st.set(i.code === 'already_installed' ? 'ok' : 'failed', i.code === 'already_installed' ? `${slug} is already installed` : `${slug}: ${i.message}`);

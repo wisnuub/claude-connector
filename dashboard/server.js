@@ -14,6 +14,7 @@ import * as jobs from './lib/jobs.js';
 import { call } from './lib/wp.js';
 import { closeBrowser } from './lib/formtest.js';
 import { startScheduler, nextRun, scheduledSites } from './lib/scheduler.js';
+import { summarize, LOG_DIR } from './lib/log.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, 'public');
@@ -56,6 +57,7 @@ function publicSite(s) {
     forms: st.forms || null, formUrl: st.formUrl || null, mailer: st.mailer || st.overview?.mailer || null,
     agencyId: st.agencyId || null,
     formTestQueued: st.formTestQueued || null,
+    held: st.held || [],
   };
 }
 
@@ -63,6 +65,10 @@ function sitesOrThrow(ids) {
   if (!Array.isArray(ids) || !ids.length) throw Object.assign(new Error('Pick at least one site.'), { status: 400 });
   for (const id of ids) if (!store.getSite(id)) throw Object.assign(new Error(`Unknown site ${id}`), { status: 404 });
   return ids;
+}
+
+function failuresInfo() {
+  return store.openFailures().map(h => ({ site: h.site, siteName: h.siteName, title: h.title, at: h.at, summary: h.summary, first: summarize(h).failed[0]?.label || null }));
 }
 
 function scheduleInfo() {
@@ -76,14 +82,39 @@ function broadcast(event, data) {
 }
 jobs.bus.on('job', j => broadcast('job', j));
 jobs.bus.on('site', ({ id }) => { const s = store.getSite(id); if (s) broadcast('site', publicSite(s)); broadcast('schedule', scheduleInfo()); });
-jobs.bus.on('job', j => { if (j.status !== 'running') broadcast('schedule', scheduleInfo()); });
+jobs.bus.on('job', j => { if (j.status !== 'running') { broadcast('schedule', scheduleInfo()); broadcast('failures', failuresInfo()); } });
+
+// ── New sites ────────────────────────────────────────────────────────────────
+// Watch ~/claude-sites (and sites.json) so a site added by the one-click
+// installer shows up without a reload. fs.watch can miss events or fail when
+// the folder does not exist yet, so a light poll backs it up.
+const newSites = new Set();
+let knownSites = new Map(store.listSites({ includeHidden: true }).map(s => [s.id, s.url]));
+let rescanTimer = null;
+function rescanSites() {
+  clearTimeout(rescanTimer);
+  rescanTimer = setTimeout(() => {
+    const now = store.listSites({ includeHidden: true });
+    const added = now.filter(s => !knownSites.has(s.id));
+    const changed = added.length || now.length !== knownSites.size || now.some(s => knownSites.get(s.id) !== s.url);
+    knownSites = new Map(now.map(s => [s.id, s.url]));
+    if (!changed) return;
+    for (const s of added) newSites.add(s.id);
+    broadcast('sites', { added: added.map(s => ({ id: s.id, name: s.name, url: s.url })) });
+    if (added.length) console.log(`New site${added.length === 1 ? '' : 's'} found: ${added.map(s => s.name).join(', ')}`);
+  }, 600);
+}
+for (const target of [store.SITES_DIR, path.dirname(store.MCP_SITES_FILE)]) {
+  try { fs.watch(target, { recursive: process.platform !== 'linux' }, rescanSites); } catch {}
+}
+setInterval(rescanSites, 15_000);
 
 async function api(req, res, url) {
   const p = url.pathname;
   const m = req.method;
 
   if (m === 'GET' && p === '/api/state') {
-    return send(res, 200, { version: VERSION, sites: store.listSites({ includeHidden: true }).map(publicSite), settings: store.getSettings(), jobs: jobs.listJobs(), schedule: scheduleInfo() });
+    return send(res, 200, { version: VERSION, sites: store.listSites({ includeHidden: true }).map(publicSite), settings: store.getSettings(), jobs: jobs.listJobs(), schedule: scheduleInfo(), failures: failuresInfo(), newSites: [...newSites], logDir: LOG_DIR });
   }
   if (m === 'GET' && p === '/api/events') {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
@@ -92,6 +123,13 @@ async function api(req, res, url) {
     const ping = setInterval(() => res.write(': ping\n\n'), 25_000);
     req.on('close', () => { clearInterval(ping); sseClients.delete(res); });
     return;
+  }
+  if (m === 'GET' && p === '/api/log') {
+    // Runs in the last N days, each with its steps sorted into updated / not done / failed / notice.
+    const days = Math.max(1, Math.min(365, parseInt(url.searchParams.get('days') || '30', 10)));
+    const since = new Date(Date.now() - days * 86400000).toISOString();
+    const entries = store.getHistory({ since, limit: 2000 }).map(e => ({ ...e, log: summarize(e) }));
+    return send(res, 200, { days, entries });
   }
   if (m === 'GET' && p === '/api/history') {
     return send(res, 200, store.getHistory({ site: url.searchParams.get('site') || undefined, limit: 30 }));
@@ -128,6 +166,22 @@ async function api(req, res, url) {
     return send(res, 200, { ok: true });
   }
   if (p === '/api/sites/unhide') { store.unhideAll(); return send(res, 200, { ok: true }); }
+  if (p === '/api/failures/dismiss') {
+    store.patchMeta({ failuresAckAt: new Date().toISOString() });
+    broadcast('failures', failuresInfo());
+    return send(res, 200, { ok: true });
+  }
+  if (p === '/api/sites/held') {
+    // { site, key: "plugin:<file>" | "theme:<stylesheet>" | "core" | "translations", held: bool }
+    const site = store.getSite(body.site);
+    if (!site || typeof body.key !== 'string') return send(res, 400, { message: 'site and key are required' });
+    const held = new Set(store.siteState(site.id).held || []);
+    body.held ? held.add(body.key) : held.delete(body.key);
+    store.patchSiteState(site.id, { held: [...held] });
+    broadcast('site', publicSite(site));
+    return send(res, 200, { held: [...held] });
+  }
+  if (p === '/api/sites/seen') { newSites.clear(); return send(res, 200, { ok: true }); }
   if (p === '/api/sites/meta') {
     // { sites: [ids], agencyId?, formUrl? } - agencyId '' clears it (unassigned).
     for (const id of sitesOrThrow(body.sites)) {
@@ -157,7 +211,7 @@ async function api(req, res, url) {
     const sites = sitesOrThrow(body.sites);
     switch (body.type) {
       case 'refresh': return send(res, 200, jobs.startRefresh({ sites }));
-      case 'maintain': return send(res, 200, jobs.startMaintain({ sites, allowMajorCore: body.allowMajorCore, formTest: body.formTest }));
+      case 'maintain': return send(res, 200, jobs.startMaintain({ sites, allowMajorCore: body.allowMajorCore, formTest: body.formTest, exclude: body.exclude || {} }));
       case 'update': return send(res, 200, jobs.startUpdate({ sites, items: body.items || [], allowMajorCore: body.allowMajorCore }));
       case 'plugin': return send(res, 200, jobs.startPluginAction({ sites, action: body.action, files: body.files, slug: body.slug, version: body.version, activate: body.activate }));
       case 'formtest': return send(res, 200, jobs.startFormTest({ sites, url: body.url }));

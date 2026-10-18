@@ -94,9 +94,11 @@ npm start            # → http://127.0.0.1:4590
 
 Needs Node.js 18+ and Google Chrome or Microsoft Edge (for the form test). Every site must run Claude Connector **1.8.0 or newer**. The plugin's auto-updater gets them there.
 
+**Shortcut (macOS):** `npm run shortcut` creates **Site Maintenance.app** in `~/Applications` and on the Desktop - open it from Spotlight, Launchpad or the Dock. It starts the dashboard if it is not running (through the background service when installed) and opens it in your browser. `npm run shortcut -- --remove` deletes it; run `npm run shortcut` again if Node.js moves.
+
 ### Where the sites come from
 
-Nothing to configure for sites set up with the [one-click installer](#connecting-claude-code-one-click-setup): the dashboard reads every `~/claude-sites/<site>/.mcp.json` (URL, key and connection mode) each time it loads, so a newly installed site shows up on refresh. It also reads `mcp-server/sites.json`, and you can **Add site** by hand. **Hide** removes a site from the dashboard without touching its folder. Nothing is sent to a site until you press a button.
+Nothing to configure for sites set up with the [one-click installer](#connecting-claude-code-one-click-setup): the dashboard reads every `~/claude-sites/<site>/.mcp.json` (URL, key and connection mode) and watches the folder, so a newly installed site appears within seconds - no reload - marked **New**. It also reads `mcp-server/sites.json`, and you can **Add site** by hand. **Hide** removes a site from the dashboard without touching its folder. Nothing is sent to a site until you press a button.
 
 ### What it does
 
@@ -105,9 +107,19 @@ Nothing to configure for sites set up with the [one-click installer](#connecting
 - **Themes, WordPress & server, Form test, History** tabs for the rest.
 - **Bulk across sites**: tick sites (or a whole agency) and run **Update everything**, **Check for updates**, **Form test now**, **Queue form test**, or a **Plugin…** action (install / update / activate / deactivate / delete one plugin on every selected site).
 
-**Update everything** on a site: health check → each plugin, one at a time (Claude Connector last) → themes → WordPress minor update (major only if allowed in Settings) → translations → health check from inside and from outside → form test (now, queued for the morning, or skipped - your choice in Settings). Up to four sites run in parallel; a site always runs one step at a time, so when something breaks it is clear what did it.
+**Update everything** first shows a checklist of every pending update on the chosen sites, all ticked: untick what you don't want this time. **Hold** keeps an item (a plugin, theme, core or translations on one site) at its current version on every run until you release it - held items are tagged in the plugin table. Updates that cannot go in (licence missing, PHP too old) are shown greyed out with the reason.
+
+The run itself, per site: health check → each plugin, one at a time (Claude Connector last) → themes → WordPress minor update (major only if allowed in Settings) → translations → health check from inside and from outside → form test (now, queued for the morning, or skipped - your choice in Settings). Up to four sites run in parallel; a site always runs one step at a time, so when something breaks it is clear what did it.
 
 Every plugin and theme update is **backed up, health-checked and rolled back automatically** if the site then fatals - see [`/maintenance/update`](#maintenance). Updates without a download (expired licence) and updates needing a newer PHP are skipped with a warning rather than attempted.
+
+### Log
+
+**Log** (top of the page) lists every run with, per site, what was **updated** (from → to), what was **not done** and why (left out, held, licence missing, PHP too old, major core update, site already broken, run stopped part-way) and what **failed** (rolled back, update error, broken site, failed form test) with the error. Filter by period, agency, problems / updates / everything; **Copy report** gives plain text to paste into an email or chat, **Download CSV** a spreadsheet.
+
+The same is appended to plain text files, one per month, in `dashboard/data/logs/maintenance-YYYY-MM.log`.
+
+When a site's last run failed, a red banner at the top lists it (and the first failure) until you dismiss it, and macOS shows a notification - useful for the background morning run. Turn the notification off in Settings.
 
 ### Agencies
 
@@ -143,7 +155,7 @@ If the Mac is asleep at the set time, the run happens when it wakes (until midda
 
 ### Data and security
 
-Everything lives in `dashboard/data/` (git-ignored): `settings.json`, `sites.json` (hand-added sites, **including their API keys**), `state.json`, `history.json`, and form-test screenshots. The server listens on `127.0.0.1` only, answers only to `127.0.0.1`/`localhost` host names (blocking DNS-rebinding pages), requires a custom header on every change (blocking cross-site form posts), and never sends API keys to the browser. `PORT`, `CC_SITES_DIR`, `CC_MCP_SITES` and `CC_DASHBOARD_DATA` override the port and file locations.
+Everything lives in `dashboard/data/` (git-ignored): `settings.json`, `sites.json` (hand-added sites, **including their API keys**), `state.json`, `history.json`, `logs/`, and form-test screenshots. The server listens on `127.0.0.1` only, answers only to `127.0.0.1`/`localhost` host names (blocking DNS-rebinding pages), requires a custom header on every change (blocking cross-site form posts), and never sends API keys to the browser. `PORT`, `CC_SITES_DIR`, `CC_MCP_SITES` and `CC_DASHBOARD_DATA` override the port and file locations.
 
 ---
 
@@ -648,6 +660,10 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 
 - **Maintenance dashboard** ([`dashboard/`](dashboard/)): a local web app for routine maintenance across all your sites - see [Maintenance dashboard](#maintenance-dashboard-many-sites). Finds the one-click installer's sites in `~/claude-sites` by itself; shows WordPress and PHP versions, pending updates and health per site; bulk updates across sites; plugin install / update / activate / deactivate / delete / version rollback, per site or across sites; sites grouped by agency.
 - **Real contact-form test**: fills in and submits the site's form in a browser (Divi 4/5, Contact Form 7, Gravity Forms, WPForms, Elementor Pro, Fluent Forms, Forminator), solves Divi's math captcha, and reports the form plugin's own success or error message with what was typed where and a screenshot. Per-agency details and field rules (`{random}`, `{first}`, `{skip}` for dropdowns and radios).
+- **Review before updating**: "Update everything" shows every pending update, all ticked - untick what to leave out; **Hold** keeps an item at its version on every run until released.
+- **Maintenance log**: per run and site, what was updated, what was not done and why, and what failed - in a Log view (filters, copy as text, CSV) and monthly text files; a failure banner and a macOS notification when a run fails.
+- **New sites appear live** when the one-click installer adds them to `~/claude-sites`.
+- **Shortcut**: `npm run shortcut` creates Site Maintenance.app (Spotlight / Launchpad / Dock / Desktop), which starts the dashboard if needed and opens it.
 - **Morning form tests**: updated sites are queued and tested at a set time and days; `npm run service:install` keeps the dashboard running in the background on macOS, and a run missed while the Mac slept happens on wake.
 - **`/maintenance/*` routes**: `overview`, `update` (one plugin/theme/core/translations, backed up and **rolled back automatically on a fatal**), `health`, `forms`, `test-email`.
 - **`POST /plugins` actions** `install` (wordpress.org slug, version or zip URL), `update` and `delete`.

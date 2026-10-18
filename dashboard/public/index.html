@@ -10,6 +10,7 @@
 <body>
   <header class="top">
     <h1>Site Maintenance<span class="ver" id="ver"></span></h1>
+    <nav class="seg views" aria-label="View"><button data-action="view" data-v="sites" class="on">Sites</button><button data-action="view" data-v="log">Log</button></nav>
     <div class="stats" id="stats"></div>
     <div class="actions">
       <button class="btn" data-action="check-all">Check all for updates</button>
@@ -19,8 +20,12 @@
   </header>
 
   <main>
-    <div class="toolbar" id="toolbar"></div>
-    <div class="sites" id="sites"></div>
+    <div id="banner"></div>
+    <div id="view-sites">
+      <div class="toolbar" id="toolbar"></div>
+      <div class="sites" id="sites"></div>
+    </div>
+    <div id="view-log" hidden></div>
   </main>
 
   <aside class="drawer min" id="drawer" hidden></aside>
@@ -60,6 +65,7 @@
         </label>
         <p class="hint">Runs while the dashboard is running. Keep it running in the background with <code>npm run service:install</code> (macOS). If the Mac is asleep at the set time, the test runs when it wakes, up to midday.</p>
         <label class="check"><input type="checkbox" name="showBrowser"> Show the browser window during form tests</label>
+        <label class="check"><input type="checkbox" name="notifyOnFailure"> Show a macOS notification when a run has failures</label>
         <label class="field" style="max-width:220px">Sites updated at the same time
           <input type="number" name="concurrency" min="1" max="10">
         </label>
@@ -115,6 +121,28 @@
         <p class="hint">Sites where the plugin is not installed are skipped. Activation is checked first: a plugin that breaks a site is not left active.</p>
       </div>
       <div class="df"><button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn primary" value="go" data-action="run-plugin-bulk">Run</button></div>
+    </form>
+  </dialog>
+
+  <!-- Review before Update everything -->
+  <dialog id="dlg-review" style="width:760px">
+    <form method="dialog" id="form-review">
+      <div class="dh"><h3 data-title>Update everything</h3></div>
+      <div class="db">
+        <p class="hint" style="margin:0">Untick anything you don't want updated this time. <b>Hold</b> keeps it unticked on every run for that site until you release it. Updates are checked again when the run starts; anything new by then is included.</p>
+        <div id="review-body"></div>
+        <div class="bar" style="margin:0">
+          <label class="field">Form test afterwards
+            <select name="formTest">
+              <option value="queue">Wait for the morning run</option>
+              <option value="now">Run straight away</option>
+              <option value="off">Skip</option>
+            </select>
+          </label>
+          <label class="check" style="align-self:flex-end;padding-bottom:6px"><input type="checkbox" name="allowMajorCore"> Include major WordPress updates</label>
+        </div>
+      </div>
+      <div class="df"><button class="btn" value="cancel">Cancel</button><button class="btn primary" value="go" data-action="run-review">Update</button></div>
     </form>
   </dialog>
 

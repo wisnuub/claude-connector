@@ -270,3 +270,37 @@ dialog h5 { margin: 4px 0 -4px; font-size: 12px; text-transform: uppercase; lett
 .group .gname .muted { font-weight: 400; font-size: 13px; }
 .swatch { width: 10px; height: 10px; border-radius: 3px; display: inline-block; flex: none; }
 .profile-tabs .btn .swatch { margin-right: 2px; }
+
+/* ── Views, banner, log ───────────────────────────────────────────── */
+.views { margin-left: 8px; }
+.banner { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+.banner > div:first-child { flex: 1; min-width: 240px; }
+.banner ul { margin: 6px 0 0; padding-left: 18px; }
+.banner .banner-acts { display: flex; gap: 6px; }
+.logjob { margin-bottom: 12px; }
+.logjob h4 { font-size: 14px; margin-bottom: 4px; }
+.logsite { border-top: 1px solid var(--line); padding: 10px 0 4px; }
+.logsite:first-of-type { border-top: 0; }
+.logsite-h { font-size: 13.5px; }
+.logcats { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px 16px; margin-top: 8px; }
+.logcat-h { font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 2px; }
+.logcat.ok .logcat-h, .logcat.ok .ic { color: var(--ok); }
+.logcat.warn .logcat-h, .logcat.warn .ic { color: var(--warn); }
+.logcat.bad .logcat-h, .logcat.bad .ic { color: var(--bad); }
+.logcat ul { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+.logcat li { display: flex; gap: 6px; padding: 2px 0; }
+.logcat li .ic { width: 12px; flex: none; text-align: center; }
+.logcat li .d { display: block; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+
+/* ── Review dialog ────────────────────────────────────────────────── */
+.rv { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.rv + .rv { margin-top: 8px; }
+.rv-h { display: flex; align-items: center; gap: 6px; }
+.rv-h b { flex: 1; }
+.rv-list { list-style: none; margin: 6px 0 0; padding: 0; }
+.rv-list li { display: flex; align-items: center; gap: 8px; padding: 3px 0; border-top: 1px solid var(--line); }
+.rv-list li:first-child { border-top: 0; }
+.rv-list li .check { flex: 1; align-items: flex-start; font-size: 13px; }
+.rv-list li .check input { margin-top: 2px; }
+.rv-list li.off .check { color: var(--muted); }
+#review-body { max-height: 52vh; overflow: auto; }

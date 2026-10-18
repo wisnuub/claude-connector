@@ -60,6 +60,7 @@ export const DEFAULT_SETTINGS = {
   formTestMode: 'queue',
   mailTestWhenNoForm: true,
   showBrowser: false,
+  notifyOnFailure: true,
   schedule: { enabled: false, time: '08:30', days: [1, 2, 3, 4, 5], what: 'queued' },
 };
 
@@ -125,9 +126,12 @@ export function slugify(s) {
 function normUrl(u) { return String(u || '').trim().replace(/\/+$/, ''); }
 function urlKey(u) { return normUrl(u).replace(/^https?:\/\//, '').replace(/^www\./, '').toLowerCase(); }
 
+export const SITES_DIR = process.env.CC_SITES_DIR || path.join(os.homedir(), 'claude-sites');
+export const MCP_SITES_FILE = process.env.CC_MCP_SITES || path.join(ROOT, '..', 'mcp-server', 'sites.json');
+
 // One-click installer workspaces: ~/claude-sites/<slug>/.mcp.json with WP_URL/WP_KEY env.
 function fromClaudeSites() {
-  const dir = process.env.CC_SITES_DIR || path.join(os.homedir(), 'claude-sites');
+  const dir = SITES_DIR;
   let entries = [];
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return []; }
   const out = [];
@@ -145,7 +149,7 @@ function fromClaudeSites() {
 }
 
 function fromMcpSitesJson() {
-  const list = readJson(process.env.CC_MCP_SITES || path.join(ROOT, '..', 'mcp-server', 'sites.json'), []);
+  const list = readJson(MCP_SITES_FILE, []);
   return (Array.isArray(list) ? list : []).filter(s => s.key && s.url).map(s => ({
     name: s.name, url: normUrl(s.url), key: s.key, mode: s.mode || 'rest',
     relayUrl: normUrl(s.relayUrl), relayKey: s.relayKey || '', source: 'sites.json',
@@ -235,6 +239,21 @@ export function addHistory(entry) {
   writeJson(F.history, history);
 }
 
-export function getHistory({ site, limit = 50 } = {}) {
-  return (site ? history.filter(h => h.site === site) : history).slice(0, limit);
+export function getHistory({ site, limit = 50, since } = {}) {
+  let list = site ? history.filter(h => h.site === site) : history;
+  if (since) list = list.filter(h => h.at >= since);
+  return list.slice(0, limit);
+}
+
+/** Each site's most recent run, if it failed and has not been dismissed. */
+export function openFailures() {
+  const ack = getMeta().failuresAckAt || '';
+  const seen = new Set();
+  const out = [];
+  for (const h of history) {
+    if (seen.has(h.site)) continue;
+    seen.add(h.site);
+    if (h.status === 'failed' && h.at > ack) out.push(h);
+  }
+  return out;
 }

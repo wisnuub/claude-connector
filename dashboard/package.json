@@ -8,7 +8,8 @@
     "start": "node server.js",
     "service:install": "node service.js install",
     "service:uninstall": "node service.js uninstall",
-    "service:status": "node service.js status"
+    "service:status": "node service.js status",
+    "shortcut": "node shortcut.js"
   },
   "engines": {
     "node": ">=18"

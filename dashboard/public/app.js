@@ -18,6 +18,13 @@ const S = {
   q: '',
   drawerMin: true,
   schedule: null,           // { next, sites, last }
+  failures: [],             // sites whose last run failed, until dismissed
+  newSites: new Set(),      // found in ~/claude-sites since the dashboard started
+  view: 'sites',
+  log: null,                // { days, entries }
+  logDays: 30,
+  logShow: 'problems',
+  logDir: '',
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -72,14 +79,78 @@ function phpInfo(v) {
 const agencies = () => S.settings?.agencies || [];
 const agencyOf = site => agencies().find(a => a.id === site.agencyId) || agencies().find(a => a.id === S.settings.defaultAgency) || agencies()[0];
 
+const isHeld = (site, key) => (site.held || []).includes(key);
+
 function counts(site) {
   const ov = site.overview;
-  if (!ov) return { plugins: 0, themes: 0, core: 0, translations: 0, total: 0 };
-  const plugins = ov.plugins.filter(p => p.update).length;
-  const themes = ov.themes.filter(t => t.update).length;
-  const core = ov.core.minor || ov.core.major ? 1 : 0;
-  const translations = ov.translations > 0 ? 1 : 0;
-  return { plugins, themes, core, translations, total: plugins + themes + core + translations };
+  if (!ov) return { plugins: 0, themes: 0, core: 0, translations: 0, total: 0, held: 0 };
+  const plugins = ov.plugins.filter(p => p.update && !isHeld(site, `plugin:${p.file}`)).length;
+  const themes = ov.themes.filter(t => t.update && !isHeld(site, `theme:${t.stylesheet}`)).length;
+  const core = (ov.core.minor || ov.core.major) && !isHeld(site, 'core') ? 1 : 0;
+  const translations = ov.translations > 0 && !isHeld(site, 'translations') ? 1 : 0;
+  return { plugins, themes, core, translations, total: plugins + themes + core + translations, held: (site.held || []).length };
+}
+
+// ── Review before "Update everything" ────────────────────────────────────────
+
+let reviewIds = [];
+
+/** Everything a run would update on a site, as review rows. */
+function reviewItems(site) {
+  const ov = site.overview;
+  if (!ov) return null;
+  const rows = [];
+  const blockReason = u => (u.php_ok === false ? `needs PHP ${u.requires_php}` : u.package === false ? 'needs a licence key' : null);
+  for (const p of ov.plugins.filter(p => p.update)) rows.push({ key: `plugin:${p.file}`, kind: 'Plugin', name: p.name, from: p.version, to: p.update.version, blocked: blockReason(p.update), self: p.self });
+  for (const t of ov.themes.filter(t => t.update)) rows.push({ key: `theme:${t.stylesheet}`, kind: 'Theme', name: t.name, from: t.version, to: t.update.version, blocked: blockReason(t.update) });
+  if (ov.core.minor || ov.core.major) rows.push({ key: 'core', kind: 'Core', name: 'WordPress', from: ov.core.version, to: ov.core.minor?.version || ov.core.major.version, major: !ov.core.minor, majorTo: ov.core.major?.version });
+  if (ov.translations > 0) rows.push({ key: 'translations', kind: 'Translations', name: `${ov.translations} translation update${ov.translations === 1 ? '' : 's'}`, from: '', to: '' });
+  return rows;
+}
+
+function renderReview({ fresh = false } = {}) {
+  const f = $('#form-review');
+  // Redraws (Hold, the major-updates box) must not undo the user's ticks.
+  // Only ticks the user could change count - a just-released item comes back ticked.
+  const keep = fresh ? new Map() : new Map([...document.querySelectorAll('#review-body input[data-rv]:not(:disabled)')].map(b => [`${b.dataset.rv}|${b.dataset.key}`, b.checked]));
+  const major = f.elements.allowMajorCore.checked;
+  const sites = reviewIds.map(id => S.sites.find(s => s.id === id)).filter(Boolean);
+  $('#review-body').innerHTML = sites.map(site => {
+    const rows = reviewItems(site);
+    const head = `<div class="rv-h"><b>${h(site.name)}</b>${rows?.length ? `<button type="button" class="btn sm ghost" data-action="rv-all" data-site="${h(site.id)}">All</button><button type="button" class="btn sm ghost" data-action="rv-none" data-site="${h(site.id)}">None</button>` : ''}</div>`;
+    if (!rows) return `<div class="rv">${head}<p class="hint">Not checked yet - everything found when the run starts will be updated.</p></div>`;
+    if (!rows.length) return `<div class="rv">${head}<p class="hint">Up to date - the run will only check health${f.elements.formTest.value !== 'off' ? ' and the form' : ''}.</p></div>`;
+    return `<div class="rv">${head}<ul class="rv-list">${rows.map(r => {
+      const held = isHeld(site, r.key);
+      const majorOnly = r.key === 'core' && r.major && !major;
+      const disabled = !!r.blocked || held || majorOnly;
+      const to = r.key === 'core' && major && r.majorTo ? r.majorTo : r.to;
+      const note = held ? '<span class="tag accent">held</span>' : r.blocked ? `<span class="tag warn">${h(r.blocked)}</span>` : majorOnly ? '<span class="tag">major - tick "Include major WordPress updates"</span>' : '';
+      return `<li class="${disabled ? 'off' : ''}">
+        <label class="check"><input type="checkbox" data-rv="${h(site.id)}" data-key="${h(r.key)}" ${disabled ? 'disabled' : keep.get(`${site.id}|${r.key}`) === false ? '' : 'checked'}>
+          <span><span class="faint">${h(r.kind)}</span> ${h(r.name)}${r.from || to ? ` <span class="muted">${h(r.from)} → <b class="ver-arrow">${h(to)}</b></span>` : ''} ${note}${r.self ? ' <span class="faint">(runs last)</span>' : ''}</span></label>
+        ${r.blocked ? '' : `<button type="button" class="btn sm ghost" data-action="rv-hold" data-site="${h(site.id)}" data-key="${h(r.key)}" title="${held ? 'Allow updates again' : 'Keep this version on this site - skipped on every run until released'}">${held ? 'Release' : 'Hold'}</button>`}
+      </li>`;
+    }).join('')}</ul></div>`;
+  }).join('');
+  updateReviewCount();
+}
+
+function updateReviewCount() {
+  const boxes = [...document.querySelectorAll('#review-body input[data-rv]')];
+  const n = boxes.filter(b => b.checked).length;
+  const unchecked = reviewIds.filter(id => !S.sites.find(s => s.id === id)?.overview).length;
+  $('#form-review [data-action=run-review]').textContent = `Update ${n} item${n === 1 ? '' : 's'}${unchecked ? ` + ${unchecked} unchecked site${unchecked === 1 ? '' : 's'}` : ''} on ${reviewIds.length} site${reviewIds.length === 1 ? '' : 's'}`;
+}
+
+function openReview(ids, title) {
+  reviewIds = ids;
+  const f = $('#form-review');
+  f.elements.formTest.value = S.settings.formTestMode;
+  f.elements.allowMajorCore.checked = !!S.settings.allowMajorCore;
+  $('[data-title]', f).textContent = title || `Update everything on ${ids.length} site${ids.length === 1 ? '' : 's'}`;
+  renderReview({ fresh: true });
+  $('#dlg-review').showModal();
 }
 
 function issue(site) {
@@ -212,14 +283,14 @@ function siteRow(site) {
   const php = phpInfo(ov?.php_version);
   const wp = ov ? `${h(ov.core.version)}${ov.core.minor ? ` <span class="ver-arrow" title="Minor update available">→ ${h(ov.core.minor.version)}</span>` : ov.core.major ? ` <span class="tag accent" title="Major update available">${h(ov.core.major.version)}</span>` : ''}` : '<span class="faint">-</span>';
   const upd = !ov ? (site.overviewError ? '<span class="faint">-</span>' : '<span class="faint">Not checked</span>')
-    : c.total ? `<span class="pill warn" title="${c.plugins} plugins · ${c.themes} themes${c.core ? ' · WordPress' : ''}${c.translations ? ' · translations' : ''}">${c.total} update${c.total === 1 ? '' : 's'}</span>`
+    : c.total ? `<span class="pill warn" title="${c.plugins} plugins · ${c.themes} themes${c.core ? ' · WordPress' : ''}${c.translations ? ' · translations' : ''}${c.held ? ` · ${c.held} held` : ''}">${c.total} update${c.total === 1 ? '' : 's'}</span>${c.held ? ` <span class="tag" title="Held - skipped by Update everything">${c.held} held</span>` : ''}`
     : '<span class="pill ok">Up to date</span>';
   const open = S.open.has(site.id);
   return `
   <section class="site ${open ? 'open' : ''} ${S.selected.has(site.id) ? 'selected' : ''}" data-site="${h(site.id)}">
     <div class="row" data-action="toggle-site">
       <input type="checkbox" data-action="select-site" ${S.selected.has(site.id) ? 'checked' : ''} aria-label="Select ${h(site.name)}">
-      <div class="name">${chevron}<div class="title"><b>${h(site.name)}</b><a href="${h(site.url)}" target="_blank" rel="noopener" data-stop>${h(site.url.replace(/^https?:\/\//, ''))}</a></div></div>
+      <div class="name">${chevron}<div class="title"><b>${h(site.name)}${S.newSites.has(site.id) ? ' <span class="tag accent">New</span>' : ''}</b><a href="${h(site.url)}" target="_blank" rel="noopener" data-stop>${h(site.url.replace(/^https?:\/\//, ''))}</a></div></div>
       <div class="cells">
         <div class="cell"><small>WordPress</small>${wp}</div>
         <div class="cell"><small>PHP</small>${php ? `<span class="pill ${php.cls}" title="${h(php.title)}">${h(ov.php_version)}</span>` : '<span class="faint">-</span>'}</div>
@@ -272,7 +343,7 @@ function pluginsTab(site) {
   const ov = site.overview;
   const sel = S.pluginSel[site.id] || (S.pluginSel[site.id] = new Set());
   const n = [...sel].filter(f => ov.plugins.some(p => p.file === f)).length;
-  const withUpd = ov.plugins.filter(p => p.update && p.update.package);
+  const withUpd = ov.plugins.filter(p => p.update && p.update.package && p.update.php_ok !== false && !isHeld(site, `plugin:${p.file}`));
   const sr = S.search[site.id] || {};
   const dis = n ? '' : 'disabled';
   const rows = ov.plugins.map(p => {
@@ -281,12 +352,13 @@ function pluginsTab(site) {
       : `<span class="ver-arrow">→ ${h(u.version)}</span>${!u.package ? '<span class="tag warn" title="No download - licence key missing or expired">licence</span>' : ''}${!u.php_ok ? `<span class="tag bad" title="Needs PHP ${h(u.requires_php)}">PHP ${h(u.requires_php)}</span>` : u.requires_php ? `<span class="tag hide-sm" title="Requires PHP ${h(u.requires_php)}">PHP ${h(u.requires_php)}+</span>` : ''}`;
     return `<tr class="${p.active ? '' : 'inactive'}" data-file="${h(p.file)}">
       <td class="w1"><input type="checkbox" data-action="select-plugin" ${sel.has(p.file) ? 'checked' : ''} aria-label="Select ${h(p.name)}"></td>
-      <td class="pname"><b>${h(p.name)}</b>${p.self ? '<span class="tag accent">this connector</span>' : ''}${p.auto_update ? '<span class="tag" title="WordPress auto-updates this plugin">auto</span>' : ''}<code>${h(p.file)}</code></td>
+      <td class="pname"><b>${h(p.name)}</b>${isHeld(site, `plugin:${p.file}`) ? '<span class="tag accent" title="Kept at this version - skipped by Update everything">held</span>' : ''}${p.self ? '<span class="tag accent">this connector</span>' : ''}${p.auto_update ? '<span class="tag" title="WordPress auto-updates this plugin">auto</span>' : ''}<code>${h(p.file)}</code></td>
       <td>${h(p.version)}</td>
       <td>${updCell}</td>
       <td><label class="switch" title="${p.self ? 'Claude Connector must stay active' : ''}"><input type="checkbox" data-action="toggle-plugin" ${p.active ? 'checked' : ''} ${p.self ? 'disabled' : ''}><span class="track"></span>${p.active ? 'Active' : 'Inactive'}</label></td>
       <td class="acts">
         ${u && u.package ? `<button class="btn sm" data-action="plugin-update">Update</button>` : ''}
+        ${u || isHeld(site, `plugin:${p.file}`) ? `<button class="btn sm ghost" data-action="plugin-hold" title="${isHeld(site, `plugin:${p.file}`) ? 'Allow updates again' : 'Keep this version - Update everything skips it'}">${isHeld(site, `plugin:${p.file}`) ? 'Release' : 'Hold'}</button>` : ''}
         ${p.wporg ? `<button class="btn sm ghost" data-action="plugin-rollback" data-slug="${h(p.slug)}" data-name="${h(p.name)}" title="Install another version from wordpress.org">Versions</button>` : ''}
         ${p.self ? '' : `<button class="btn sm ghost danger" data-action="plugin-delete" title="Delete">Delete</button>`}
       </td>
@@ -316,16 +388,16 @@ function pluginsTab(site) {
 
 function themesTab(site) {
   const ov = site.overview;
-  const withUpd = ov.themes.filter(t => t.update && t.update.package);
+  const withUpd = ov.themes.filter(t => t.update && t.update.package && !isHeld(site, `theme:${t.stylesheet}`));
   return `
     <div class="bar"><button class="btn sm primary" data-action="themes-update-all" ${withUpd.length ? '' : 'disabled'}>Update all themes (${withUpd.length})</button></div>
     <div class="tablewrap"><table class="list">
       <thead><tr><th>Theme</th><th>Version</th><th>Update</th><th></th></tr></thead>
       <tbody>${ov.themes.map(t => `<tr data-theme="${h(t.stylesheet)}">
-        <td class="pname"><b>${h(t.name)}</b>${t.active ? '<span class="tag accent">active</span>' : t.in_use ? '<span class="tag accent">parent of active</span>' : ''}${t.parent ? `<span class="tag">child of ${h(t.parent)}</span>` : ''}<code>${h(t.stylesheet)}</code></td>
+        <td class="pname"><b>${h(t.name)}</b>${isHeld(site, `theme:${t.stylesheet}`) ? '<span class="tag accent">held</span>' : ''}${t.active ? '<span class="tag accent">active</span>' : t.in_use ? '<span class="tag accent">parent of active</span>' : ''}${t.parent ? `<span class="tag">child of ${h(t.parent)}</span>` : ''}<code>${h(t.stylesheet)}</code></td>
         <td>${h(t.version || '-')}</td>
         <td>${t.update ? `<span class="ver-arrow">→ ${h(t.update.version)}</span>${!t.update.package ? '<span class="tag warn">licence</span>' : ''}` : '<span class="faint">-</span>'}</td>
-        <td class="acts">${t.update && t.update.package ? '<button class="btn sm" data-action="theme-update">Update</button>' : ''}</td>
+        <td class="acts">${t.update && t.update.package ? '<button class="btn sm" data-action="theme-update">Update</button>' : ''}${t.update || isHeld(site, `theme:${t.stylesheet}`) ? `<button class="btn sm ghost" data-action="theme-hold">${isHeld(site, `theme:${t.stylesheet}`) ? 'Release' : 'Hold'}</button>` : ''}</td>
       </tr>`).join('')}</tbody>
     </table></div>`;
 }
@@ -486,11 +558,126 @@ function renderDrawer() {
     }).join('')}</div>`;
 }
 
+function renderBanner() {
+  const el = $('#banner');
+  const f = S.failures;
+  if (!f.length) { el.innerHTML = ''; return; }
+  el.innerHTML = `<div class="notice bad banner">
+    <div><b>${f.length} site${f.length === 1 ? '' : 's'} had failures in the last run</b>
+      <ul>${f.slice(0, 5).map(x => `<li><b>${h(x.siteName)}</b> - ${h(x.first || x.summary || x.title)} <span class="faint">· ${h(ago(x.at))}</span></li>`).join('')}${f.length > 5 ? `<li>and ${f.length - 5} more</li>` : ''}</ul></div>
+    <div class="banner-acts"><button class="btn sm" data-action="view" data-v="log">View log</button><button class="btn sm ghost" data-action="dismiss-failures">Dismiss</button></div>
+  </div>`;
+}
+
 function renderAll() {
   renderStats();
-  renderToolbar();
-  renderSites();
+  renderBanner();
+  $('#view-sites').hidden = S.view !== 'sites';
+  $('#view-log').hidden = S.view !== 'log';
+  for (const b of document.querySelectorAll('.views button')) b.classList.toggle('on', b.dataset.v === S.view);
+  if (S.view === 'sites') { renderToolbar(); renderSites(); } else renderLog();
   renderDrawer();
+}
+
+// ── Log view ─────────────────────────────────────────────────────────────────
+
+async function loadLog() {
+  try { S.log = await api('GET', `/api/log?days=${S.logDays}`); } catch (e) { S.log = { entries: [], error: e.message }; }
+  if (S.view === 'log') renderLog();
+}
+
+const LOG_CATS = [
+  ['updated', 'Updated', 'ok', '✓'],
+  ['notdone', 'Not done', 'warn', '–'],
+  ['failed', 'Failed', 'bad', '✕'],
+  ['notice', 'Check', 'warn', '!'],
+];
+
+function siteAgencyLabel(siteId) {
+  const site = S.sites.find(s => s.id === siteId);
+  return site ? agencyOf(site)?.label || '' : '';
+}
+
+/** Log entries after the view's filters, grouped by job, newest first. */
+function logJobs() {
+  const entries = (S.log?.entries || []).filter(e => {
+    if (S.agency !== 'all') { const site = S.sites.find(s => s.id === e.site); if (!site || agencyOf(site)?.id !== S.agency) return false; }
+    if (S.logShow === 'problems') return e.log.failed.length || e.log.notdone.length || e.log.notice.length;
+    if (S.logShow === 'updates') return e.log.updated.length;
+    return true;
+  });
+  const byJob = new Map();
+  for (const e of entries) {
+    if (!byJob.has(e.jobId)) byJob.set(e.jobId, { jobId: e.jobId, title: e.title, at: e.at, entries: [] });
+    const j = byJob.get(e.jobId);
+    j.entries.push(e);
+    if (e.at > j.at) j.at = e.at;
+  }
+  return [...byJob.values()].sort((a, b) => b.at.localeCompare(a.at));
+}
+
+function renderLog() {
+  const el = $('#view-log');
+  if (!S.log) { el.innerHTML = '<p class="muted">Loading…</p>'; loadLog(); return; }
+  const list = logJobs();
+  const total = { updated: 0, notdone: 0, failed: 0, notice: 0 };
+  for (const j of list) for (const e of j.entries) for (const k of Object.keys(total)) total[k] += e.log[k].length;
+  el.innerHTML = `
+    <div class="toolbar">
+      <select data-action="log-days" aria-label="Period">${[7, 30, 90, 365].map(d => `<option value="${d}" ${S.logDays === d ? 'selected' : ''}>Last ${d} days</option>`).join('')}</select>
+      <div class="seg" role="group" aria-label="Show">${[['problems', 'Problems'], ['updates', 'Updates'], ['all', 'Everything']].map(([k, l]) => `<button data-action="log-show" data-v="${k}" class="${S.logShow === k ? 'on' : ''}">${l}</button>`).join('')}</div>
+      ${agencies().length > 1 ? `<select data-action="agency-filter" aria-label="Agency"><option value="all">All agencies</option>${agencies().map(a => `<option value="${h(a.id)}" ${S.agency === a.id ? 'selected' : ''}>${h(a.label)}</option>`).join('')}</select>` : ''}
+      <span class="count">${total.updated} updated · ${total.notdone} not done · <span style="color:${total.failed ? 'var(--bad)' : 'inherit'}">${total.failed} failed</span></span>
+      <span class="grow"></span>
+      <button class="btn sm" data-action="log-copy" ${list.length ? '' : 'disabled'}>Copy report</button>
+      <button class="btn sm" data-action="log-csv" ${list.length ? '' : 'disabled'}>Download CSV</button>
+    </div>
+    ${S.log.error ? `<div class="notice bad">${h(S.log.error)}</div>` : ''}
+    ${!list.length ? `<div class="empty"><h2>${S.logShow === 'problems' ? 'No problems' : 'Nothing logged'} in the last ${S.logDays} days</h2><p>${S.logShow === 'problems' ? 'Switch to "Everything" to see every run.' : 'Runs from the dashboard appear here.'}</p></div>` : ''}
+    ${list.map(j => {
+      const c = { updated: 0, notdone: 0, failed: 0 };
+      for (const e of j.entries) for (const k of Object.keys(c)) c[k] += e.log[k].length;
+      return `<section class="card logjob">
+        <h4>${h(j.title)} <span class="muted" style="font-weight:400">· ${h(new Date(j.at).toLocaleString())} · ${j.entries.length} site${j.entries.length === 1 ? '' : 's'} · ${c.updated} updated${c.notdone ? ` · ${c.notdone} not done` : ''}${c.failed ? ` · <span style="color:var(--bad)">${c.failed} failed</span>` : ''}</span></h4>
+        ${j.entries.map(e => {
+          const k = e.status === 'ok' ? 'ok' : e.status === 'warning' ? 'warn' : e.status === 'failed' ? 'bad' : '';
+          const ag = siteAgencyLabel(e.site);
+          const cats = LOG_CATS.filter(([key]) => e.log[key].length);
+          return `<div class="logsite">
+            <div class="logsite-h"><span class="pill ${k}"><span class="dot"></span>${h(e.status)}</span> <b>${h(e.siteName)}</b>${ag && agencies().length > 1 ? ` <span class="tag">${h(ag)}</span>` : ''}${e.summary ? ` <span class="muted">· ${h(e.summary)}</span>` : ''}</div>
+            ${cats.length ? `<div class="logcats">${cats.map(([key, name, cls, ic]) => `<div class="logcat ${cls}"><div class="logcat-h">${name} (${e.log[key].length})</div><ul>${e.log[key].map(st => `<li><span class="ic">${ic}</span><span>${h(st.label)}${st.detail && key !== 'updated' ? `<span class="d">${h(String(st.detail).split('\n')[0].slice(0, 400))}</span>` : ''}</span></li>`).join('')}</ul></div>`).join('')}</div>`
+              : '<p class="muted" style="margin:4px 0 0">Nothing updated, nothing failed.</p>'}
+          </div>`;
+        }).join('')}
+      </section>`;
+    }).join('')}
+    ${S.logDir ? `<p class="hint">Also written as text files in <code>${h(S.logDir)}</code></p>` : ''}`;
+}
+
+function logReportText() {
+  const lines = [];
+  for (const j of logJobs()) {
+    lines.push(`${j.title} - ${new Date(j.at).toLocaleString()}`);
+    for (const e of j.entries) {
+      const ag = siteAgencyLabel(e.site);
+      lines.push(`  ${e.siteName}${ag && agencies().length > 1 ? ` (${ag})` : ''}: ${e.status.toUpperCase()}${e.summary ? ` - ${e.summary}` : ''}`);
+      for (const [key, name] of LOG_CATS) for (const st of e.log[key]) {
+        lines.push(`    ${name.padEnd(9)} ${st.label}`);
+        if (st.detail && key !== 'updated') lines.push(`              ${String(st.detail).split('\n')[0].slice(0, 300)}`);
+      }
+    }
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+function logCsv() {
+  const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const rows = [['Date', 'Agency', 'Site', 'Run', 'Result', 'Item', 'From', 'To', 'Details']];
+  for (const j of logJobs()) for (const e of j.entries) for (const [key, name] of LOG_CATS) for (const st of e.log[key]) {
+    rows.push([new Date(e.at).toLocaleString(), siteAgencyLabel(e.site), e.siteName, e.title, name, st.meta?.name || st.label, st.meta?.from || '', st.meta?.to || '', key === 'updated' ? '' : String(st.detail || st.label).split('\n')[0]]);
+  }
+  return rows.map(r => r.map(q).join(',')).join('\r\n');
 }
 
 // ── Data ─────────────────────────────────────────────────────────────────────
@@ -501,6 +688,9 @@ async function load() {
   S.sites = d.sites;
   S.settings = d.settings;
   S.schedule = d.schedule;
+  S.failures = d.failures || [];
+  S.newSites = new Set(d.newSites || []);
+  S.logDir = d.logDir || '';
   for (const j of d.jobs) S.jobs.set(j.id, j);
   renderAll();
 }
@@ -516,6 +706,12 @@ function connect() {
     renderSite(s.id);
   });
   es.addEventListener('schedule', ev => { S.schedule = JSON.parse(ev.data); renderToolbar(); });
+  es.addEventListener('failures', ev => { S.failures = JSON.parse(ev.data); renderBanner(); if (S.view === 'log') loadLog(); });
+  es.addEventListener('sites', async ev => {
+    const { added } = JSON.parse(ev.data);
+    await load();
+    if (added.length) toast(`New site${added.length === 1 ? '' : 's'} found: ${added.map(a => a.name).join(', ')} - open ${added.length === 1 ? 'it' : 'them'} and press Check`);
+  });
   let drawerTimer;
   es.addEventListener('job', ev => {
     const j = JSON.parse(ev.data);
@@ -525,7 +721,11 @@ function connect() {
     for (const id of Object.keys(j.sites)) renderSite(id);
     clearTimeout(drawerTimer);
     drawerTimer = setTimeout(renderDrawer, 120);
-    if (prev?.status === 'running' && j.status !== 'running') { renderStats(); toast(`${j.title}: ${j.status === 'done' ? 'done' : j.status}`); }
+    if (prev?.status === 'running' && j.status !== 'running') {
+      renderStats();
+      toast(`${j.title}: ${j.status === 'done' ? 'done' : j.status}`);
+      if (S.view === 'log') loadLog(); else S.log = null;
+    }
   });
   es.onerror = () => { /* EventSource reconnects by itself */ };
 }
@@ -609,7 +809,7 @@ function openSettings() {
   draft = JSON.parse(JSON.stringify(S.settings));
   draftAgency = draft.defaultAgency;
   const f = $('#form-settings');
-  for (const k of ['allowMajorCore', 'mailTestWhenNoForm', 'showBrowser']) f.elements[k].checked = !!draft[k];
+  for (const k of ['allowMajorCore', 'mailTestWhenNoForm', 'showBrowser', 'notifyOnFailure']) f.elements[k].checked = !!draft[k];
   f.elements.concurrency.value = draft.concurrency;
   f.elements.formTestMode.value = draft.formTestMode;
   f.elements.scheduleEnabled.checked = draft.schedule.enabled;
@@ -641,6 +841,7 @@ document.addEventListener('click', async (ev) => {
     case 'toggle-site': {
       if (ev.target.closest('input, button, a, select, label')) return;
       S.open.has(site.id) ? S.open.delete(site.id) : S.open.add(site.id);
+      if (S.newSites.delete(site.id) && !S.newSites.size) api('POST', '/api/sites/seen', {}).catch(() => {});
       renderSite(site.id);
       return;
     }
@@ -673,9 +874,27 @@ document.addEventListener('click', async (ev) => {
       const g = t.closest('[data-group]').dataset.group;
       const ids = visibleSites().filter(s => agencyOf(s)?.id === g).map(s => s.id);
       const ag = agencies().find(x => x.id === g);
-      return startJob({ type: 'maintain', sites: ids }, `Update everything on ${ids.length} ${ag.label} site${ids.length === 1 ? '' : 's'}?\n\nPlugins, themes, WordPress minor updates and translations - one at a time, with a health check and automatic rollback after each.`);
+      return openReview(ids, `Update everything for ${ag.label} (${ids.length} site${ids.length === 1 ? '' : 's'})`);
     }
     case 'filter': S.filter = t.dataset.v; renderToolbar(); renderSites(); return;
+    case 'view': S.view = t.dataset.v; if (S.view === 'log') { S.log = null; } renderAll(); window.scrollTo(0, 0); return;
+    case 'dismiss-failures': await api('POST', '/api/failures/dismiss', {}).catch(e => toast(e.message)); return;
+    case 'log-show': S.logShow = t.dataset.v; renderLog(); return;
+    case 'log-copy': {
+      try { await navigator.clipboard.writeText(logReportText()); toast('Report copied - paste it into an email or chat'); }
+      catch { toast('Could not copy - your browser blocked clipboard access'); }
+      return;
+    }
+    case 'log-csv': {
+      const blob = new Blob(['\ufeff' + logCsv()], { type: 'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      const d = new Date();
+      a.download = `maintenance-log-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}.csv`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      return;
+    }
     case 'tab': S.tab[site.id] = t.dataset.v; renderSite(site.id); return;
     case 'toggle-drawer': S.drawerMin = !S.drawerMin; renderDrawer(); return;
     case 'toggle-job': {
@@ -688,8 +907,7 @@ document.addEventListener('click', async (ev) => {
     case 'check-all': return startJob({ type: 'refresh', sites: S.sites.filter(s => !s.hidden).map(s => s.id) });
     case 'bulk-refresh': return startJob({ type: 'refresh', sites: selectedIds() });
     case 'bulk-maintain': {
-      const ids = selectedIds();
-      return startJob({ type: 'maintain', sites: ids }, `Update everything on ${ids.length} site${ids.length === 1 ? '' : 's'}?\n\nPlugins, themes, WordPress minor updates and translations - one at a time, with a health check and automatic rollback after each.`);
+      return openReview(selectedIds());
     }
     case 'bulk-queue': {
       await api('POST', '/api/jobs', { type: 'queue-form', sites: selectedIds() }).catch(e => toast(e.message));
@@ -715,6 +933,41 @@ document.addEventListener('click', async (ev) => {
       $('[data-n]', f).textContent = `${selectedIds().length} site${selectedIds().length === 1 ? '' : 's'}`;
       agencyOptions(f.elements.agencyId, S.settings.defaultAgency);
       $('#dlg-agency').showModal();
+      return;
+    }
+    case 'rv-all': case 'rv-none':
+      for (const b of document.querySelectorAll(`#review-body input[data-rv="${CSS.escape(t.dataset.site)}"]:not(:disabled)`)) b.checked = a === 'rv-all';
+      updateReviewCount();
+      return;
+    case 'rv-hold': {
+      const target = S.sites.find(s => s.id === t.dataset.site);
+      const held = !isHeld(target, t.dataset.key);
+      try {
+        const r = await api('POST', '/api/sites/held', { site: target.id, key: t.dataset.key, held });
+        target.held = r.held;
+      } catch (e) { return toast(e.message); }
+      renderReview();
+      renderSite(target.id);
+      return;
+    }
+    case 'run-review': {
+      ev.preventDefault();
+      const f = $('#form-review');
+      const exclude = {};
+      for (const b of document.querySelectorAll('#review-body input[data-rv]')) {
+        if (!b.checked && !b.disabled) (exclude[b.dataset.rv] ||= []).push(b.dataset.key);
+      }
+      $('#dlg-review').close();
+      return startJob({ type: 'maintain', sites: reviewIds, exclude, formTest: f.elements.formTest.value, allowMajorCore: f.elements.allowMajorCore.checked });
+    }
+    case 'plugin-hold': case 'theme-hold': {
+      const key = a === 'plugin-hold' ? `plugin:${t.closest('[data-file]').dataset.file}` : `theme:${t.closest('[data-theme]').dataset.theme}`;
+      try {
+        const r = await api('POST', '/api/sites/held', { site: site.id, key, held: !isHeld(site, key) });
+        site.held = r.held;
+        renderSite(site.id);
+        renderStats();
+      } catch (e) { toast(e.message); }
       return;
     }
     case 'run-assign': {
@@ -745,7 +998,7 @@ document.addEventListener('click', async (ev) => {
 
     case 'site-maintain': {
       ev.stopPropagation();
-      return startJob({ type: 'maintain', sites: [site.id] }, `Update everything on ${site.name}?`);
+      return openReview([site.id], `Update everything on ${site.name}`);
     }
     case 'site-refresh': return startJob({ type: 'refresh', sites: [site.id] });
     case 'site-form': return startJob({ type: 'formtest', sites: [site.id], url: site.formUrl || undefined }, `Submit the contact form on ${site.name}? It sends a real enquiry to the form's recipients.`);
@@ -889,7 +1142,7 @@ document.addEventListener('click', async (ev) => {
       ev.preventDefault();
       readAgencyForm();
       const f = $('#form-settings');
-      for (const k of ['allowMajorCore', 'mailTestWhenNoForm', 'showBrowser']) draft[k] = f.elements[k].checked;
+      for (const k of ['allowMajorCore', 'mailTestWhenNoForm', 'showBrowser', 'notifyOnFailure']) draft[k] = f.elements[k].checked;
       draft.concurrency = Number(f.elements.concurrency.value);
       draft.formTestMode = f.elements.formTestMode.value;
       draft.schedule = {
@@ -937,7 +1190,10 @@ document.addEventListener('change', async (ev) => {
   const t = ev.target;
   const a = t.dataset.action;
   const site = siteOf(t);
-  if (a === 'agency-filter') { S.agency = t.value; renderToolbar(); renderSites(); }
+  if (a === 'agency-filter') { S.agency = t.value; if (S.view === 'log') renderLog(); else { renderToolbar(); renderSites(); } }
+  if (t.dataset.rv) updateReviewCount();
+  if (t.form?.id === 'form-review' && (t.name === 'allowMajorCore' || t.name === 'formTest')) renderReview();
+  if (a === 'log-days') { S.logDays = Number(t.value); S.log = null; renderLog(); }
   if (a === 'site-agency') { await api('POST', '/api/sites/meta', { sites: [site.id], agencyId: t.value }).catch(e => toast(e.message)); if (agencies().length > 1) { await load(); } }
   if (a === 'form-url') await api('POST', '/api/sites/meta', { sites: [site.id], formUrl: t.value }).catch(e => toast(e.message));
   if (t.form?.id === 'form-plugin' && t.name === 'action') $('[data-install-only]', t.form).hidden = t.value !== 'install';
@@ -978,6 +1234,6 @@ document.addEventListener('input', (ev) => {
 });
 
 // Refresh relative times once a minute.
-setInterval(() => { renderStats(); renderSites(); }, 60_000);
+setInterval(() => { renderStats(); if (S.view === 'sites') renderSites(); }, 60_000);
 
 load().then(connect).catch(e => { $('#sites').innerHTML = `<div class="empty"><h2>Could not load</h2><p>${h(e.message)}</p></div>`; });
