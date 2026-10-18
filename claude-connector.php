@@ -2759,8 +2759,14 @@ function claude_safe_path( $relative ) {
 }
 
 /**
- * Runs `php -l` on a string of PHP content before writing.
+ * Syntax-checks PHP content before writing, in-process via the tokenizer.
  * Returns the error message on syntax failure, or null if clean (or not a PHP file).
+ *
+ * This used to shell out to `PHP_BINARY -l`, but under a web SAPI PHP_BINARY is
+ * php-fpm / lsphp / empty, not the CLI: php-fpm rejects -l (every PHP write came
+ * back as a "syntax error"), an empty name throws a ValueError on PHP 8 (HTTP
+ * 500), and lsphp can hang until the request times out. TOKEN_PARSE runs the
+ * real parser, so it catches the same parse errors without spawning anything.
  *
  * @param  string $content  File content to check.
  * @param  string $rel      Relative path (used to detect .php extension).
@@ -2770,37 +2776,40 @@ function claude_php_lint( $content, $rel ) {
     if ( ! str_ends_with( strtolower( $rel ), '.php' ) ) {
         return null; // not a PHP file – skip
     }
-    if ( ! function_exists( 'proc_open' ) ) {
-        return null; // can't run lint without proc_open – skip silently
+    if ( ! function_exists( 'token_get_all' ) || ! defined( 'TOKEN_PARSE' ) ) {
+        return null; // tokenizer extension missing – skip silently
     }
-    $tmp = tempnam( sys_get_temp_dir(), 'cc_lint_' );
-    if ( ! $tmp ) {
-        return null;
-    }
-    file_put_contents( $tmp, $content ); // phpcs:ignore
-    $descriptors = array(
-        0 => array( 'pipe', 'r' ),
-        1 => array( 'pipe', 'w' ),
-        2 => array( 'pipe', 'w' ),
-    );
-    $proc = @proc_open( array( PHP_BINARY, '-l', $tmp ), $descriptors, $pipes ); // phpcs:ignore
-    if ( ! is_resource( $proc ) ) {
-        @unlink( $tmp ); // phpcs:ignore
-        return null;
-    }
-    fclose( $pipes[0] );
-    $stdout = (string) stream_get_contents( $pipes[1] );
-    $stderr = (string) stream_get_contents( $pipes[2] );
-    fclose( $pipes[1] );
-    fclose( $pipes[2] );
-    $exit = proc_close( $proc );
-    @unlink( $tmp ); // phpcs:ignore
-    if ( $exit !== 0 ) {
-        // Replace temp path with the real relative path for a readable error message.
-        $msg = trim( $stdout . ' ' . $stderr );
-        return str_replace( $tmp, $rel, $msg );
+    try {
+        token_get_all( (string) $content, TOKEN_PARSE );
+    } catch ( \ParseError $e ) {
+        return sprintf( 'PHP Parse error: %s in %s on line %d', $e->getMessage(), $rel, $e->getLine() );
+    } catch ( \Throwable $e ) {
+        return null; // anything else is the checker's problem, not the file's
     }
     return null;
+}
+
+/**
+ * Builds the write_failed error with the reason, so a 500 on e.g. a child theme
+ * says whether it was permissions rather than just "Could not write file."
+ *
+ * @param  string $abs_path  Absolute path that failed to write.
+ * @param  string $rel       Relative path for the message.
+ * @return WP_Error
+ */
+function claude_write_error( $abs_path, $rel ) {
+    $dir = dirname( $abs_path );
+    if ( ! is_dir( $dir ) ) {
+        $why = 'directory could not be created';
+    } elseif ( is_file( $abs_path ) && ! is_writable( $abs_path ) ) {
+        $why = 'file is not writable by the web server user';
+    } elseif ( ! is_file( $abs_path ) && ! is_writable( $dir ) ) {
+        $why = 'directory is not writable by the web server user';
+    } else {
+        $last = error_get_last();
+        $why  = $last ? $last['message'] : 'unknown reason';
+    }
+    return new WP_Error( 'write_failed', "Could not write {$rel}: {$why}.", array( 'status' => 500 ) );
 }
 
 /**
@@ -2816,6 +2825,130 @@ function claude_backup_file( $abs_path ) {
     }
     $backup = $abs_path . '.' . gmdate( 'YmdHis' ) . '.bak';
     return @copy( $abs_path, $backup ) ? $backup : null; // phpcs:ignore
+}
+
+/**
+ * Loads the site the way WordPress's own theme/plugin file editor does after a
+ * save, to find out whether the file just written white-screens it.
+ *
+ * Core's wp_start_scraping_edited_file_errors() (wp-settings.php) watches any
+ * request carrying a valid wp_scrape_key/wp_scrape_nonce pair and, at shutdown,
+ * prints the last fatal error (or `true`) between two marker lines. Checks the
+ * dashboard and the homepage, so fatals in admin-only and front-end code both
+ * count.
+ *
+ * @return array { status: ok|fatal|unverified, message?, url? }
+ */
+function claude_loopback_health() {
+    $key   = md5( wp_generate_password( 20, false ) );
+    $nonce = wp_generate_password( 20, false );
+    set_transient( 'scrape_key_' . $key, $nonce, 60 );
+
+    $headers = array( 'Cache-Control' => 'no-cache' );
+    // Sites behind HTTP basic auth: pass the same credentials through, as core does.
+    if ( isset( $_SERVER['PHP_AUTH_USER'], $_SERVER['PHP_AUTH_PW'] ) ) {
+        $headers['Authorization'] = 'Basic ' . base64_encode( wp_unslash( $_SERVER['PHP_AUTH_USER'] ) . ':' . wp_unslash( $_SERVER['PHP_AUTH_PW'] ) );
+    }
+    $args = array(
+        'timeout'     => 30,
+        // Logged out, /wp-admin/ redirects to wp-login.php and the scrape params end
+        // up nested in redirect_to. The redirect response itself still ran all of
+        // WordPress and carries the marker, so read that instead of following it.
+        'redirection' => 0,
+        'headers'     => $headers,
+        'sslverify'   => apply_filters( 'https_local_ssl_verify', false ),
+    );
+
+    $start  = "###### wp_scraping_result_start:{$key} ######";
+    $end    = "###### wp_scraping_result_end:{$key} ######";
+    $result = array( 'status' => 'ok' );
+
+    foreach ( array( admin_url(), home_url( '/' ) ) as $url ) {
+        $r = wp_remote_get( add_query_arg( array( 'wp_scrape_key' => $key, 'wp_scrape_nonce' => $nonce ), $url ), $args );
+        if ( is_wp_error( $r ) ) {
+            $result = array( 'status' => 'unverified', 'url' => $url, 'message' => 'Could not load the site to check it: ' . $r->get_error_message() );
+            continue;
+        }
+        $code = (int) wp_remote_retrieve_response_code( $r );
+        $body = (string) wp_remote_retrieve_body( $r );
+        $pos  = strpos( $body, $start );
+
+        if ( $pos === false ) {
+            if ( $code >= 500 ) {
+                // Died before core could report, or a host error page replaced it.
+                $result = array( 'status' => 'fatal', 'url' => $url, 'message' => "HTTP {$code} from {$url} with no error details." );
+                break;
+            }
+            // Served without running WordPress, e.g. a page cache or a loopback block.
+            $result = array( 'status' => 'unverified', 'url' => $url, 'message' => "HTTP {$code} from {$url} without WordPress's check marker (page cache or blocked loopback?)." );
+            continue;
+        }
+
+        $json  = substr( $body, $pos + strlen( $start ) );
+        $json  = substr( $json, 0, (int) strpos( $json, $end ) );
+        $error = json_decode( trim( $json ), true );
+        if ( $error === true ) continue;
+
+        if ( is_array( $error ) && isset( $error['message'] ) && ! isset( $error['code'] ) ) {
+            $where  = isset( $error['file'], $error['line'] ) ? " in {$error['file']} on line {$error['line']}" : '';
+            $result = array( 'status' => 'fatal', 'url' => $url, 'message' => $error['message'] . $where );
+            break;
+        }
+        // scrape_nonce_failure, or output we could not parse.
+        $result = array( 'status' => 'unverified', 'url' => $url, 'message' => "Could not read WordPress's check result from {$url}." );
+    }
+
+    delete_transient( 'scrape_key_' . $key );
+    return $result;
+}
+
+/**
+ * Runs after a .php file has been written: loads the site and, if it now hits a
+ * fatal error, puts the previous content back (or removes a newly created file).
+ * A syntax check alone cannot catch fatals such as redeclaring a parent theme's
+ * function or calling one that does not exist.
+ *
+ * When the site cannot be loaded to check (loopback blocked, page cache), the
+ * write is kept and the response says it was unverified - rolling back there
+ * would make PHP writes impossible on those hosts.
+ *
+ * @param  string      $path      Absolute path just written.
+ * @param  string      $rel       Relative path for messages.
+ * @param  string|null $previous  Content before the write; null if the file is new.
+ * @return array|WP_Error|null    Health result for the response, WP_Error after a
+ *                                rollback, or null for non-PHP files.
+ */
+function claude_verify_php_write( $path, $rel, $previous ) {
+    if ( ! str_ends_with( strtolower( $rel ), '.php' ) ) {
+        return null;
+    }
+    // wp_opcache_invalidate() is admin-only; REST requests do not load it.
+    require_once ABSPATH . 'wp-admin/includes/file.php';
+    // Without this the check could run the old, cached bytecode and pass.
+    wp_opcache_invalidate( $path, true );
+
+    $health = claude_loopback_health();
+    if ( $health['status'] !== 'fatal' ) {
+        return $health;
+    }
+
+    $restored = $previous === null ? @unlink( $path ) : @file_put_contents( $path, $previous ) !== false; // phpcs:ignore
+    wp_opcache_invalidate( $path, true );
+
+    if ( ! $restored ) {
+        return new WP_Error(
+            'rollback_failed',
+            "Wrote {$rel}, the site hit a fatal error ({$health['message']}), and restoring the previous version FAILED. "
+            . 'Restore it by hand (FTP / file manager) from the .bak copy next to it.',
+            array( 'status' => 500, 'health' => $health )
+        );
+    }
+    return new WP_Error(
+        'php_fatal_rolled_back',
+        "Not saved: {$rel} made the site fail with a fatal error, so the previous version was "
+        . ( $previous === null ? 'restored (the new file was removed)' : 'restored' ) . ". Error: {$health['message']}",
+        array( 'status' => 422, 'health' => $health )
+    );
 }
 
 function claude_files_list( $req ) {
@@ -2873,13 +3006,19 @@ function claude_files_write( $req ) {
     }
 
     wp_mkdir_p( dirname( $path ) );
-    $backup = claude_backup_file( $path ); // backup before overwrite
-    $bytes  = file_put_contents( $path, $content ); // phpcs:ignore
-    if ( $bytes === false ) return new WP_Error( 'write_failed', 'Could not write file.', array( 'status' => 500 ) );
+    $previous = is_file( $path ) ? file_get_contents( $path ) : null; // phpcs:ignore
+    $backup   = claude_backup_file( $path ); // backup before overwrite
+    $bytes    = @file_put_contents( $path, $content ); // phpcs:ignore
+    if ( $bytes === false ) return claude_write_error( $path, $rel );
+
+    $health = claude_verify_php_write( $path, $rel, $previous );
+    if ( is_wp_error( $health ) ) return $health;
+
     return new WP_REST_Response( array(
         'written' => $rel,
         'bytes'   => $bytes,
         'backup'  => $backup ? ltrim( str_replace( WP_CONTENT_DIR, '', $backup ), '/\\' ) : null,
+        'health'  => $health,
     ) );
 }
 
@@ -2936,16 +3075,20 @@ function claude_files_fetch( $req ) {
     }
 
     wp_mkdir_p( dirname( $path ) );
-    $backup = claude_backup_file( $path );
+    $previous = is_file( $path ) ? file_get_contents( $path ) : null; // phpcs:ignore
+    $backup   = claude_backup_file( $path );
 
     // rename() fails across filesystem boundaries on some hosts; fall back to copy.
     if ( ! @rename( $tmp, $path ) ) { // phpcs:ignore
         if ( ! @copy( $tmp, $path ) ) { // phpcs:ignore
             @unlink( $tmp ); // phpcs:ignore
-            return new WP_Error( 'write_failed', 'Could not write the downloaded file.', array( 'status' => 500 ) );
+            return claude_write_error( $path, $rel );
         }
         @unlink( $tmp ); // phpcs:ignore
     }
+
+    $health = claude_verify_php_write( $path, $rel, $previous );
+    if ( is_wp_error( $health ) ) return $health;
 
     return new WP_REST_Response( array(
         'written' => $rel,
@@ -2954,6 +3097,7 @@ function claude_files_fetch( $req ) {
         // Lets the caller verify the transfer without spending context reading it back.
         'sha256'  => hash_file( 'sha256', $path ),
         'backup'  => $backup ? ltrim( str_replace( WP_CONTENT_DIR, '', $backup ), '/\\' ) : null,
+        'health'  => $health,
     ) );
 }
 
@@ -3039,20 +3183,25 @@ function claude_files_commit( $req ) {
     }
 
     wp_mkdir_p( dirname( $path ) );
-    $backup = claude_backup_file( $path ); // backup before overwrite
-    $bytes  = file_put_contents( $path, $content ); // phpcs:ignore
+    $previous = is_file( $path ) ? file_get_contents( $path ) : null; // phpcs:ignore
+    $backup   = claude_backup_file( $path ); // backup before overwrite
+    $bytes    = @file_put_contents( $path, $content ); // phpcs:ignore
     if ( $bytes === false ) {
-        return new WP_Error( 'write_failed', 'Could not write file.', array( 'status' => 500 ) );
+        return claude_write_error( $path, $rel );
     }
 
     for ( $i = 0; $i < $chunk_total; $i++ ) {
         delete_transient( 'claude_stage_' . md5( $rel ) . '_' . $i );
     }
 
+    $health = claude_verify_php_write( $path, $rel, $previous );
+    if ( is_wp_error( $health ) ) return $health;
+
     return new WP_REST_Response( array(
         'written' => $rel,
         'bytes'   => $bytes,
         'backup'  => $backup ? ltrim( str_replace( WP_CONTENT_DIR, '', $backup ), '/\\' ) : null,
+        'health'  => $health,
     ) );
 }
 

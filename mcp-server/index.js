@@ -375,7 +375,11 @@ server.tool('wp_files_read', "Read a file's content from within wp-content", {
 );
 
 // Files - write (auto-chunks large files to bypass WAF limits)
-server.tool('wp_files_write', 'Write or overwrite a file in wp-content (auto-chunks large files)', {
+server.tool('wp_files_write',
+  'Write or overwrite a file in wp-content (auto-chunks large files). For .php files the server '
+  + 'syntax-checks first, then loads the site; if the write causes a fatal error it restores the '
+  + 'previous version and returns php_fatal_rolled_back. If the response has health.status '
+  + '"unverified", the site could not be checked - tell the user and ask them to load the site.', {
   site:    S,
   path:    z.string().describe('Path relative to wp-content'),
   content: z.string().describe('Full file content to write'),
