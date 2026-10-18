@@ -50,10 +50,10 @@ Release checks are cached for 12 hours. To ship a new version: bump `Version` in
 
 ## Connecting Claude Code (one-click setup)
 
-**WP Admin → Settings → Claude Connector → Connect Claude Code** shows a download button for your OS (detected automatically, both shown if detection fails):
+**WP Admin → Settings → Claude Connector → Connect Claude Code**:
 
-- **Mac** - double-click the downloaded `.command` file in Finder
-- **Windows** - right-click the downloaded `.ps1` file → **Run with PowerShell**
+- **Mac** - click **Show Mac setup command**, copy it, paste it into Terminal and press Return. The command fetches the setup script with `curl`, so there is nothing for Gatekeeper to block and no `chmod +x`. It carries the site's API key, so each command works once and expires after 15 minutes; press the button again for a new one. (A downloadable `.command` is still offered, but macOS strips its execute bit and quarantines it.)
+- **Windows** - download the `.ps1` file, right-click it → **Run with PowerShell**.
 
 The script installs the MCP bridge, creates a workspace folder for the site, writes `.mcp.json` + `CLAUDE.md`, and opens the folder in VSCode. Requires [Node.js](https://nodejs.org) and VSCode with the Claude Code extension.
 

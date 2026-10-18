@@ -681,31 +681,60 @@ function claude_settings_page() {
                     onclick="return confirm('Regenerate key? Current key stops working immediately.')">Regenerate Key</button>
         </form>
         <h2 style="margin-top:1.5em;">Connect Claude Code</h2>
-        <p class="description">Download a one-click setup script for your computer. It installs the MCP bridge, creates a workspace folder for this site, and opens it in VSCode - Claude Code connects automatically.</p>
-        <p style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap;">
-            <a id="claude-dl-mac" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-ajax.php?action=claude_connect_script&os=mac' ), 'claude_connect_script' ) ); ?>"
-               class="button button-primary" style="font-size:13px;">&#8984;&nbsp; Download Mac Script (.command)</a>
+        <p class="description">Sets up this site on your computer: installs the MCP bridge, creates a workspace folder for the site, and opens it in VSCode - Claude Code connects automatically. Requires Node.js (<a href="https://nodejs.org" target="_blank">nodejs.org</a>) and VSCode with the Claude Code extension.</p>
+        <div id="claude-setup-mac" style="margin-top:12px;max-width:900px;">
+            <p style="margin:0 0 6px;"><strong>Mac:</strong> copy the setup command, open <em>Terminal</em>, paste it and press Return.</p>
+            <button type="button" class="button button-primary" id="claude-setup-get">&#8984;&nbsp; Show Mac setup command</button>
+            <div id="claude-setup-out" style="display:none;margin-top:8px;">
+                <div style="display:flex;gap:8px;align-items:flex-start;">
+                    <code id="claude-setup-cmd" style="flex:1;display:block;padding:8px 10px;word-break:break-all;user-select:all;"></code>
+                    <button type="button" class="button" id="claude-setup-copy">Copy</button>
+                </div>
+                <p class="description" style="margin-top:6px;">Works once and expires in 15 minutes - it carries this site's API key. Nothing is downloaded through the browser, so there is no Gatekeeper prompt and no <code>chmod +x</code>.</p>
+            </div>
+            <p class="description" style="margin-top:6px;">Or <a id="claude-dl-mac" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-ajax.php?action=claude_connect_script&os=mac' ), 'claude_connect_script' ) ); ?>">download the .command file</a> (needs <code>chmod +x</code> and approval under System Settings → Privacy &amp; Security).</p>
+        </div>
+        <div id="claude-setup-windows" style="margin-top:12px;">
+            <p style="margin:0 0 6px;"><strong>Windows:</strong> download the script, then right-click it &rarr; Run with PowerShell.</p>
             <a id="claude-dl-windows" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-ajax.php?action=claude_connect_script&os=windows' ), 'claude_connect_script' ) ); ?>"
                class="button button-primary" style="font-size:13px;">&#x229e;&nbsp; Download Windows Script (.ps1)</a>
-        </p>
-        <p class="description" style="margin-top:8px;">
-            <strong>Mac:</strong> double-click the <code>.command</code> file in Finder &mdash;
-            <strong>Windows:</strong> right-click the <code>.ps1</code> file &rarr; Run with PowerShell.<br>
-            Requires Node.js (<a href="https://nodejs.org" target="_blank">nodejs.org</a>) and VSCode with the Claude Code extension.
-        </p>
+        </div>
         <script>
         (function () {
-            // Progressive enhancement: both buttons render by default (works with JS off);
+            // Progressive enhancement: both render by default (works with JS off);
             // hide whichever one doesn't match the visitor's OS.
             var ua    = navigator.userAgent || '';
             var isWin = /Windows/i.test( ua );
             var isMac = /Macintosh|Mac OS X/i.test( ua ) && ! isWin;
-            if ( isWin ) {
-                document.getElementById( 'claude-dl-mac' ).style.display = 'none';
-            } else if ( isMac ) {
-                document.getElementById( 'claude-dl-windows' ).style.display = 'none';
-            }
-            // Unrecognised platform (Linux, etc.) - leave both visible.
+            if ( isWin ) document.getElementById( 'claude-setup-mac' ).style.display = 'none';
+            else if ( isMac ) document.getElementById( 'claude-setup-windows' ).style.display = 'none';
+
+            var btn = document.getElementById( 'claude-setup-get' );
+            var out = document.getElementById( 'claude-setup-out' );
+            var cmd = document.getElementById( 'claude-setup-cmd' );
+            btn.addEventListener( 'click', function () {
+                btn.disabled = true;
+                var body = new FormData();
+                body.append( 'action', 'claude_setup_command' );
+                body.append( '_ajax_nonce', <?php echo wp_json_encode( wp_create_nonce( 'claude_setup_command' ) ); ?> );
+                fetch( <?php echo wp_json_encode( admin_url( 'admin-ajax.php' ) ); ?>, { method: 'POST', body: body, credentials: 'same-origin' } )
+                    .then( function ( r ) { return r.json(); } )
+                    .then( function ( r ) {
+                        if ( ! r.success ) throw new Error( r.data || 'Request failed' );
+                        cmd.textContent = r.data.command;
+                        out.style.display = '';
+                        btn.textContent = 'New setup command';
+                    } )
+                    .catch( function ( e ) { alert( 'Could not create the setup command: ' + e.message ); } )
+                    .then( function () { btn.disabled = false; } );
+            } );
+            document.getElementById( 'claude-setup-copy' ).addEventListener( 'click', function () {
+                var b = this;
+                navigator.clipboard.writeText( cmd.textContent ).then( function () {
+                    b.textContent = 'Copied';
+                    setTimeout( function () { b.textContent = 'Copy'; }, 1500 );
+                } );
+            } );
         })();
         </script>
         <h2 style="margin-top:2em;">Available Endpoints</h2>
@@ -4515,20 +4544,83 @@ function claude_connect_script_download() {
     if ( ! current_user_can( 'manage_options' ) ) wp_die( 'Unauthorized', '', array( 'response' => 403 ) );
     check_ajax_referer( 'claude_connect_script' );
 
-    $os   = sanitize_key( $_GET['os'] ?? 'mac' );
+    $os   = sanitize_key( $_GET['os'] ?? 'mac' ) === 'windows' ? 'windows' : 'mac';
+    $site = claude_script_site();
+
+    header( 'Content-Type: application/octet-stream' );
+    header( 'Content-Disposition: attachment; filename="connect-' . $site['slug'] . ( $os === 'windows' ? '.ps1' : '.command' ) . '"' );
+    header( 'X-Content-Type-Options: nosniff' );
+    echo claude_script_for( $os, $site );
+    exit;
+}
+
+/** Site details every setup script is built from. */
+function claude_script_site() {
     $url  = rtrim( get_site_url(), '/' );
-    $key  = claude_get_api_key();
     $host = (string) parse_url( $url, PHP_URL_HOST );
     $host = preg_replace( '/^www\./', '', $host );
     $slug = strtolower( explode( '.', $host )[0] );
     $slug = preg_replace( '/[^a-z0-9]+/', '-', $slug );
-    $name = ucfirst( str_replace( '-', ' ', $slug ) );
+    return array( 'url' => $url, 'key' => claude_get_api_key(), 'slug' => $slug, 'name' => ucfirst( str_replace( '-', ' ', $slug ) ) );
+}
 
-    if ( $os === 'windows' ) {
-        claude_script_windows( $url, $key, $slug, $name );
-    } else {
-        claude_script_mac( $url, $key, $slug, $name );
+function claude_script_for( $os, $site ) {
+    return $os === 'windows'
+        ? claude_script_windows( $site['url'], $site['key'], $site['slug'], $site['name'] )
+        : claude_script_mac( $site['url'], $site['key'], $site['slug'], $site['name'] );
+}
+
+// ── Mac setup by pasted command ───────────────────────────────────────────────
+//
+// A .command downloaded through a browser arrives without the execute bit ("you do
+// not have the privileges", needs chmod +x) and quarantined, so Gatekeeper blocks
+// it until approved in System Settings. A command pasted into Terminal fetches the
+// same script with curl, which does neither - so it just runs.
+//
+// The script carries the API key, so the URL holds a random single-use token that
+// expires after 15 minutes, handed out only to an admin on the settings page.
+
+const CLAUDE_SETUP_TTL = 15 * MINUTE_IN_SECONDS;
+
+add_action( 'wp_ajax_claude_setup_command', 'claude_setup_command' );
+add_action( 'wp_ajax_claude_setup', 'claude_setup_serve' );
+add_action( 'wp_ajax_nopriv_claude_setup', 'claude_setup_serve' );
+
+/** Settings page → a fresh Terminal command with its own single-use token. */
+function claude_setup_command() {
+    if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'Unauthorized', 403 );
+    check_ajax_referer( 'claude_setup_command' );
+
+    $token = wp_generate_password( 32, false, false );
+    set_transient( 'claude_setup_' . hash( 'sha256', $token ), 'mac', CLAUDE_SETUP_TTL );
+    $link = add_query_arg( array( 'action' => 'claude_setup', 't' => $token ), admin_url( 'admin-ajax.php' ) );
+    wp_send_json_success( array(
+        // bash -c "$(curl …)" rather than curl | bash: npm install inside the script
+        // would otherwise read the rest of the script from the pipe as its stdin.
+        'command'    => 'bash -c "$(curl -fsSL \'' . $link . '\')"',
+        'expires_in' => CLAUDE_SETUP_TTL,
+    ) );
+}
+
+/** The pasted command's request: serve the script once, then the token is gone. */
+function claude_setup_serve() {
+    $token = preg_replace( '/[^A-Za-z0-9]/', '', (string) ( $_GET['t'] ?? '' ) );
+    $key   = 'claude_setup_' . hash( 'sha256', $token );
+    $os    = $token !== '' ? get_transient( $key ) : false;
+
+    nocache_headers();
+    header( 'Content-Type: text/plain; charset=utf-8' );
+    header( 'X-Content-Type-Options: nosniff' );
+
+    if ( $os !== 'mac' ) {
+        // Still a runnable script, so the pasted command explains itself rather than failing silently.
+        echo "echo ''; echo 'This setup command has expired or was already used. In WP Admin go to Settings > Claude Connector and copy a new one.'; exit 1\n";
+        exit;
     }
+    delete_transient( $key );
+
+    // Run from a Terminal the user already has open - no "press Enter to close" pauses.
+    echo preg_replace( '/^(\s*)read -p "Press Enter[^"\n]*"\s*$/m', '$1:', claude_script_for( 'mac', claude_script_site() ) );
     exit;
 }
 
@@ -4648,10 +4740,7 @@ BASH;
         '{{MD_B64}}'  => $md_b64,
     ) );
 
-    header( 'Content-Type: application/octet-stream' );
-    header( "Content-Disposition: attachment; filename=\"connect-{$slug}.command\"" );
-    header( 'X-Content-Type-Options: nosniff' );
-    echo $script;
+    return $script;
 }
 
 function claude_script_windows( $url, $key, $slug, $name ) {
@@ -4791,13 +4880,10 @@ PS;
         '{{MD_B64}}'  => $md_b64,
     ) );
 
-    header( 'Content-Type: application/octet-stream' );
-    header( "Content-Disposition: attachment; filename=\"connect-{$slug}.ps1\"" );
-    header( 'X-Content-Type-Options: nosniff' );
     // Windows PowerShell 5.1 reads BOM-less script files using the system codepage, not UTF-8 -
     // without this BOM the non-ASCII characters above corrupt the token stream and the whole
     // script fails to parse (silently, since the console window closes before it can be read).
-    echo "\xEF\xBB\xBF" . $script;
+    return "\xEF\xBB\xBF" . $script;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
