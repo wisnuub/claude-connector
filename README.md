@@ -671,6 +671,25 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 
 ## Changelog
 
+### 1.8.1 — One-click Mac setup, Asana, Log in
+
+**Added**
+
+- **Three ways to set a site up on a Mac** (WP Admin → Settings → Claude Connector → Connect Claude Code), side by side:
+  - **Connect on this Mac** - one click when the Site Maintenance app is installed: the browser hands a single-use link to the app, the dashboard shows the site and asks before creating the workspace, refreshes the MCP bridge and opens VS Code.
+  - **Copy & paste in Terminal** - a single-use command that fetches the setup script with `curl`, so Gatekeeper is not involved and no `chmod +x` is needed.
+  - **Download the installer** - now a `.zip`, so the `.command` keeps its execute permission and only needs Gatekeeper's one-time Open Anyway.
+
+  Links and commands carry the site's API key, so each works once and expires after 15 minutes. Windows is unchanged.
+- **Dashboard - Asana**: a Tasks view of your Asana tasks, each run's results posted as a comment on the site's task (optionally its time to Actual time), and WordPress logins read from the project's **Login** / **Logins** / **Login details** task (its comments, newest first). The token is kept in the macOS Keychain.
+- **Dashboard - Log in**: signs in to any WordPress site, with or without the connector - in a new tab of your own browser through the new **Site Maintenance Login** extension (`dashboard/extension`), or a separate window. A captcha on the login form is left to you; when a security check comes first, the form is filled in once it appears.
+
+**Changed**
+
+- **Site Maintenance.app** is now an AppleScript applet, signed ad hoc on your Mac: recent macOS refuses to open a bundle whose executable is a bare shell script, and only an applet can receive the Connect on this Mac links. Run `npm run shortcut` again to rebuild it.
+
+**Verified** on a local WordPress 7.1.3: an installed 1.8.0 updated itself to 1.8.1 from this release; the Terminal command set a workspace up with no input and refused a second use; the zipped `.command` unzipped executable with Finder's unarchiver and `unzip`; Connect on this Mac went from link to app to dashboard to workspace, and refused reused, mismatched and non-site links. Asana was tested against a stand-in for its API (paging, Login task comments, comment HTML, a 402 for time tracking); the extension was loaded into Chromium and signed in, stopped at a captcha on the form, and stopped after one wrong password.
+
 ### 1.8.0 — Maintenance dashboard for many sites
 
 **Added**

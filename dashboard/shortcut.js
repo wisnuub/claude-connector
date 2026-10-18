@@ -90,7 +90,7 @@ fs.rmSync(tmpScript, { force: true });
 fs.writeFileSync(path.join(APP, 'Contents', 'Resources', 'launch.sh'), launcher, { mode: 0o755 });
 plistSet('CFBundleIdentifier', '-string', 'com.claude-connector.dashboard.launcher');
 plistSet('CFBundleName', '-string', 'Site Maintenance');
-plistSet('CFBundleShortVersionString', '-string', '1.8.0');
+plistSet('CFBundleShortVersionString', '-string', JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version);
 plistSet('LSUIElement', '-bool', 'true');
 plistSet('CFBundleURLTypes', '-json', JSON.stringify([{ CFBundleURLName: 'Claude Connector site link', CFBundleURLSchemes: ['claude-connector'] }]));
 // Use our .icns, not the applet's asset-catalog icon.
