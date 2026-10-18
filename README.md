@@ -126,6 +126,15 @@ The same is appended to plain text files, one per month, in `dashboard/data/logs
 
 When a site's last run failed, a red banner at the top lists it (and the first failure) until you dismiss it, and macOS shows a notification - useful for the background morning run. Turn the notification off in Settings.
 
+### Asana and WordPress logins
+
+Connect Asana under **Settings → Asana** with a personal access token (Asana: profile picture → Settings → Apps → Developer apps → Create new token). The token is kept in the macOS Keychain.
+
+- **Tasks** (top of the page) lists your incomplete Asana tasks in the chosen workspace, with project, matching site, due date and Actual time. Filter to tasks whose site is on the dashboard or not yet.
+- **Which task belongs to which site** is matched by project name ("Eccentric Engineering" ↔ eccentricengineering.com.au), preferring the "wordpress update" task when a project has several. Change it in the site's **Asana & login** tab.
+- **Results go back to Asana**: after "Update everything" (or an update you start by hand) the run's log - updated, not done, failed, health - is added as a comment on the site's task. Optionally the run's time is added to the task's Actual time (needs time tracking on your Asana plan).
+- **Logins**: **Login** on a task (or **Show login from Asana** on a site) reads the WordPress username and password from the task's description, its project's description or overview, or its comments - lines like `Username: …` / `Password: …`, `U: …` / `P: …`, or `https://site/wp-admin user / pass`. They are read when you ask and not stored by the dashboard. Copy the username or password, or press **Log in**: a browser window (its own profile, separate from your everyday browser, and remembered between uses) opens the site's login page, fills it in and signs in. It works on any WordPress site, with or without the connector, and stops for you when a site has a captcha or asks for a two-factor code.
+
 ### Agencies
 
 If you maintain sites for more than one agency, add each under **Settings → Agencies** and assign sites to them (per site in its Form test tab, or several at once with **Agency…**). The list is then grouped by agency, with a filter and a select-all / "Update everything for …" per group.
@@ -668,6 +677,7 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 - **Review before updating**: "Update everything" shows every pending update, all ticked - untick what to leave out; **Hold** keeps an item at its version on every run until released.
 - **Maintenance log**: per run and site, what was updated, what was not done and why, and what failed - in a Log view (filters, copy as text, CSV) and monthly text files; a failure banner and a macOS notification when a run fails.
 - **New sites appear live** when the one-click installer adds them to `~/claude-sites`.
+- **Asana**: a Tasks view of your Asana tasks, each run's results posted as a comment on the site's task (and optionally its time), and WordPress logins read from Asana with copy buttons and a **Log in** button that signs you in in a separate browser window - for any site, with or without the connector.
 - **Shortcut**: `npm run shortcut` creates Site Maintenance.app (Spotlight / Launchpad / Dock / Desktop), which starts the dashboard if needed and opens it.
 - **Morning form tests**: updated sites are queued and tested at a set time and days; `npm run service:install` keeps the dashboard running in the background on macOS, and a run missed while the Mac slept happens on wake.
 - **`/maintenance/*` routes**: `overview`, `update` (one plugin/theme/core/translations, backed up and **rolled back automatically on a fatal**), `health`, `forms`, `test-email`.

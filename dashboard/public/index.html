@@ -10,7 +10,7 @@
 <body>
   <header class="top">
     <h1>Site Maintenance<span class="ver" id="ver"></span></h1>
-    <nav class="seg views" aria-label="View"><button data-action="view" data-v="sites" class="on">Sites</button><button data-action="view" data-v="log">Log</button></nav>
+    <nav class="seg views" aria-label="View"><button data-action="view" data-v="sites" class="on">Sites</button><button data-action="view" data-v="tasks">Tasks</button><button data-action="view" data-v="log">Log</button></nav>
     <div class="stats" id="stats"></div>
     <div class="actions">
       <button class="btn" data-action="check-all">Check all for updates</button>
@@ -25,6 +25,7 @@
       <div class="toolbar" id="toolbar"></div>
       <div class="sites" id="sites"></div>
     </div>
+    <div id="view-tasks" hidden></div>
     <div id="view-log" hidden></div>
   </main>
 
@@ -35,6 +36,9 @@
     <form method="dialog" id="form-settings">
       <div class="dh"><h3>Settings</h3><button class="btn ghost sm" value="cancel">Close</button></div>
       <div class="db">
+        <h5>Asana</h5>
+        <div id="asana-settings"><p class="muted">Checking…</p></div>
+
         <h5>Agencies</h5>
         <p class="hint">Each site belongs to an agency. Its form test types in that agency's details below. Sites with no agency use the default.</p>
         <div class="profile-tabs" id="agency-tabs"></div>

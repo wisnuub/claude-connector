@@ -9,6 +9,7 @@ import { call, externalCheck, LONG, WPError } from './wp.js';
 import { getSite, getSettings, siteState, patchSiteState, addHistory, agencyFor } from './store.js';
 import { runFormTest } from './formtest.js';
 import { appendTextLog, notify, summarize } from './log.js';
+import { postResults } from './asana.js';
 
 export const bus = new EventEmitter();
 bus.setMaxListeners(100);
@@ -100,6 +101,20 @@ function startJob(spec, worker) {
       busySites.delete(id);
       entry.finishedAt = new Date().toISOString();
       const record = { jobId: job.id, type: job.type, title: job.title, site: id, siteName: entry.name, status: entry.status, summary: entry.summary, steps: entry.steps, at: entry.finishedAt };
+      // Results go on the site's Asana task - recorded as one more step, after the comment is built.
+      if (['maintain', 'update'].includes(job.type)) {
+        try {
+          const posted = await postResults(id, record, new Date(entry.finishedAt) - new Date(entry.startedAt));
+          if (posted) {
+            const time = typeof posted.time === 'number' ? ` · ${posted.time} min added to Actual time` : posted.time ? ` · time not logged: ${posted.time}` : '';
+            entry.steps.push({ label: `Posted to Asana: ${posted.project ? `${posted.project} › ` : ''}${posted.task}${time}`, status: 'ok', detail: null, at: new Date().toISOString(), meta: { kind: 'asana', result: 'ok' } });
+          }
+        } catch (e) {
+          entry.steps.push({ label: `Could not post to Asana: ${e.message}`, status: 'warning', detail: null, at: new Date().toISOString(), meta: { kind: 'asana' } });
+          if (entry.status === 'ok') entry.status = 'warning';
+          record.status = entry.status;
+        }
+      }
       addHistory(record);
       appendTextLog(record);
       if (job.type === 'maintain') patchSiteState(id, { lastRun: { status: entry.status, summary: entry.summary, at: entry.finishedAt, jobId: job.id } });

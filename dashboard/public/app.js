@@ -25,6 +25,12 @@ const S = {
   logDays: 30,
   logShow: 'problems',
   logDir: '',
+  asana: null,              // { connected, user, workspaces, workspace }
+  tasks: null,              // { at, tasks }
+  tasksQ: '',
+  tasksShow: 'all',
+  logins: {},               // task gid -> { busy, error, logins, task }
+  reveal: new Set(),        // "gid|i" of shown passwords
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -327,10 +333,11 @@ function panel(site) {
     ['themes', 'Themes', ov ? ov.themes.length : null, c.themes],
     ['wordpress', 'WordPress & server', null, c.core + c.translations],
     ['forms', 'Form test', null, 0],
+    ['asana', 'Asana & login', null, 0],
     ['history', 'History', null, 0],
   ];
   const body = !ov && ['plugins', 'themes', 'wordpress'].includes(tab) ? '' :
-    tab === 'plugins' ? pluginsTab(site) : tab === 'themes' ? themesTab(site) : tab === 'wordpress' ? wordpressTab(site) : tab === 'forms' ? formsTab(site) : historyTab(site);
+    tab === 'plugins' ? pluginsTab(site) : tab === 'themes' ? themesTab(site) : tab === 'wordpress' ? wordpressTab(site) : tab === 'forms' ? formsTab(site) : tab === 'asana' ? asanaTab(site) : historyTab(site);
   return `${notice}
     <div class="tabs">${tabs.map(([k, l, n, u]) => `<button data-action="tab" data-v="${k}" class="${tab === k ? 'on' : ''}">${l}${u ? `<span class="n warn">${u}</span>` : n != null ? `<span class="n">${n}</span>` : ''}</button>`).join('')}
       <span style="flex:1"></span>
@@ -573,10 +580,149 @@ function renderAll() {
   renderStats();
   renderBanner();
   $('#view-sites').hidden = S.view !== 'sites';
+  $('#view-tasks').hidden = S.view !== 'tasks';
   $('#view-log').hidden = S.view !== 'log';
   for (const b of document.querySelectorAll('.views button')) b.classList.toggle('on', b.dataset.v === S.view);
-  if (S.view === 'sites') { renderToolbar(); renderSites(); } else renderLog();
+  if (S.view === 'sites') { renderToolbar(); renderSites(); } else if (S.view === 'tasks') renderTasks(); else renderLog();
   renderDrawer();
+}
+
+// ── Asana: tasks, logins, Log in ─────────────────────────────────────────────
+
+async function loadAsana() {
+  try { S.asana = await api('GET', '/api/asana/status'); } catch { S.asana = { connected: false }; }
+}
+
+async function loadTasks(refresh = false) {
+  try { S.tasks = await api('GET', `/api/asana/tasks${refresh ? '?refresh=1' : ''}`); }
+  catch (e) { S.tasks = { error: e.message, tasks: [] }; }
+  if (S.view === 'tasks') renderTasks();
+  for (const id of S.open) renderSite(id);
+}
+
+function minutes(m) {
+  if (m == null) return '';
+  return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
+}
+
+/** The login list for a task, with copy / show / Log in for each. */
+function loginsBlock(gid, fallbackUrl) {
+  const L = S.logins[gid];
+  if (!L) return '';
+  if (L.busy) return '<p class="muted" style="margin:6px 0">Reading Asana…</p>';
+  if (L.error) return `<div class="notice bad" style="margin:6px 0">${h(L.error)}</div>`;
+  if (!L.logins.length) return `<div class="notice" style="margin:6px 0">No username and password found in this task, its project's description or overview, or its comments. The login is read from lines like <code>Username: …</code> / <code>Password: …</code>.</div>`;
+  return `<div class="tablewrap"><table class="list logins" style="margin:6px 0"><thead><tr><th>Found in</th><th>Address</th><th>Username</th><th>Password</th><th></th></tr></thead><tbody>${L.logins.map((l, i) => {
+    const key = `${gid}|${i}`;
+    const addr = l.url || fallbackUrl || '';
+    return `<tr data-login="${i}" data-gid="${h(gid)}">
+      <td class="faint">${h(l.where)}</td>
+      <td>${addr ? `<a href="${h(addr)}" target="_blank" rel="noopener">${h(addr.replace(/^https?:\/\//, ''))}</a>` : '<span class="faint">unknown</span>'}</td>
+      <td><code>${h(l.user)}</code> <button class="btn sm ghost" data-action="copy-cred" data-k="user">Copy</button></td>
+      <td><code>${S.reveal.has(key) ? h(l.pass) : '••••••••'}</code> <button class="btn sm ghost" data-action="reveal-cred">${S.reveal.has(key) ? 'Hide' : 'Show'}</button><button class="btn sm ghost" data-action="copy-cred" data-k="pass">Copy</button></td>
+      <td class="acts"><button class="btn sm primary" data-action="log-in" ${addr ? '' : 'title="No address - you will be asked for it"'}>Log in</button></td>
+    </tr>`;
+  }).join('')}</tbody></table></div>`;
+}
+
+async function fetchLogins(gid) {
+  S.logins[gid] = { busy: true };
+  rerenderLogins();
+  try { const r = await api('GET', `/api/asana/logins?task=${encodeURIComponent(gid)}`); S.logins[gid] = { logins: r.logins, task: r.task }; }
+  catch (e) { S.logins[gid] = { error: e.message }; }
+  rerenderLogins();
+}
+
+function rerenderLogins() {
+  if (S.view === 'tasks') renderTasks();
+  for (const id of S.open) renderSite(id);
+}
+
+function asanaTab(site) {
+  if (!S.asana) { loadAsana().then(() => renderSite(site.id)); return '<p class="muted">Checking Asana…</p>'; }
+  if (!S.asana.connected) return `<div class="notice">Connect Asana in <a href="#" data-action="settings">Settings</a> to see this site's task, post results to it and read its WordPress login.</div>`;
+  if (!S.tasks) { loadTasks(); return '<p class="muted">Loading your tasks…</p>'; }
+  const link = site.asana;
+  const mine = (S.tasks.tasks || []).filter(t => t.siteId === site.id);
+  const others = (S.tasks.tasks || []).filter(t => t.siteId !== site.id);
+  const opt = t => `<option value="${h(t.gid)}" ${link?.taskGid === t.gid ? 'selected' : ''}>${h(t.project?.name ? `${t.project.name} › ` : '')}${h(t.name)}</option>`;
+  return `<div class="grid2">
+    <div class="card"><h4>Asana task</h4>
+      <label class="field">Results of each run are posted to
+        <select data-action="asana-link">
+          <option value="">Not linked</option>
+          ${mine.length ? `<optgroup label="Matching this site">${mine.map(opt).join('')}</optgroup>` : ''}
+          <optgroup label="All my tasks">${others.map(opt).join('')}</optgroup>
+          ${link && !(S.tasks.tasks || []).some(t => t.gid === link.taskGid) ? `<option value="${h(link.taskGid)}" selected>${h(link.taskName)} (not in my tasks)</option>` : ''}
+        </select>
+      </label>
+      ${link ? `<p class="hint" style="margin-top:8px">${link.auto ? 'Matched by project name. ' : ''}<a href="${h(link.url)}" target="_blank" rel="noopener">Open in Asana ↗</a>${S.settings.asana.postResults ? '' : ' · posting results is off in Settings'}</p>` : '<p class="hint" style="margin-top:8px">No task matched this site by project name - pick one.</p>'}
+    </div>
+    <div class="card"><h4>WordPress login</h4>
+      ${link ? `<button class="btn sm" data-action="asana-logins" data-gid="${h(link.taskGid)}">${S.logins[link.taskGid] ? 'Read again' : 'Show login from Asana'}</button>${loginsBlock(link.taskGid, site.url)}`
+        : '<p class="hint">Link the site\'s Asana task to read its login.</p>'}
+    </div>
+  </div>`;
+}
+
+function renderTasks() {
+  const el = $('#view-tasks');
+  if (!S.asana) { el.innerHTML = '<p class="muted">Checking Asana…</p>'; loadAsana().then(renderTasks); return; }
+  if (!S.asana.connected) {
+    el.innerHTML = `<div class="empty"><h2>Connect Asana</h2><p>See your tasks here, post each run's results to the site's task, and log in to WordPress with the logins written in Asana.</p>${S.asana.error ? `<p class="notice bad">${h(S.asana.error)}</p>` : ''}<button class="btn primary" data-action="settings">Open Settings</button></div>`;
+    return;
+  }
+  if (!S.tasks) { el.innerHTML = '<p class="muted">Loading your tasks from Asana…</p>'; loadTasks(); return; }
+  const q = S.tasksQ.toLowerCase();
+  const list = (S.tasks.tasks || []).filter(t => {
+    if (q && !`${t.name} ${t.project?.name || ''} ${t.siteName || ''}`.toLowerCase().includes(q)) return false;
+    if (S.tasksShow === 'site') return !!t.siteId;
+    if (S.tasksShow === 'nosite') return !t.siteId;
+    return true;
+  }).sort((a, b) => (a.project?.name || '').localeCompare(b.project?.name || ''));
+  const ws = S.asana.workspaces.find(w => w.gid === S.asana.workspace);
+  const focused = document.activeElement?.id === 'tq';
+  el.innerHTML = `
+    <div class="toolbar">
+      <span class="count">${list.length} task${list.length === 1 ? '' : 's'}</span>
+      <div class="seg" role="group" aria-label="Show">${[['all', 'All'], ['site', 'On the dashboard'], ['nosite', 'Not on the dashboard']].map(([k, l]) => `<button data-action="tasks-show" data-v="${k}" class="${S.tasksShow === k ? 'on' : ''}">${l}</button>`).join('')}</div>
+      <input type="search" id="tq" placeholder="Search tasks" value="${h(S.tasksQ)}" data-action="search-tasks">
+      <span class="grow"></span>
+      <span class="muted" style="font-size:13px">${h(S.asana.user.name)} · ${h(ws?.name || '')}${S.tasks.at ? ` · ${h(ago(S.tasks.at))}` : ''}</span>
+      <button class="btn sm" data-action="tasks-refresh">↻ Refresh</button>
+    </div>
+    ${S.tasks.error ? `<div class="notice bad">${h(S.tasks.error)}</div>` : ''}
+    <div class="card" style="padding:0">
+      <div class="tablewrap"><table class="list tasks">
+        <thead><tr><th>Task</th><th>Project</th><th>Site</th><th class="hide-sm">Due</th><th class="hide-sm">Actual time</th><th></th></tr></thead>
+        <tbody>${list.map(t => `<tr data-gid="${h(t.gid)}">
+          <td><a href="${h(t.url)}" target="_blank" rel="noopener">${h(t.name)}</a></td>
+          <td>${h(t.project?.name || '')}</td>
+          <td>${t.siteId ? `<a href="#" data-action="goto-site" data-site="${h(t.siteId)}">${h(t.siteName)}</a>` : '<span class="faint">not on the dashboard</span>'}</td>
+          <td class="hide-sm">${t.due ? `<span class="${t.due < new Date().toISOString().slice(0, 10) ? 'ver-arrow' : ''}">${h(new Date(t.due + 'T00:00').toLocaleDateString())}</span>` : ''}</td>
+          <td class="hide-sm">${h(minutes(t.minutes))}</td>
+          <td class="acts"><button class="btn sm" data-action="asana-logins" data-gid="${h(t.gid)}">${S.logins[t.gid] ? 'Hide login' : 'Login'}</button></td>
+        </tr>${S.logins[t.gid] ? `<tr class="logins-row"><td colspan="6">${loginsBlock(t.gid, S.sites.find(s => s.id === t.siteId)?.url)}</td></tr>` : ''}`).join('')}</tbody>
+      </table></div>
+    </div>`;
+  if (focused) { const i = $('#tq'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }
+}
+
+function renderAsanaSettings() {
+  const el = $('#asana-settings');
+  const a = S.asana;
+  if (!a) { el.innerHTML = '<p class="muted">Checking…</p>'; loadAsana().then(renderAsanaSettings); return; }
+  const st = draft?.asana || S.settings.asana;
+  if (!a.connected) {
+    el.innerHTML = `${a.error ? `<div class="notice bad">${h(a.error)}</div>` : ''}
+      <p class="hint" style="margin:0 0 6px">Create a personal access token in Asana: profile picture → <b>Settings → Apps → Developer apps → + Create new token</b>, then paste it here. It is kept in your Mac's Keychain.</p>
+      <div class="bar" style="margin:0"><input type="password" id="asana-token" placeholder="Personal access token" autocomplete="off" style="flex:1"><button type="button" class="btn sm primary" data-action="asana-connect">Connect</button></div>`;
+    return;
+  }
+  el.innerHTML = `<div class="bar" style="margin:0"><span>Connected as <b>${h(a.user.name)}</b> (${h(a.user.email || '')})</span><span class="grow"></span><button type="button" class="btn sm ghost danger" data-action="asana-disconnect">Disconnect</button></div>
+    <label class="field" style="max-width:360px">Workspace<select name="asanaWorkspace">${a.workspaces.map(w => `<option value="${h(w.gid)}" ${w.gid === (st.workspace || a.workspace) ? 'selected' : ''}>${h(w.name)}</option>`).join('')}</select></label>
+    <label class="check"><input type="checkbox" name="asanaPost" ${st.postResults ? 'checked' : ''}> After each run, post the results as a comment on the site's Asana task</label>
+    <label class="check"><input type="checkbox" name="asanaTime" ${st.logTime ? 'checked' : ''}> Also add the run's time to the task's Actual time</label>`;
 }
 
 // ── Log view ─────────────────────────────────────────────────────────────────
@@ -819,6 +965,7 @@ function openSettings() {
   const hidden = S.sites.filter(s => s.hidden);
   $('#hidden-sites').innerHTML = hidden.length ? `<div class="bar"><span class="muted">${hidden.length} hidden site${hidden.length === 1 ? '' : 's'}: ${hidden.map(s => h(s.name)).join(', ')}</span><button type="button" class="btn sm" data-action="unhide">Show again</button></div>` : '';
   renderAgencyEditor();
+  renderAsanaSettings();
   $('#dlg-settings').showModal();
 }
 
@@ -877,6 +1024,71 @@ document.addEventListener('click', async (ev) => {
       return openReview(ids, `Update everything for ${ag.label} (${ids.length} site${ids.length === 1 ? '' : 's'})`);
     }
     case 'filter': S.filter = t.dataset.v; renderToolbar(); renderSites(); return;
+    case 'asana-connect': {
+      const token = $('#asana-token').value;
+      t.disabled = true;
+      try { S.asana = await api('POST', '/api/asana/connect', { token }); S.tasks = null; draft.asana = { ...draft.asana, workspace: S.asana.workspace }; }
+      catch (e) { S.asana = { connected: false, error: e.message }; }
+      renderAsanaSettings();
+      return;
+    }
+    case 'asana-disconnect': {
+      if (!confirm('Disconnect Asana? The token is removed from the Keychain.')) return;
+      await api('POST', '/api/asana/disconnect', {}).catch(() => {});
+      S.asana = { connected: false }; S.tasks = null; S.logins = {};
+      renderAsanaSettings();
+      return;
+    }
+    case 'tasks-refresh': S.tasks = null; renderTasks(); loadTasks(true); return;
+    case 'tasks-show': S.tasksShow = t.dataset.v; renderTasks(); return;
+    case 'goto-site': {
+      ev.preventDefault();
+      S.view = 'sites'; S.open.add(t.dataset.site); S.tab[t.dataset.site] = 'asana';
+      renderAll();
+      document.querySelector(`[data-site="${CSS.escape(t.dataset.site)}"]`)?.scrollIntoView({ block: 'start' });
+      return;
+    }
+    case 'asana-logins': {
+      const gid = t.dataset.gid;
+      // In the task list the button toggles; in a site panel it reads again.
+      if (S.view === 'tasks' && S.logins[gid] && !S.logins[gid].busy) { delete S.logins[gid]; renderTasks(); return; }
+      return fetchLogins(gid);
+    }
+    case 'reveal-cred': {
+      const row = t.closest('[data-login]');
+      const key = `${row.dataset.gid}|${row.dataset.login}`;
+      S.reveal.has(key) ? S.reveal.delete(key) : S.reveal.add(key);
+      rerenderLogins();
+      return;
+    }
+    case 'copy-cred': {
+      const row = t.closest('[data-login]');
+      const l = S.logins[row.dataset.gid].logins[Number(row.dataset.login)];
+      try { await navigator.clipboard.writeText(t.dataset.k === 'user' ? l.user : l.pass); toast(`${t.dataset.k === 'user' ? 'Username' : 'Password'} copied`); }
+      catch { toast('Could not copy - the browser blocked clipboard access'); }
+      return;
+    }
+    case 'log-in': {
+      const row = t.closest('[data-login]');
+      const gid = row.dataset.gid;
+      const l = S.logins[gid].logins[Number(row.dataset.login)];
+      const task = (S.tasks?.tasks || []).find(x => x.gid === gid);
+      let url = l.url || S.sites.find(s => s.id === (site?.id || task?.siteId))?.url;
+      if (!url) {
+        url = prompt(`Site address for ${task?.project?.name || 'this login'} (e.g. https://example.com.au)`);
+        if (!url) return;
+        if (!/^https?:\/\//.test(url)) url = `https://${url}`;
+      }
+      t.disabled = true;
+      t.textContent = 'Opening…';
+      try {
+        const r = await api('POST', '/api/login', { url, user: l.user, pass: l.pass });
+        toast(r.status === 'logged_in' ? `Signed in - see the browser window` : r.message);
+      } catch (e) { toast(`Log in failed: ${e.message}`); }
+      t.disabled = false;
+      t.textContent = 'Log in';
+      return;
+    }
     case 'view': S.view = t.dataset.v; if (S.view === 'log') { S.log = null; } renderAll(); window.scrollTo(0, 0); return;
     case 'dismiss-failures': await api('POST', '/api/failures/dismiss', {}).catch(e => toast(e.message)); return;
     case 'log-show': S.logShow = t.dataset.v; renderLog(); return;
@@ -1145,6 +1357,10 @@ document.addEventListener('click', async (ev) => {
       for (const k of ['allowMajorCore', 'mailTestWhenNoForm', 'showBrowser', 'notifyOnFailure']) draft[k] = f.elements[k].checked;
       draft.concurrency = Number(f.elements.concurrency.value);
       draft.formTestMode = f.elements.formTestMode.value;
+      if (f.elements.asanaWorkspace) {
+        draft.asana = { ...draft.asana, workspace: f.elements.asanaWorkspace.value, postResults: f.elements.asanaPost.checked, logTime: f.elements.asanaTime.checked };
+        if (draft.asana.workspace !== S.settings.asana.workspace) S.tasks = null;
+      }
       draft.schedule = {
         enabled: f.elements.scheduleEnabled.checked,
         time: f.elements.scheduleTime.value || '08:30',
@@ -1193,6 +1409,10 @@ document.addEventListener('change', async (ev) => {
   if (a === 'agency-filter') { S.agency = t.value; if (S.view === 'log') renderLog(); else { renderToolbar(); renderSites(); } }
   if (t.dataset.rv) updateReviewCount();
   if (t.form?.id === 'form-review' && (t.name === 'allowMajorCore' || t.name === 'formTest')) renderReview();
+  if (a === 'asana-link') {
+    const task = (S.tasks?.tasks || []).find(x => x.gid === t.value);
+    await api('POST', '/api/asana/link', { site: site.id, task: task ? { gid: task.gid, name: task.name, url: task.url, project: task.project } : null }).catch(e => toast(e.message));
+  }
   if (a === 'log-days') { S.logDays = Number(t.value); S.log = null; renderLog(); }
   if (a === 'site-agency') { await api('POST', '/api/sites/meta', { sites: [site.id], agencyId: t.value }).catch(e => toast(e.message)); if (agencies().length > 1) { await load(); } }
   if (a === 'form-url') await api('POST', '/api/sites/meta', { sites: [site.id], formUrl: t.value }).catch(e => toast(e.message));
@@ -1203,6 +1423,7 @@ document.addEventListener('change', async (ev) => {
 document.addEventListener('input', (ev) => {
   const t = ev.target;
   if (t.dataset.action === 'search-sites') { S.q = t.value; renderSites(); renderToolbar(); return; }
+  if (t.dataset.action === 'search-tasks') { S.tasksQ = t.value; renderTasks(); return; }
   if (t.dataset.action === 'wporg-search') {
     const site = siteOf(t);
     const q = t.value;

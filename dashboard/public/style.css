@@ -304,3 +304,9 @@ dialog h5 { margin: 4px 0 -4px; font-size: 12px; text-transform: uppercase; lett
 .rv-list li .check input { margin-top: 2px; }
 .rv-list li.off .check { color: var(--muted); }
 #review-body { max-height: 52vh; overflow: auto; }
+
+/* ── Tasks / logins ───────────────────────────────────────────────── */
+table.tasks td { vertical-align: top; }
+table.tasks tr.logins-row td { background: var(--panel-2); }
+table.logins code { font-size: 12.5px; }
+table.logins td .btn.sm { height: 22px; padding: 0 6px; margin-left: 2px; }

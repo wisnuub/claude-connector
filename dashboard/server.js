@@ -16,6 +16,8 @@ import { closeBrowser } from './lib/formtest.js';
 import { startScheduler, nextRun, scheduledSites } from './lib/scheduler.js';
 import { summarize, LOG_DIR } from './lib/log.js';
 import { previewConnect, confirmConnect } from './lib/connect.js';
+import * as asana from './lib/asana.js';
+import { logIn, closeLoginBrowser } from './lib/login.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, 'public');
@@ -59,6 +61,7 @@ function publicSite(s) {
     agencyId: st.agencyId || null,
     formTestQueued: st.formTestQueued || null,
     held: st.held || [],
+    asana: st.asana || null,
   };
 }
 
@@ -143,6 +146,16 @@ async function api(req, res, url) {
     return send(res, 200, (d.plugins || []).map(x => ({ slug: x.slug, name: x.name.replace(/&#\d+;|&amp;/g, s => s === '&amp;' ? '&' : String.fromCharCode(parseInt(s.slice(2), 10))), version: x.version, installs: x.active_installs, rating: x.rating, short: x.short_description })));
   }
 
+  if (m === 'GET' && p === '/api/asana/status') return send(res, 200, await asana.status());
+  if (m === 'GET' && p === '/api/asana/tasks') {
+    try { return send(res, 200, await asana.myTasks({ refresh: url.searchParams.get('refresh') === '1' })); }
+    catch (e) { return send(res, e.status === 401 ? 401 : 502, { message: e.message }); }
+  }
+  if (m === 'GET' && p === '/api/asana/logins') {
+    // Fetched when asked for, straight from Asana; not stored here.
+    try { return send(res, 200, await asana.loginsFor(String(url.searchParams.get('task') || '').replace(/\D/g, ''))); }
+    catch (e) { return send(res, e.status === 401 ? 401 : 502, { message: e.message }); }
+  }
   if (m === 'GET' && p === '/api/wporg/versions') {
     const slug = (url.searchParams.get('slug') || '').replace(/[^a-z0-9-]/gi, '');
     const r = await fetch(`https://api.wordpress.org/plugins/info/1.2/?action=plugin_information&request[slug]=${slug}&request[fields][versions]=1&request[fields][sections]=0`);
@@ -181,6 +194,23 @@ async function api(req, res, url) {
     store.patchSiteState(site.id, { held: [...held] });
     broadcast('site', publicSite(site));
     return send(res, 200, { held: [...held] });
+  }
+  if (p === '/api/asana/connect') {
+    try { return send(res, 200, await asana.connect(body.token)); }
+    catch (e) { return send(res, e.status === 401 ? 400 : 502, { message: e.message }); }
+  }
+  if (p === '/api/asana/disconnect') { await asana.disconnect(); return send(res, 200, { ok: true }); }
+  if (p === '/api/asana/link') {
+    // { site, task: { gid, name, url, project } | null }
+    if (!store.getSite(body.site)) return send(res, 404, { message: 'Unknown site' });
+    asana.linkTask(body.site, body.task || null);
+    broadcast('site', publicSite(store.getSite(body.site)));
+    return send(res, 200, { ok: true });
+  }
+  if (p === '/api/login') {
+    // { url, user, pass } - opens a browser window and signs in.
+    try { return send(res, 200, await logIn(body)); }
+    catch (e) { return send(res, 400, { message: e.message.split('\n')[0] }); }
   }
   if (p === '/api/connect/preview') {
     try { return send(res, 200, await previewConnect(body.link)); }
@@ -275,4 +305,4 @@ server.listen(PORT, HOST, () => {
   console.log(`Data: ${store.DATA_DIR}`);
 });
 
-for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, async () => { await closeBrowser(); process.exit(0); });
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, async () => { await closeBrowser(); await closeLoginBrowser(); process.exit(0); });

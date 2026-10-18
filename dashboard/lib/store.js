@@ -61,6 +61,8 @@ export const DEFAULT_SETTINGS = {
   mailTestWhenNoForm: true,
   showBrowser: false,
   notifyOnFailure: true,
+  // workspace: Asana workspace gid. The token itself lives in the Keychain (secrets.js).
+  asana: { workspace: null, postResults: true, logTime: false },
   schedule: { enabled: false, time: '08:30', days: [1, 2, 3, 4, 5], what: 'queued' },
 };
 
@@ -91,6 +93,7 @@ export function getSettings() {
   const s = readJson(F.settings, {});
   const out = { ...DEFAULT_SETTINGS, ...s };
   out.schedule = cleanSchedule(s.schedule);
+  out.asana = { ...DEFAULT_SETTINGS.asana, ...(s.asana || {}) };
   if (!['now', 'queue', 'off'].includes(out.formTestMode)) out.formTestMode = 'queue';
   out.agencies = (out.agencies?.length ? out.agencies : [DEFAULT_AGENCY]).map(cleanAgency);
   if (!out.agencies.some(a => a.id === out.defaultAgency)) out.defaultAgency = out.agencies[0].id;
@@ -101,6 +104,7 @@ export function saveSettings(patch) {
   const next = { ...getSettings(), ...patch };
   next.concurrency = Math.max(1, Math.min(10, parseInt(next.concurrency, 10) || 4));
   next.schedule = cleanSchedule(next.schedule);
+  next.asana = { ...DEFAULT_SETTINGS.asana, ...(next.asana || {}) };
   if (!['now', 'queue', 'off'].includes(next.formTestMode)) next.formTestMode = 'queue';
   next.agencies = (next.agencies?.length ? next.agencies : [DEFAULT_AGENCY]).map(cleanAgency);
   const seen = new Set();
