@@ -5,7 +5,7 @@
 // kept in the macOS Keychain via secrets.js. Logins are read from Asana when
 // asked for and never stored by the dashboard.
 import { getSecret, setSecret, deleteSecret } from './secrets.js';
-import { getSettings, saveSettings, listSites, siteState, patchSiteState } from './store.js';
+import { getSettings, saveSettings, listSites, siteState, patchSiteState, getMeta, patchMeta } from './store.js';
 import { summarize } from './log.js';
 
 const BASE = process.env.CC_ASANA_BASE || 'https://app.asana.com/api/1.0';
@@ -189,13 +189,59 @@ export function parseLogins(text) {
   return found.filter(f => { const k = `${f.url}|${f.user}|${f.pass}`; if (seen.has(k)) return false; seen.add(k); return true; });
 }
 
+// Each project keeps its WordPress login in a task called "Login", "Login detail"
+// or "Login details": username on the first line, password on the next.
+const LOGIN_TASK_RE = /^\s*log\s*-?\s*in(?:\s+details?)?\s*:?\s*$/i;
+const LABEL_ONLY_RE = /^\s*(?:wp\s*)?(?:user(?:name)?|login|pass(?:word)?|pw|pwd|u|p)\s*:?\s*$/i;
+
+/** A Login task's description: labelled lines if present, else line 1 / line 2. */
+export function parseLoginTask(notes) {
+  const labelled = parseLogins(notes);
+  if (labelled.length) return labelled;
+  let url = null;
+  const rest = [];
+  for (const raw of String(notes || '').replace(/\r/g, '').split('\n')) {
+    const line = raw.replace(/\u00a0/g, ' ').trim();
+    if (!line || LABEL_ONLY_RE.test(line)) continue;
+    const m = line.match(URL_RE);
+    if (m && line === m[1]) { url ||= m[1]; continue; } // an address on its own line
+    rest.push(line);
+  }
+  return rest.length >= 2 ? [{ url, user: rest[0], pass: rest[1] }] : [];
+}
+
 /**
- * Looks for logins in the task's description, its project's description and
- * overview, and its comments (newest first). Returns where each was found.
+ * Looks for the login: first the project's Login task, then the task's own
+ * description, the project's description and overview, and the task's
+ * comments (newest first). Returns where each was found.
  */
 export async function loginsFor(taskGid) {
   const task = (await api('GET', `/tasks/${taskGid}`, { params: { opt_fields: 'name,notes,permalink_url,projects.name,projects.notes,projects.project_brief' } })).data;
-  const sources = [{ where: 'Task description', text: task.notes }];
+  const sources = [];
+  for (const p of task.projects || []) {
+    try {
+      const inProject = await all(`/projects/${p.gid}/tasks`, { opt_fields: 'name,notes,permalink_url' });
+      for (const lt of inProject.filter(t => LOGIN_TASK_RE.test(t.name || ''))) {
+        const name = lt.name.trim();
+        // The login is usually posted as a comment (address, username, password - or
+        // just the last two when it changes), so newest comment first, then the description.
+        const found = [];
+        try {
+          const comments = (await all(`/tasks/${lt.gid}/stories`, { opt_fields: 'text,type,created_at,created_by.name' }))
+            .filter(c => c.type === 'comment').reverse();
+          for (const c of comments) {
+            for (const l of parseLoginTask(c.text)) found.push({ ...l, where: `“${name}” · ${c.created_by?.name || 'comment'}, ${new Date(c.created_at).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}` });
+          }
+        } catch {}
+        for (const l of parseLoginTask(lt.notes)) found.push({ ...l, where: `“${name}” description` });
+        // An address given once applies to the logins posted without it.
+        const addr = found.find(f => f.url)?.url || null;
+        for (const f of found) f.url ||= addr;
+        sources.push({ where: name, logins: found, link: lt.permalink_url });
+      }
+    } catch {}
+  }
+  sources.push({ where: 'Task description', text: task.notes });
   for (const p of task.projects || []) {
     sources.push({ where: `Project “${p.name}” description`, text: p.notes });
     if (p.project_brief?.gid) {
@@ -208,12 +254,27 @@ export async function loginsFor(taskGid) {
   try {
     const stories = await all(`/tasks/${taskGid}/stories`, { opt_fields: 'text,type,created_at,created_by.name' });
     for (const st of stories.filter(s => s.type === 'comment').reverse()) {
-      sources.push({ where: `Comment by ${st.created_by?.name || 'someone'}, ${new Date(st.created_at).toLocaleDateString()}`, text: st.text });
+      sources.push({ where: `Comment by ${st.created_by?.name || 'someone'}, ${new Date(st.created_at).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}`, text: st.text });
     }
   } catch {}
   const logins = [];
-  for (const src of sources) for (const l of parseLogins(src.text)) logins.push({ ...l, where: src.where });
-  return { task: { gid: task.gid, name: task.name, url: task.permalink_url, project: task.projects?.[0]?.name || null }, logins };
+  for (const src of sources) for (const l of src.logins || parseLogins(src.text)) logins.push({ where: src.where, ...l, ...(src.link ? { link: src.link } : {}) });
+  // Dedupe across sources (the same pair often sits in several places).
+  const seen = new Set();
+  const unique = logins.filter(l => { const k = `${l.user}|${l.pass}`; if (seen.has(k)) return false; seen.add(k); return true; });
+  const project = task.projects?.[0] || null;
+  return {
+    task: { gid: task.gid, name: task.name, url: task.permalink_url, project: project?.name || null, projectGid: project?.gid || null },
+    logins: unique,
+    // The address typed in last time for this project, when the login itself has none.
+    siteUrl: project ? (getMeta().asanaSiteUrls || {})[project.gid] || null : null,
+  };
+}
+
+/** Remembers the site address for a project whose login has none. */
+export function rememberSiteUrl(projectGid, url) {
+  if (!projectGid) return;
+  patchMeta({ asanaSiteUrls: { ...(getMeta().asanaSiteUrls || {}), [projectGid]: url } });
 }
 
 // ── Posting results back ─────────────────────────────────────────────────────

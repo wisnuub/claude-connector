@@ -207,6 +207,10 @@ async function api(req, res, url) {
     broadcast('site', publicSite(store.getSite(body.site)));
     return send(res, 200, { ok: true });
   }
+  if (p === '/api/asana/site-url') {
+    asana.rememberSiteUrl(String(body.project || ''), String(body.url || ''));
+    return send(res, 200, { ok: true });
+  }
   if (p === '/api/login') {
     // { url, user, pass } - opens a browser window and signs in.
     try { return send(res, 200, await logIn(body)); }

@@ -611,12 +611,13 @@ function loginsBlock(gid, fallbackUrl) {
   if (!L) return '';
   if (L.busy) return '<p class="muted" style="margin:6px 0">Reading Asana…</p>';
   if (L.error) return `<div class="notice bad" style="margin:6px 0">${h(L.error)}</div>`;
-  if (!L.logins.length) return `<div class="notice" style="margin:6px 0">No username and password found in this task, its project's description or overview, or its comments. The login is read from lines like <code>Username: …</code> / <code>Password: …</code>.</div>`;
+  if (!L.logins.length) return `<div class="notice" style="margin:6px 0">No login found. The dashboard looks for a task called <b>Login</b>, <b>Login detail</b> or <b>Login details</b> in ${L.task?.project ? `<b>${h(L.task.project)}</b>` : 'the project'} - username on the first line of its description, password on the second - then in this task, the project's description and its comments.</div>`;
+  fallbackUrl = fallbackUrl || L.siteUrl;
   return `<div class="tablewrap"><table class="list logins" style="margin:6px 0"><thead><tr><th>Found in</th><th>Address</th><th>Username</th><th>Password</th><th></th></tr></thead><tbody>${L.logins.map((l, i) => {
     const key = `${gid}|${i}`;
     const addr = l.url || fallbackUrl || '';
     return `<tr data-login="${i}" data-gid="${h(gid)}">
-      <td class="faint">${h(l.where)}</td>
+      <td class="faint">${l.link ? `<a href="${h(l.link)}" target="_blank" rel="noopener">${h(l.where)}</a>` : h(l.where)}</td>
       <td>${addr ? `<a href="${h(addr)}" target="_blank" rel="noopener">${h(addr.replace(/^https?:\/\//, ''))}</a>` : '<span class="faint">unknown</span>'}</td>
       <td><code>${h(l.user)}</code> <button class="btn sm ghost" data-action="copy-cred" data-k="user">Copy</button></td>
       <td><code>${S.reveal.has(key) ? h(l.pass) : '••••••••'}</code> <button class="btn sm ghost" data-action="reveal-cred">${S.reveal.has(key) ? 'Hide' : 'Show'}</button><button class="btn sm ghost" data-action="copy-cred" data-k="pass">Copy</button></td>
@@ -628,7 +629,7 @@ function loginsBlock(gid, fallbackUrl) {
 async function fetchLogins(gid) {
   S.logins[gid] = { busy: true };
   rerenderLogins();
-  try { const r = await api('GET', `/api/asana/logins?task=${encodeURIComponent(gid)}`); S.logins[gid] = { logins: r.logins, task: r.task }; }
+  try { const r = await api('GET', `/api/asana/logins?task=${encodeURIComponent(gid)}`); S.logins[gid] = { logins: r.logins, task: r.task, siteUrl: r.siteUrl }; }
   catch (e) { S.logins[gid] = { error: e.message }; }
   rerenderLogins();
 }
@@ -1073,11 +1074,14 @@ document.addEventListener('click', async (ev) => {
       const gid = row.dataset.gid;
       const l = S.logins[gid].logins[Number(row.dataset.login)];
       const task = (S.tasks?.tasks || []).find(x => x.gid === gid);
-      let url = l.url || S.sites.find(s => s.id === (site?.id || task?.siteId))?.url;
+      const proj = S.logins[gid].task;
+      let url = l.url || S.sites.find(s => s.id === (site?.id || task?.siteId))?.url || S.logins[gid].siteUrl;
       if (!url) {
-        url = prompt(`Site address for ${task?.project?.name || 'this login'} (e.g. https://example.com.au)`);
+        url = prompt(`Site address for ${proj?.project || task?.project?.name || 'this login'} (e.g. https://example.com.au) - remembered for next time`);
         if (!url) return;
-        if (!/^https?:\/\//.test(url)) url = `https://${url}`;
+        if (!/^https?:\/\//.test(url)) url = `https://${url.trim()}`;
+        await api('POST', '/api/asana/site-url', { project: proj?.projectGid, url }).catch(() => {});
+        S.logins[gid].siteUrl = url;
       }
       t.disabled = true;
       t.textContent = 'Opening…';
