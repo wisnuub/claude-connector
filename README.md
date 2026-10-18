@@ -524,6 +524,37 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 
 ## Changelog
 
+### 1.7.2 — PHP file writes fixed, automatic rollback on fatal errors
+
+**Fixed**
+
+- **Writing PHP files failed with HTTP 500** (e.g. a child theme's
+  `functions.php`). The pre-write syntax check ran `PHP_BINARY -l`, but on a
+  web server `PHP_BINARY` is php-fpm / lsphp / empty rather than the PHP CLI:
+  php-fpm rejected every file as a "syntax error", an empty value threw a
+  fatal `ValueError` on PHP 8, and lsphp could hang until the request timed
+  out. The check now runs in-process (`token_get_all()` with `TOKEN_PARSE`),
+  so it behaves the same on every host.
+- **`write_failed` says why** - e.g. "directory is not writable by the web
+  server user" - instead of just "Could not write file."
+
+**Added**
+
+- **Automatic rollback when a PHP write breaks the site.** A syntax check
+  cannot catch fatals such as redeclaring a parent theme's function or calling
+  one that does not exist. After every `.php` write (`/files`, `/files/commit`,
+  `/files/fetch`) the plugin loads the dashboard and homepage using core's own
+  check (the one the theme file editor uses). On a fatal error it restores the
+  previous version - or removes a newly created file - and returns
+  `php_fatal_rolled_back` with the error. Successful responses include
+  `health.status`: `ok`, or `unverified` when the site could not be loaded to
+  check (blocked loopback, page cache), in which case the write is kept.
+
+**Verified** on a local WordPress 7.1.3 with a child theme: valid writes saved
+and rendered; a syntax error, an undefined function, a redeclared `wp_head()`
+and a new admin-only fatal were all rejected or rolled back through all three
+write routes, with the homepage and dashboard returning 200 after every one.
+
 ### 1.7.1 — ACF backslash fix, scroll storytelling
 
 **Fixed**
