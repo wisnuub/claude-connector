@@ -15,6 +15,7 @@ import { call } from './lib/wp.js';
 import { closeBrowser } from './lib/formtest.js';
 import { startScheduler, nextRun, scheduledSites } from './lib/scheduler.js';
 import { summarize, LOG_DIR } from './lib/log.js';
+import { previewConnect, confirmConnect } from './lib/connect.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, 'public');
@@ -180,6 +181,18 @@ async function api(req, res, url) {
     store.patchSiteState(site.id, { held: [...held] });
     broadcast('site', publicSite(site));
     return send(res, 200, { held: [...held] });
+  }
+  if (p === '/api/connect/preview') {
+    try { return send(res, 200, await previewConnect(body.link)); }
+    catch (e) { return send(res, 400, { message: e.message }); } // a bad or used link, not a server fault
+  }
+  if (p === '/api/connect/confirm') {
+    const r = await confirmConnect(body.id, { openEditor: body.openEditor !== false });
+    // Pick the new workspace up now rather than on the watcher's next tick, so the agency can be set.
+    const site = store.listSites({ includeHidden: true }).find(s => s.url.replace(/\/+$/, '') === r.url.replace(/\/+$/, ''));
+    if (site && body.agencyId) store.patchSiteState(site.id, { agencyId: body.agencyId });
+    rescanSites();
+    return send(res, 200, { ...r, siteId: site?.id || null });
   }
   if (p === '/api/sites/seen') { newSites.clear(); return send(res, 200, { ok: true }); }
   if (p === '/api/sites/meta') {

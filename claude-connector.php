@@ -682,17 +682,44 @@ function claude_settings_page() {
         </form>
         <h2 style="margin-top:1.5em;">Connect Claude Code</h2>
         <p class="description">Sets up this site on your computer: installs the MCP bridge, creates a workspace folder for the site, and opens it in VSCode - Claude Code connects automatically. Requires Node.js (<a href="https://nodejs.org" target="_blank">nodejs.org</a>) and VSCode with the Claude Code extension.</p>
-        <div id="claude-setup-mac" style="margin-top:12px;max-width:900px;">
-            <p style="margin:0 0 6px;"><strong>Mac:</strong> copy the setup command, open <em>Terminal</em>, paste it and press Return.</p>
-            <button type="button" class="button button-primary" id="claude-setup-get">&#8984;&nbsp; Show Mac setup command</button>
-            <div id="claude-setup-out" style="display:none;margin-top:8px;">
-                <div style="display:flex;gap:8px;align-items:flex-start;">
-                    <code id="claude-setup-cmd" style="flex:1;display:block;padding:8px 10px;word-break:break-all;user-select:all;"></code>
-                    <button type="button" class="button" id="claude-setup-copy">Copy</button>
+        <div id="claude-setup-mac" style="margin-top:12px;max-width:960px;">
+            <p style="margin:0 0 8px;"><strong>Mac</strong> - pick any option:</p>
+            <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                <div style="flex:1 1 280px;border:1px solid #c3c4c7;border-radius:6px;padding:12px 14px;background:#fff;">
+                    <h3 style="margin:0 0 4px;font-size:14px;">Option 1 - Connect on this Mac</h3>
+                    <p class="description" style="margin:0 0 10px;">One click, if the Site Maintenance app is installed on this Mac. It sets up the workspace, opens VS Code and adds the site to the dashboard.</p>
+                    <button type="button" class="button button-primary" id="claude-connect-mac">Connect on this Mac</button>
+                    <p class="description" id="claude-connect-hint" style="display:none;margin-top:8px;">Your browser asks to open <em>Site Maintenance</em> - allow it. Nothing happened? The app is not installed: in the repo's <code>dashboard</code> folder run <code>npm run shortcut</code>, or use option 2.</p>
                 </div>
-                <p class="description" style="margin-top:6px;">Works once and expires in 15 minutes - it carries this site's API key. Nothing is downloaded through the browser, so there is no Gatekeeper prompt and no <code>chmod +x</code>.</p>
+                <div style="flex:1 1 280px;border:1px solid #c3c4c7;border-radius:6px;padding:12px 14px;background:#fff;">
+                    <h3 style="margin:0 0 4px;font-size:14px;">Option 2 - Copy &amp; paste in Terminal</h3>
+                    <p class="description" style="margin:0 0 10px;">Fastest: no Gatekeeper prompt, nothing to approve.</p>
+                    <button type="button" class="button button-primary" id="claude-setup-get">Show setup command</button>
+                    <div id="claude-setup-out" style="display:none;margin-top:10px;">
+                        <ol style="margin:0 0 8px 18px;">
+                            <li>Copy the command.</li>
+                            <li>Open <em>Terminal</em> (&#8984; Space &rarr; type "Terminal").</li>
+                            <li>Paste it and press Return.</li>
+                        </ol>
+                        <div style="display:flex;gap:8px;align-items:flex-start;">
+                            <code id="claude-setup-cmd" style="flex:1;display:block;padding:8px 10px;word-break:break-all;user-select:all;"></code>
+                            <button type="button" class="button" id="claude-setup-copy">Copy</button>
+                        </div>
+                        <p class="description" style="margin-top:6px;">Works once and expires in 15 minutes - it carries this site's API key.</p>
+                    </div>
+                </div>
+                <div style="flex:1 1 280px;border:1px solid #c3c4c7;border-radius:6px;padding:12px 14px;background:#fff;">
+                    <h3 style="margin:0 0 4px;font-size:14px;">Option 3 - Download the installer</h3>
+                    <p class="description" style="margin:0 0 10px;">macOS asks you to approve it once, because it was downloaded.</p>
+                    <a id="claude-dl-mac" class="button button-primary" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-ajax.php?action=claude_connect_script&os=mac' ), 'claude_connect_script' ) ); ?>">&#8984;&nbsp; Download Mac installer</a>
+                    <ol style="margin:10px 0 0 18px;">
+                        <li>Open the downloaded <code>.zip</code> (Safari unzips it for you).</li>
+                        <li>Double-click <code>connect-&hellip;.command</code>. macOS says it cannot be opened - click <em>Done</em>.</li>
+                        <li>Open <em>System Settings &rarr; Privacy &amp; Security</em>, scroll down to the message about <code>connect-&hellip;.command</code> and click <strong>Open Anyway</strong>, then confirm with your password.</li>
+                        <li>Click <strong>Open</strong> when asked again. A Terminal window runs the setup.</li>
+                    </ol>
+                </div>
             </div>
-            <p class="description" style="margin-top:6px;">Or <a id="claude-dl-mac" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-ajax.php?action=claude_connect_script&os=mac' ), 'claude_connect_script' ) ); ?>">download the .command file</a> (needs <code>chmod +x</code> and approval under System Settings → Privacy &amp; Security).</p>
         </div>
         <div id="claude-setup-windows" style="margin-top:12px;">
             <p style="margin:0 0 6px;"><strong>Windows:</strong> download the script, then right-click it &rarr; Run with PowerShell.</p>
@@ -712,21 +739,39 @@ function claude_settings_page() {
             var btn = document.getElementById( 'claude-setup-get' );
             var out = document.getElementById( 'claude-setup-out' );
             var cmd = document.getElementById( 'claude-setup-cmd' );
-            btn.addEventListener( 'click', function () {
-                btn.disabled = true;
+            // Each call hands out fresh single-use tokens.
+            function fetchSetup() {
                 var body = new FormData();
                 body.append( 'action', 'claude_setup_command' );
                 body.append( '_ajax_nonce', <?php echo wp_json_encode( wp_create_nonce( 'claude_setup_command' ) ); ?> );
-                fetch( <?php echo wp_json_encode( admin_url( 'admin-ajax.php' ) ); ?>, { method: 'POST', body: body, credentials: 'same-origin' } )
+                return fetch( <?php echo wp_json_encode( admin_url( 'admin-ajax.php' ) ); ?>, { method: 'POST', body: body, credentials: 'same-origin' } )
                     .then( function ( r ) { return r.json(); } )
                     .then( function ( r ) {
                         if ( ! r.success ) throw new Error( r.data || 'Request failed' );
-                        cmd.textContent = r.data.command;
+                        return r.data;
+                    } );
+            }
+            btn.addEventListener( 'click', function () {
+                btn.disabled = true;
+                fetchSetup()
+                    .then( function ( d ) {
+                        cmd.textContent = d.command;
                         out.style.display = '';
                         btn.textContent = 'New setup command';
                     } )
                     .catch( function ( e ) { alert( 'Could not create the setup command: ' + e.message ); } )
                     .then( function () { btn.disabled = false; } );
+            } );
+            var cbtn = document.getElementById( 'claude-connect-mac' );
+            cbtn.addEventListener( 'click', function () {
+                cbtn.disabled = true;
+                fetchSetup()
+                    .then( function ( d ) {
+                        window.location.href = d.connect;
+                        document.getElementById( 'claude-connect-hint' ).style.display = '';
+                    } )
+                    .catch( function ( e ) { alert( 'Could not create the connect link: ' + e.message ); } )
+                    .then( function () { cbtn.disabled = false; } );
             } );
             document.getElementById( 'claude-setup-copy' ).addEventListener( 'click', function () {
                 var b = this;
@@ -4547,6 +4592,29 @@ function claude_connect_script_download() {
     $os   = sanitize_key( $_GET['os'] ?? 'mac' ) === 'windows' ? 'windows' : 'mac';
     $site = claude_script_site();
 
+    // Mac: a browser saves a bare .command without its execute bit ("you do not have the
+    // privileges"). Inside a zip the bit survives unzipping, leaving only Gatekeeper's
+    // one-time "Open Anyway". Hosts without ZipArchive get the bare file.
+    if ( $os === 'mac' && class_exists( 'ZipArchive' ) ) {
+        require_once ABSPATH . 'wp-admin/includes/file.php'; // wp_tempnam()
+        $name = 'connect-' . $site['slug'] . '.command';
+        $tmp  = wp_tempnam( 'claude-connect' );
+        $zip  = new ZipArchive();
+        if ( $tmp && $zip->open( $tmp, ZipArchive::OVERWRITE ) === true ) {
+            $zip->addFromString( $name, claude_script_for( 'mac', $site ) );
+            $zip->setExternalAttributesName( $name, ZipArchive::OPSYS_UNIX, ( 0100755 & 0xFFFF ) << 16 );
+            $zip->close();
+            header( 'Content-Type: application/zip' );
+            header( 'Content-Disposition: attachment; filename="connect-' . $site['slug'] . '.zip"' );
+            header( 'Content-Length: ' . filesize( $tmp ) );
+            header( 'X-Content-Type-Options: nosniff' );
+            readfile( $tmp );
+            @unlink( $tmp ); // phpcs:ignore - holds the API key
+            exit;
+        }
+        if ( $tmp ) @unlink( $tmp ); // phpcs:ignore
+    }
+
     header( 'Content-Type: application/octet-stream' );
     header( 'Content-Disposition: attachment; filename="connect-' . $site['slug'] . ( $os === 'windows' ? '.ps1' : '.command' ) . '"' );
     header( 'X-Content-Type-Options: nosniff' );
@@ -4585,6 +4653,8 @@ const CLAUDE_SETUP_TTL = 15 * MINUTE_IN_SECONDS;
 add_action( 'wp_ajax_claude_setup_command', 'claude_setup_command' );
 add_action( 'wp_ajax_claude_setup', 'claude_setup_serve' );
 add_action( 'wp_ajax_nopriv_claude_setup', 'claude_setup_serve' );
+add_action( 'wp_ajax_claude_setup_json', 'claude_setup_json' );
+add_action( 'wp_ajax_nopriv_claude_setup_json', 'claude_setup_json' );
 
 /** Settings page → a fresh Terminal command with its own single-use token. */
 function claude_setup_command() {
@@ -4594,11 +4664,41 @@ function claude_setup_command() {
     $token = wp_generate_password( 32, false, false );
     set_transient( 'claude_setup_' . hash( 'sha256', $token ), 'mac', CLAUDE_SETUP_TTL );
     $link = add_query_arg( array( 'action' => 'claude_setup', 't' => $token ), admin_url( 'admin-ajax.php' ) );
+
+    // "Connect on this Mac": a claude-connector:// link the Site Maintenance app
+    // (dashboard/shortcut.js) handles. It carries where to fetch the site's details
+    // from - with its own single-use token - not the details themselves.
+    $json_token = wp_generate_password( 32, false, false );
+    set_transient( 'claude_setup_' . hash( 'sha256', $json_token ), 'json', CLAUDE_SETUP_TTL );
+    $endpoint = add_query_arg( array( 'action' => 'claude_setup_json', 't' => $json_token ), admin_url( 'admin-ajax.php' ) );
+
     wp_send_json_success( array(
         // bash -c "$(curl …)" rather than curl | bash: npm install inside the script
         // would otherwise read the rest of the script from the pipe as its stdin.
         'command'    => 'bash -c "$(curl -fsSL \'' . $link . '\')"',
+        'connect'    => 'claude-connector://connect?endpoint=' . rawurlencode( $endpoint ),
         'expires_in' => CLAUDE_SETUP_TTL,
+    ) );
+}
+
+/** The Site Maintenance app's request for "Connect on this Mac": the site's details as JSON, once. */
+function claude_setup_json() {
+    $token = preg_replace( '/[^A-Za-z0-9]/', '', (string) ( $_GET['t'] ?? '' ) );
+    $key   = 'claude_setup_' . hash( 'sha256', $token );
+    nocache_headers();
+    if ( $token === '' || get_transient( $key ) !== 'json' ) {
+        wp_send_json_error( array( 'message' => 'This connect link has expired or was already used. In WP Admin go to Settings > Claude Connector and click Connect on this Mac again.' ), 410 );
+    }
+    delete_transient( $key );
+    $site = claude_script_site();
+    wp_send_json_success( array(
+        'url'            => $site['url'],
+        'key'            => $site['key'],
+        'mode'           => 'ajax',
+        'slug'           => $site['slug'],
+        'name'           => $site['name'],
+        'claude_md'      => claude_script_claude_md( $site['name'], $site['url'] ),
+        'plugin_version' => CLAUDE_CONNECTOR_VERSION,
     ) );
 }
 

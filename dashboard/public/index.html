@@ -146,6 +146,17 @@
     </form>
   </dialog>
 
+  <!-- Connect on this Mac (claude-connector:// link from WP Admin) -->
+  <dialog id="dlg-connect">
+    <form method="dialog" id="form-connect">
+      <div class="dh"><h3>Connect a site</h3></div>
+      <div class="db">
+        <div data-body><p class="muted">Fetching the site's details…</p></div>
+      </div>
+      <div class="df"><button class="btn" value="cancel">Cancel</button><button class="btn primary" value="go" data-action="run-connect" disabled>Connect</button></div>
+    </form>
+  </dialog>
+
   <!-- Assign agency -->
   <dialog id="dlg-agency">
     <form method="dialog" id="form-agency">

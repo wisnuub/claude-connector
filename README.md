@@ -52,7 +52,12 @@ Release checks are cached for 12 hours. To ship a new version: bump `Version` in
 
 **WP Admin → Settings → Claude Connector → Connect Claude Code**:
 
-- **Mac** - click **Show Mac setup command**, copy it, paste it into Terminal and press Return. The command fetches the setup script with `curl`, so there is nothing for Gatekeeper to block and no `chmod +x`. It carries the site's API key, so each command works once and expires after 15 minutes; press the button again for a new one. (A downloadable `.command` is still offered, but macOS strips its execute bit and quarantines it.)
+- **Mac** - three ways, all ending in the same workspace:
+  1. **Connect on this Mac** - one click, when the [Site Maintenance app](#maintenance-dashboard-many-sites) is installed (`npm run shortcut` in `dashboard/`). The browser asks to open Site Maintenance; the dashboard shows the site and asks before setting anything up, then creates the workspace, refreshes the MCP bridge, opens VS Code and lists the site. Nothing is downloaded, so Gatekeeper is not involved.
+  2. **Copy & paste in Terminal** - click **Show setup command**, paste it into Terminal and press Return. The script is fetched with `curl`, so there is nothing for Gatekeeper to block.
+  3. **Download the installer** - a `.zip` holding the `.command`. Because it was downloaded, macOS blocks it once: double-click it, then **System Settings → Privacy & Security → Open Anyway**. (Zipped, it keeps its execute permission, so no `chmod +x`.)
+
+  Options 1 and 2 carry the site's API key, so each link or command works once and expires after 15 minutes.
 - **Windows** - download the `.ps1` file, right-click it → **Run with PowerShell**.
 
 The script installs the MCP bridge, creates a workspace folder for the site, writes `.mcp.json` + `CLAUDE.md`, and opens the folder in VSCode. Requires [Node.js](https://nodejs.org) and VSCode with the Claude Code extension.
@@ -94,7 +99,7 @@ npm start            # → http://127.0.0.1:4590
 
 Needs Node.js 18+ and Google Chrome or Microsoft Edge (for the form test). Every site must run Claude Connector **1.8.0 or newer**. The plugin's auto-updater gets them there.
 
-**Shortcut (macOS):** `npm run shortcut` creates **Site Maintenance.app** in `~/Applications` and on the Desktop - open it from Spotlight, Launchpad or the Dock. It starts the dashboard if it is not running (through the background service when installed) and opens it in your browser. `npm run shortcut -- --remove` deletes it; run `npm run shortcut` again if Node.js moves.
+**Shortcut (macOS):** `npm run shortcut` creates **Site Maintenance.app** in `~/Applications` and on the Desktop - open it from Spotlight, Launchpad or the Dock. It starts the dashboard if it is not running (through the background service when installed) and opens it in your browser. It also handles WP Admin's **Connect on this Mac** links (`claude-connector://`). It is built and signed (ad hoc) on your Mac, so Gatekeeper does not ask about it. `npm run shortcut -- --remove` deletes it; run `npm run shortcut` again if Node.js moves.
 
 ### Where the sites come from
 

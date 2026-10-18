@@ -1236,4 +1236,65 @@ document.addEventListener('input', (ev) => {
 // Refresh relative times once a minute.
 setInterval(() => { renderStats(); if (S.view === 'sites') renderSites(); }, 60_000);
 
-load().then(connect).catch(e => { $('#sites').innerHTML = `<div class="empty"><h2>Could not load</h2><p>${h(e.message)}</p></div>`; });
+// ── Connect on this Mac ──────────────────────────────────────────────────────
+// The Site Maintenance app opens /#connect=<claude-connector:// link>.
+
+let connectPreview = null;
+
+async function startConnect(link) {
+  history.replaceState(null, '', location.pathname); // a reload must not reuse the link
+  const dlg = $('#dlg-connect');
+  const body = $('[data-body]', dlg);
+  const go = $('[data-action=run-connect]', dlg);
+  go.disabled = true;
+  go.textContent = 'Connect';
+  body.innerHTML = '<p class="muted">Fetching the site\'s details…</p>';
+  dlg.showModal();
+  try {
+    connectPreview = await api('POST', '/api/connect/preview', { link });
+  } catch (e) {
+    body.innerHTML = `<div class="notice bad">${h(e.message)}</div>`;
+    return;
+  }
+  const c = connectPreview;
+  body.innerHTML = `
+    <dl class="kv"><dt>Site</dt><dd><b>${h(c.name)}</b></dd><dt>Address</dt><dd><a href="${h(c.url)}" target="_blank" rel="noopener">${h(c.url)}</a></dd>
+      <dt>Workspace</dt><dd><code>${h(c.folder)}</code></dd>${c.pluginVersion ? `<dt>Connector</dt><dd>${h(c.pluginVersion)}</dd>` : ''}</dl>
+    ${c.exists ? '<div class="notice">This site is already set up here - its API key and MCP bridge are refreshed; CLAUDE.md is kept.</div>' : ''}
+    <p class="hint" style="margin:0">Only connect sites you opened this from yourself.</p>
+    <label class="field">Agency<select name="agencyId"></select></label>
+    <label class="check"><input type="checkbox" name="openEditor" checked> Open the workspace in VS Code</label>`;
+  agencyOptions($('select[name=agencyId]', dlg), S.agency !== 'all' ? S.agency : S.settings.defaultAgency);
+  go.disabled = false;
+}
+
+document.addEventListener('click', async (ev) => {
+  if (!ev.target.closest('[data-action=run-connect]')) return;
+  ev.preventDefault();
+  const dlg = $('#dlg-connect');
+  const go = $('[data-action=run-connect]', dlg);
+  go.disabled = true;
+  go.textContent = 'Setting up… (installing the MCP bridge can take a minute)';
+  try {
+    const r = await api('POST', '/api/connect/confirm', {
+      id: connectPreview.id,
+      agencyId: $('select[name=agencyId]', dlg).value,
+      openEditor: $('input[name=openEditor]', dlg).checked,
+    });
+    dlg.close();
+    await load();
+    toast(`${r.name} connected${r.opened ? ' - opening VS Code' : ''}. Press Check to see its updates.`);
+    if (r.siteId) { S.open.add(r.siteId); renderSites(); }
+  } catch (e) {
+    $('[data-body]', dlg).insertAdjacentHTML('beforeend', `<div class="notice bad">${h(e.message)}</div>`);
+    go.textContent = 'Connect';
+  }
+});
+
+function checkConnectHash() {
+  const m = location.hash.match(/^#connect=(.+)$/);
+  if (m) startConnect(decodeURIComponent(m[1]));
+}
+window.addEventListener('hashchange', checkConnectHash);
+
+load().then(() => { connect(); checkConnectHash(); }).catch(e => { $('#sites').innerHTML = `<div class="empty"><h2>Could not load</h2><p>${h(e.message)}</p></div>`; });
