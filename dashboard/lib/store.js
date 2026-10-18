@@ -61,6 +61,9 @@ export const DEFAULT_SETTINGS = {
   mailTestWhenNoForm: true,
   showBrowser: false,
   notifyOnFailure: true,
+  // Log in: 'tab' = a new tab in your own browser through the Site Maintenance Login
+  // extension (dashboard/extension), falling back to 'window' = a separate browser window.
+  loginMode: 'tab',
   // workspace: Asana workspace gid. The token itself lives in the Keychain (secrets.js).
   asana: { workspace: null, postResults: true, logTime: false },
   schedule: { enabled: false, time: '08:30', days: [1, 2, 3, 4, 5], what: 'queued' },

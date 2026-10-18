@@ -587,6 +587,73 @@ function renderAll() {
   renderDrawer();
 }
 
+// ── Log in: new tab through the extension, or a separate window ──────────────
+
+// Fixed by the "key" in extension/manifest.json, so the dashboard can find it.
+const EXT_ID = 'ocideoajgbmhcophohnnighielchjmlg';
+
+/** Asks the Site Maintenance Login extension to answer; false when it is not installed. */
+function extensionRuntime() {
+  return new Promise(resolve => {
+    const rt = window.chrome?.runtime;
+    if (!rt?.sendMessage) return resolve(null);
+    const timer = setTimeout(() => resolve(null), 1200);
+    try {
+      rt.sendMessage(EXT_ID, { type: 'ping' }, r => { clearTimeout(timer); void rt.lastError; resolve(r?.ok ? r : null); });
+    } catch { clearTimeout(timer); resolve(null); }
+  });
+}
+
+function extensionLogin(msg) {
+  return new Promise((resolve, reject) => {
+    window.chrome.runtime.sendMessage(EXT_ID, { type: 'login', ...msg }, r => {
+      const err = window.chrome.runtime.lastError;
+      if (err) return reject(new Error(err.message));
+      r?.ok ? resolve(r) : reject(new Error(r?.error || 'The extension did not answer.'));
+    });
+  });
+}
+
+/** Same rule as the server's loginUrlFor(): a site address gets /wp-admin/. */
+function loginUrlFor(url) {
+  const u = new URL(url);
+  if (/wp-login\.php|wp-admin|login|admin/i.test(u.pathname)) return u.toString();
+  u.pathname = u.pathname.replace(/\/?$/, '/') + 'wp-admin/';
+  u.search = '';
+  return u.toString();
+}
+
+async function signIn(url, user, pass) {
+  if ((S.settings.loginMode || 'tab') === 'tab') {
+    if (await extensionRuntime()) {
+      await extensionLogin({ url: loginUrlFor(url), user, pass });
+      return 'Opened in a new tab - signing in there.';
+    }
+    toast('The Site Maintenance Login extension is not installed - using a separate window (see Settings → Log in).');
+  }
+  const r = await api('POST', '/api/login', { url, user, pass });
+  return r.status === 'logged_in' ? 'Signed in - see the browser window.' : r.message;
+}
+
+async function renderExtStatus() {
+  const el = $('#ext-status');
+  if (!el) return;
+  el.innerHTML = '<p class="hint">Checking for the extension…</p>';
+  const ext = await extensionRuntime();
+  el.innerHTML = ext
+    ? `<p class="hint" style="margin:0">✓ The Site Maintenance Login extension ${h(ext.version)} is installed in this browser.</p>`
+    : `<div class="notice" style="margin:0">
+        <b>Install the extension once</b> (so Log in can use a new tab in this browser):
+        <ol style="margin:6px 0 6px 18px;padding:0">
+          <li>Open <code>chrome://extensions</code> in a new tab (type it in the address bar).</li>
+          <li>Turn on <b>Developer mode</b> (top right).</li>
+          <li>Click <b>Load unpacked</b> and choose the <code>extension</code> folder: <button type="button" class="btn sm" data-action="reveal-extension">Show the folder in Finder</button></li>
+          <li>Come back here - this message turns into a tick.</li>
+        </ol>
+        <span class="hint">Folder: <code>${h(S.extensionDir || 'dashboard/extension')}</code>. It only answers this dashboard, and keeps each login in memory for that one tab.</span>
+      </div>`;
+}
+
 // ── Asana: tasks, logins, Log in ─────────────────────────────────────────────
 
 async function loadAsana() {
@@ -838,6 +905,7 @@ async function load() {
   S.failures = d.failures || [];
   S.newSites = new Set(d.newSites || []);
   S.logDir = d.logDir || '';
+  S.extensionDir = d.extensionDir || '';
   for (const j of d.jobs) S.jobs.set(j.id, j);
   renderAll();
 }
@@ -967,6 +1035,8 @@ function openSettings() {
   $('#hidden-sites').innerHTML = hidden.length ? `<div class="bar"><span class="muted">${hidden.length} hidden site${hidden.length === 1 ? '' : 's'}: ${hidden.map(s => h(s.name)).join(', ')}</span><button type="button" class="btn sm" data-action="unhide">Show again</button></div>` : '';
   renderAgencyEditor();
   renderAsanaSettings();
+  f.elements.loginMode.value = draft.loginMode || 'tab';
+  renderExtStatus();
   $('#dlg-settings').showModal();
 }
 
@@ -1025,6 +1095,7 @@ document.addEventListener('click', async (ev) => {
       return openReview(ids, `Update everything for ${ag.label} (${ids.length} site${ids.length === 1 ? '' : 's'})`);
     }
     case 'filter': S.filter = t.dataset.v; renderToolbar(); renderSites(); return;
+    case 'reveal-extension': await api('POST', '/api/extension/reveal', {}).catch(e => toast(e.message)); return;
     case 'asana-connect': {
       const token = $('#asana-token').value;
       t.disabled = true;
@@ -1085,10 +1156,8 @@ document.addEventListener('click', async (ev) => {
       }
       t.disabled = true;
       t.textContent = 'Opening…';
-      try {
-        const r = await api('POST', '/api/login', { url, user: l.user, pass: l.pass });
-        toast(r.status === 'logged_in' ? `Signed in - see the browser window` : r.message);
-      } catch (e) { toast(`Log in failed: ${e.message}`); }
+      try { toast(await signIn(url, l.user, l.pass)); }
+      catch (e) { toast(`Log in failed: ${e.message}`); }
       t.disabled = false;
       t.textContent = 'Log in';
       return;
@@ -1361,6 +1430,7 @@ document.addEventListener('click', async (ev) => {
       for (const k of ['allowMajorCore', 'mailTestWhenNoForm', 'showBrowser', 'notifyOnFailure']) draft[k] = f.elements[k].checked;
       draft.concurrency = Number(f.elements.concurrency.value);
       draft.formTestMode = f.elements.formTestMode.value;
+      draft.loginMode = f.elements.loginMode.value;
       if (f.elements.asanaWorkspace) {
         draft.asana = { ...draft.asana, workspace: f.elements.asanaWorkspace.value, postResults: f.elements.asanaPost.checked, logTime: f.elements.asanaTime.checked };
         if (draft.asana.workspace !== S.settings.asana.workspace) S.tasks = null;
@@ -1521,5 +1591,6 @@ function checkConnectHash() {
   if (m) startConnect(decodeURIComponent(m[1]));
 }
 window.addEventListener('hashchange', checkConnectHash);
+window.addEventListener('focus', () => { if ($('#dlg-settings').open) renderExtStatus(); });
 
 load().then(() => { connect(); checkConnectHash(); }).catch(e => { $('#sites').innerHTML = `<div class="empty"><h2>Could not load</h2><p>${h(e.message)}</p></div>`; });

@@ -6,6 +6,7 @@
 //
 // Listens on 127.0.0.1 only. API keys stay in this process and in data/.
 import http from 'http';
+import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -23,6 +24,7 @@ const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, 'public');
 const PORT = parseInt(process.env.PORT || '4590', 10);
 const HOST = '127.0.0.1';
+const EXTENSION_DIR = path.join(ROOT, 'extension');
 const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
 
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.jpg': 'image/jpeg', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
@@ -118,7 +120,7 @@ async function api(req, res, url) {
   const m = req.method;
 
   if (m === 'GET' && p === '/api/state') {
-    return send(res, 200, { version: VERSION, sites: store.listSites({ includeHidden: true }).map(publicSite), settings: store.getSettings(), jobs: jobs.listJobs(), schedule: scheduleInfo(), failures: failuresInfo(), newSites: [...newSites], logDir: LOG_DIR });
+    return send(res, 200, { version: VERSION, sites: store.listSites({ includeHidden: true }).map(publicSite), settings: store.getSettings(), jobs: jobs.listJobs(), schedule: scheduleInfo(), failures: failuresInfo(), newSites: [...newSites], logDir: LOG_DIR, extensionDir: EXTENSION_DIR });
   }
   if (m === 'GET' && p === '/api/events') {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
@@ -206,6 +208,11 @@ async function api(req, res, url) {
     asana.linkTask(body.site, body.task || null);
     broadcast('site', publicSite(store.getSite(body.site)));
     return send(res, 200, { ok: true });
+  }
+  if (p === '/api/extension/reveal') {
+    // Shows the extension folder in Finder, ready for Chrome's "Load unpacked".
+    if (process.platform === 'darwin') spawn('open', ['-R', path.join(EXTENSION_DIR, 'manifest.json')], { stdio: 'ignore', detached: true }).unref();
+    return send(res, 200, { dir: EXTENSION_DIR });
   }
   if (p === '/api/asana/site-url') {
     asana.rememberSiteUrl(String(body.project || ''), String(body.url || ''));

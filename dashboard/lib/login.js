@@ -3,8 +3,8 @@
 // the connector. The window has its own profile (data/browser-profile), so it
 // never touches your everyday browser and stays signed in between uses.
 //
-// It stops and leaves the window to you when the site asks for something only
-// a person can give: a captcha or a two-factor code.
+// When the site asks for something only a person can give - a captcha, a
+// security check before the form, a two-factor code - it leaves that to you.
 import path from 'path';
 import { DATA_DIR } from './store.js';
 
@@ -50,6 +50,55 @@ export function loginUrlFor(url) {
 
 const inAdmin = () => !!document.querySelector('#wpadminbar, #adminmenu, #wpbody');
 
+const USER_SEL = ['#user_login', 'input[name="log"]', 'input[autocomplete="username"]', 'form:has(input[type=password]) input[type=email]', 'form:has(input[type=password]) input[type=text]'];
+const PASS_SEL = ['#user_pass', 'input[name="pwd"]', 'input[type=password]'];
+const CAPTCHA_SEL = '.g-recaptcha, iframe[src*="recaptcha/api2/anchor"], .h-captcha, iframe[src*="hcaptcha"], .cf-turnstile, iframe[src*="challenges.cloudflare.com"]';
+
+async function first(page, sels) {
+  for (const s of sels) {
+    const l = page.locator(s).first();
+    if (await l.isVisible().catch(() => false)) return l;
+  }
+  return null;
+}
+
+/** A captcha widget or security question on the page - always left to the person. */
+const hasCaptcha = page => page.evaluate(sel => !!document.querySelector(sel)
+  || [...document.querySelectorAll('form input')].some(i => /captcha|security|answer/i.test(`${i.name} ${i.id} ${i.placeholder}`)), CAPTCHA_SEL).catch(() => false);
+
+async function fillAndSubmit(page, uField, pField, user, pass) {
+  await uField.fill(user);
+  await pField.fill(pass);
+  const remember = page.locator('#rememberme');
+  if (await remember.isVisible().catch(() => false)) await remember.check().catch(() => {});
+  const submit = await first(page, ['#wp-submit', 'form:has(input[type=password]) [type=submit]', 'form:has(input[type=password]) button']);
+  await Promise.all([
+    page.waitForNavigation({ timeout: 30_000 }).catch(() => {}),
+    submit ? submit.click() : pField.press('Enter'),
+  ]);
+  await page.waitForLoadState('domcontentloaded').catch(() => {});
+}
+
+/**
+ * When a security check comes before the login form: keep watching the window
+ * while the person completes it and fill the form in when it appears. Submits
+ * only when the form itself has no captcha; otherwise that last step is theirs.
+ */
+async function fillWhenReady(page, user, pass) {
+  const deadline = Date.now() + 10 * 60_000;
+  while (Date.now() < deadline && !page.isClosed()) {
+    if (await page.evaluate(inAdmin).catch(() => false)) return;
+    const u = await first(page, USER_SEL);
+    const p = await first(page, PASS_SEL);
+    if (u && p) {
+      if (await hasCaptcha(page)) { await u.fill(user).catch(() => {}); await p.fill(pass).catch(() => {}); return; }
+      await fillAndSubmit(page, u, p, user, pass).catch(() => {});
+      return;
+    }
+    await page.waitForTimeout(800).catch(() => {});
+  }
+}
+
 /**
  * @param {object} o  { url, user, pass }
  * @returns {Promise<object>} { status: logged_in | needs_you | failed, message, url }
@@ -66,36 +115,28 @@ export async function logIn({ url, user, pass }) {
   // Still signed in from last time.
   if (await page.evaluate(inAdmin).catch(() => false)) return { status: 'logged_in', message: 'Already signed in.', url: page.url() };
 
-  // WordPress's own form first, then any form with a password field.
-  const userSel = ['#user_login', 'input[name="log"]', 'input[autocomplete="username"]', 'form:has(input[type=password]) input[type=email]', 'form:has(input[type=password]) input[type=text]'];
-  const passSel = ['#user_pass', 'input[name="pwd"]', 'input[type=password]'];
-  const first = async sels => { for (const s of sels) { const l = page.locator(s).first(); if (await l.isVisible().catch(() => false)) return l; } return null; };
-  let uField = await first(userSel);
-  let pField = await first(passSel);
+  let uField = await first(page, USER_SEL);
+  let pField = await first(page, PASS_SEL);
   if ((!uField || !pField) && /\/wp-admin\/$/.test(target)) {
     // Security plugins that hide the login page also hide /wp-admin/ when signed out.
     await page.goto(target.replace(/wp-admin\/$/, 'wp-login.php'), { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => {});
-    uField = await first(userSel);
-    pField = await first(passSel);
+    uField = await first(page, USER_SEL);
+    pField = await first(page, PASS_SEL);
   }
+
+  // A security check before the form: hand over, fill the form in when it appears.
   if (!uField || !pField) {
-    return { status: 'needs_you', message: `No login form at ${target} - the site may use a custom login address. The window is open for you.`, url: page.url() };
+    fillWhenReady(page, user, pass).catch(() => {});
+    return { status: 'needs_you', message: 'Complete the security check in the window - the login is filled in when the form appears.', url: page.url() };
   }
-  await uField.fill(user);
-  await pField.fill(pass);
-  const remember = page.locator('#rememberme');
-  if (await remember.isVisible().catch(() => false)) await remember.check().catch(() => {});
+  // A captcha on the form: fill in the login and leave the captcha and Log In to the person.
+  if (await hasCaptcha(page)) {
+    await uField.fill(user);
+    await pField.fill(pass);
+    return { status: 'needs_you', message: 'Filled in - complete the captcha in the window and press Log In.', url: page.url() };
+  }
 
-  const captcha = await page.locator('.g-recaptcha, iframe[src*="recaptcha"], .h-captcha, iframe[src*="hcaptcha"], .cf-turnstile, iframe[src*="challenges.cloudflare.com"], input[name*="captcha" i]').first().isVisible().catch(() => false);
-  if (captcha) return { status: 'needs_you', message: 'Filled in - the site has a captcha, solve it and press Log In in the window.', url: page.url() };
-
-  const submit = await first(['#wp-submit', 'form:has(input[type=password]) [type=submit]', 'form:has(input[type=password]) button']);
-  await Promise.all([
-    page.waitForNavigation({ timeout: 30_000 }).catch(() => {}),
-    submit ? submit.click() : pField.press('Enter'),
-  ]);
-  await page.waitForLoadState('domcontentloaded').catch(() => {});
-
+  await fillAndSubmit(page, uField, pField, user, pass);
   if (await page.evaluate(inAdmin).catch(() => false)) return { status: 'logged_in', message: 'Signed in.', url: page.url() };
   const error = (await page.locator('#login_error, .login-error, .woocommerce-error').first().textContent().catch(() => '') || '').trim().replace(/\s+/g, ' ');
   if (error) return { status: 'failed', message: error.slice(0, 300), url: page.url() };
