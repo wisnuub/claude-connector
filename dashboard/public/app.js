@@ -611,7 +611,7 @@ function loginsBlock(gid, fallbackUrl) {
   if (!L) return '';
   if (L.busy) return '<p class="muted" style="margin:6px 0">Reading Asana…</p>';
   if (L.error) return `<div class="notice bad" style="margin:6px 0">${h(L.error)}</div>`;
-  if (!L.logins.length) return `<div class="notice" style="margin:6px 0">No login found. The dashboard looks for a task called <b>Login</b>, <b>Login detail</b> or <b>Login details</b> in ${L.task?.project ? `<b>${h(L.task.project)}</b>` : 'the project'} - username on the first line of its description, password on the second - then in this task, the project's description and its comments.</div>`;
+  if (!L.logins.length) return `<div class="notice" style="margin:6px 0">No login found. The dashboard looks for a task called <b>Login</b>, <b>Logins</b>, <b>Login detail</b> or <b>Login details</b> in ${L.task?.project ? `<b>${h(L.task.project)}</b>` : 'the project'} - username on the first line of its description, password on the second - then in this task, the project's description and its comments.</div>`;
   fallbackUrl = fallbackUrl || L.siteUrl;
   return `<div class="tablewrap"><table class="list logins" style="margin:6px 0"><thead><tr><th>Found in</th><th>Address</th><th>Username</th><th>Password</th><th></th></tr></thead><tbody>${L.logins.map((l, i) => {
     const key = `${gid}|${i}`;

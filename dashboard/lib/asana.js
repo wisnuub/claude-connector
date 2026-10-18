@@ -189,9 +189,9 @@ export function parseLogins(text) {
   return found.filter(f => { const k = `${f.url}|${f.user}|${f.pass}`; if (seen.has(k)) return false; seen.add(k); return true; });
 }
 
-// Each project keeps its WordPress login in a task called "Login", "Login detail"
-// or "Login details": username on the first line, password on the next.
-const LOGIN_TASK_RE = /^\s*log\s*-?\s*in(?:\s+details?)?\s*:?\s*$/i;
+// Each project keeps its WordPress login in a task called "Login", "Logins",
+// "Login detail" or "Login details": username on one line, password on the next.
+const LOGIN_TASK_RE = /^\s*log\s*-?\s*ins?(?:\s+details?)?\s*:?\s*$/i;
 const LABEL_ONLY_RE = /^\s*(?:wp\s*)?(?:user(?:name)?|login|pass(?:word)?|pw|pwd|u|p)\s*:?\s*$/i;
 
 /** A Login task's description: labelled lines if present, else line 1 / line 2. */
