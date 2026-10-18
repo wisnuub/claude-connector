@@ -2,8 +2,8 @@
 /**
  * Plugin Name:  Claude Connector
  * Plugin URI:   https://github.com/wisnuub/claude-connector
- * Description:  Secure REST API bridge for Claude AI - ACF sync, cache purge, file management, database queries, post CRUD, plugin/theme control, and more.
- * Version:      1.7.2
+ * Description:  Secure REST API bridge for Claude AI - ACF sync, cache purge, file management, database queries, post CRUD, plugin/theme control, maintenance updates with rollback, and more.
+ * Version:      1.8.0
  * Author:       Wisnuub
  * Author URI:   https://wisnuub.github.io
  * License:      GPL-2.0-or-later
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'CLAUDE_CONNECTOR_VERSION', '1.7.2' );
+define( 'CLAUDE_CONNECTOR_VERSION', '1.8.0' );
 define( 'CLAUDE_CONNECTOR_NS',      'claude/v1' );
 define( 'CLAUDE_CONNECTOR_GH_REPO', 'wisnuub/claude-connector' );
 
@@ -520,7 +520,12 @@ function claude_settings_page() {
         array( 'GET',    '/options?key=',             'Read a WordPress option' ),
         array( 'POST',   '/options',                  'Write a WordPress option' ),
         array( 'GET',    '/plugins',                  'List all plugins with active status' ),
-        array( 'POST',   '/plugins',                  'Activate or deactivate a plugin' ),
+        array( 'POST',   '/plugins',                  'Activate, deactivate, install, update or delete a plugin' ),
+        array( 'GET',    '/maintenance/overview',     'Core, plugin, theme and translation updates in one call (?refresh=1 re-checks)' ),
+        array( 'POST',   '/maintenance/update',       'Update one plugin/theme/core/translations - backed up, health-checked, rolled back on a fatal' ),
+        array( 'GET',    '/maintenance/health',       'Load the dashboard and homepage and report any fatal error' ),
+        array( 'GET',    '/maintenance/forms',        'Pages with a contact form (Divi, CF7, Gravity, WPForms, Elementor...)' ),
+        array( 'POST',   '/maintenance/test-email',   'Send a wp_mail() test and report the mailer in use' ),
         array( 'GET',    '/themes',                   'List installed themes' ),
         array( 'POST',   '/themes',                   'Switch active theme' ),
         array( 'GET',    '/files?path=',              'List files in a wp-content subdirectory' ),
@@ -824,6 +829,11 @@ add_action( 'rest_api_init', function () {
     register_rest_route( $ns, '/logs',         array( 'methods' => 'GET',  'callback' => 'claude_logs_list',    'permission_callback' => $a ) );
     register_rest_route( $ns, '/logs/clear',   array( 'methods' => 'POST', 'callback' => 'claude_logs_clear',   'permission_callback' => $a ) );
     register_rest_route( $ns, '/wpcli',        array( 'methods' => 'POST', 'callback' => 'claude_wpcli',        'permission_callback' => $a ) );
+    register_rest_route( $ns, '/maintenance/overview',   array( 'methods' => 'GET',  'callback' => 'claude_maint_overview',   'permission_callback' => $a ) );
+    register_rest_route( $ns, '/maintenance/update',     array( 'methods' => 'POST', 'callback' => 'claude_maint_update',     'permission_callback' => $a ) );
+    register_rest_route( $ns, '/maintenance/health',     array( 'methods' => 'GET',  'callback' => 'claude_maint_health',     'permission_callback' => $a ) );
+    register_rest_route( $ns, '/maintenance/forms',      array( 'methods' => 'GET',  'callback' => 'claude_maint_forms',      'permission_callback' => $a ) );
+    register_rest_route( $ns, '/maintenance/test-email', array( 'methods' => 'POST', 'callback' => 'claude_maint_test_email', 'permission_callback' => $a ) );
 } );
 
 // Log every request to our namespace after dispatch (only when logging is enabled).
@@ -2673,19 +2683,33 @@ function claude_plugins_manage( $req ) {
     if ( ! function_exists( 'activate_plugin' ) ) require_once ABSPATH . 'wp-admin/includes/plugin.php';
     $plugin = sanitize_text_field( (string) $req->get_param( 'plugin' ) );
     $action = sanitize_text_field( (string) $req->get_param( 'action' ) );
+    if ( $action === 'install' ) {
+        return claude_maint_install_plugin( $req );
+    }
     if ( ! $plugin || ! $action ) {
         return new WP_Error( 'missing', 'Body must include "plugin" and "action".', array( 'status' => 400 ) );
     }
     if ( $action === 'activate' ) {
-        $result = activate_plugin( $plugin );
+        $result = claude_maint_activate_checked( $plugin );
         if ( is_wp_error( $result ) ) return $result;
-        return new WP_REST_Response( array( 'activated' => $plugin ) );
+        return new WP_REST_Response( array( 'activated' => $plugin, 'health' => $result['health'] ) );
     }
     if ( $action === 'deactivate' ) {
+        if ( $plugin === claude_connector_basename() ) {
+            return new WP_Error( 'forbidden', 'Refusing to deactivate Claude Connector through its own API - that would cut off access to this site.', array( 'status' => 403 ) );
+        }
         deactivate_plugins( $plugin );
         return new WP_REST_Response( array( 'deactivated' => $plugin ) );
     }
-    return new WP_Error( 'invalid_action', 'action must be "activate" or "deactivate".', array( 'status' => 400 ) );
+    if ( $action === 'update' ) {
+        $req->set_param( 'type', 'plugin' );
+        $req->set_param( 'item', $plugin );
+        return claude_maint_update( $req );
+    }
+    if ( $action === 'delete' ) {
+        return claude_maint_delete_plugin( $plugin );
+    }
+    return new WP_Error( 'invalid_action', 'action must be activate, deactivate, install, update or delete.', array( 'status' => 400 ) );
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -2716,6 +2740,798 @@ function claude_themes_switch( $req ) {
     }
     switch_theme( $stylesheet );
     return new WP_REST_Response( array( 'active_theme' => get_stylesheet() ) );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+//  Maintenance  (updates, installs, health, forms - what the dashboard drives)
+//
+//  Every update is one item per request: back up the installed copy, update it,
+//  load the site with the same fatal-error check PHP file writes use, and put
+//  the backup back if the site now fatals. The rollback runs inside the same
+//  request, which still has the old code in memory - so it works even when the
+//  new version would kill every later request, REST included.
+// ──────────────────────────────────────────────────────────────────────────────
+
+function claude_maint_load() {
+    require_once ABSPATH . 'wp-admin/includes/admin.php';
+    require_once ABSPATH . 'wp-admin/includes/plugin-install.php'; // plugins_api(); admin.php skips it outside wp-admin
+    require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
+}
+
+/**
+ * Sets up $wp_filesystem the way the upgrader needs it, or says why it can't.
+ *
+ * @return true|WP_Error
+ */
+function claude_maint_filesystem() {
+    if ( ! wp_is_file_mod_allowed( 'claude_connector_maintenance' ) ) {
+        return new WP_Error( 'file_mods_disabled', 'This site blocks installs and updates (DISALLOW_FILE_MODS in wp-config.php).', array( 'status' => 403 ) );
+    }
+    ob_start();
+    $ok = WP_Filesystem();
+    ob_end_clean();
+    if ( ! $ok ) {
+        return new WP_Error(
+            'filesystem_unavailable',
+            'WordPress cannot write files directly on this host (method: ' . get_filesystem_method() . ') and no FTP credentials are set in wp-config.php (FTP_HOST / FTP_USER / FTP_PASS).',
+            array( 'status' => 500 )
+        );
+    }
+    return true;
+}
+
+/**
+ * WordPress version branch, "6.8.1" -> "6.8". WordPress calls a change here a major release.
+ */
+function claude_maint_branch( $version ) {
+    return implode( '.', array_slice( explode( '.', (string) $version ), 0, 2 ) );
+}
+
+/**
+ * The core update to install: the newest offer on the current branch, or the
+ * newest of all when major updates are allowed.
+ *
+ * Reads the raw offers rather than get_core_updates(): that skips "autoupdate"
+ * offers, which is how the API sends the latest release on an older branch
+ * (6.4.1 -> 6.4.13), so a site on an old branch would never see its minor update.
+ *
+ * @return object|null
+ */
+function claude_maint_core_offer( $allow_major ) {
+    $current = get_bloginfo( 'version' );
+    $from    = get_site_transient( 'update_core' );
+    $best    = null;
+    foreach ( (array) ( $from->updates ?? array() ) as $offer ) {
+        if ( ! isset( $offer->response, $offer->current, $offer->packages ) || ! in_array( $offer->response, array( 'upgrade', 'autoupdate' ), true ) ) continue;
+        if ( version_compare( $offer->current, $current, '<=' ) ) continue;
+        if ( ! $allow_major && claude_maint_branch( $offer->current ) !== claude_maint_branch( $current ) ) continue;
+        $newer = ! $best || version_compare( $offer->current, $best->current, '>' );
+        // Same version in the site's own language beats en_US.
+        $same_better_locale = $best && $offer->current === $best->current && ( $offer->locale ?? '' ) === get_locale();
+        if ( $newer || $same_better_locale ) $best = $offer;
+    }
+    return $best;
+}
+
+function claude_maint_core_info() {
+    $current = get_bloginfo( 'version' );
+    $minor   = claude_maint_core_offer( false );
+    $any     = claude_maint_core_offer( true );
+    $shape   = function ( $o ) {
+        return $o ? array(
+            'version'        => $o->current,
+            'php_compatible' => empty( $o->php_version ) || version_compare( PHP_VERSION, $o->php_version, '>=' ),
+            'php_required'   => $o->php_version ?? null,
+        ) : null;
+    };
+    return array(
+        'version' => $current,
+        'minor'   => $shape( $minor ),
+        'major'   => ( $any && claude_maint_branch( $any->current ) !== claude_maint_branch( $current ) ) ? $shape( $any ) : null,
+    );
+}
+
+/**
+ * Known SMTP / mail-delivery plugins. Without one, wp_mail() falls back to PHP
+ * mail(), which many hosts drop or send straight to spam.
+ */
+function claude_maint_mailer() {
+    $known = array(
+        'wp-mail-smtp/wp_mail_smtp.php'                  => 'WP Mail SMTP',
+        'wp-mail-smtp-pro/wp_mail_smtp.php'              => 'WP Mail SMTP Pro',
+        'fluent-smtp/fluent-smtp.php'                    => 'FluentSMTP',
+        'post-smtp/postman-smtp.php'                     => 'Post SMTP',
+        'easy-wp-smtp/easy-wp-smtp.php'                  => 'Easy WP SMTP',
+        'smtp-mailer/main.php'                           => 'SMTP Mailer',
+        'gosmtp/gosmtp.php'                              => 'GoSMTP',
+        'suremails/suremails.php'                        => 'SureMail',
+        'wp-ses/wp-ses.php'                              => 'WP Offload SES',
+        'mailgun/mailgun.php'                            => 'Mailgun',
+        'sendgrid-email-delivery-simplified/wpsendgrid.php' => 'SendGrid',
+        'mailin/sendinblue.php'                          => 'Brevo',
+    );
+    foreach ( $known as $file => $name ) {
+        if ( is_plugin_active( $file ) ) return array( 'plugin' => $name, 'warning' => null );
+    }
+    return array(
+        'plugin'  => null,
+        'warning' => 'No SMTP plugin active - mail goes out through PHP mail(), which many hosts block or send to spam.',
+    );
+}
+
+function claude_maint_overview( $req ) {
+    claude_maint_load();
+    if ( rest_sanitize_boolean( $req->get_param( 'refresh' ) ) ) {
+        wp_clean_update_cache();
+        wp_version_check( array(), true );
+        wp_update_plugins();
+        wp_update_themes();
+    }
+
+    $plugin_updates = get_site_transient( 'update_plugins' );
+    $auto_plugins   = (array) get_site_option( 'auto_update_plugins', array() );
+    $self           = claude_connector_basename();
+    $plugins        = array();
+    foreach ( get_plugins() as $file => $data ) {
+        $u    = $plugin_updates->response[ $file ] ?? null;
+        $seen = $u ?: ( $plugin_updates->no_update[ $file ] ?? null );
+        $plugins[] = array(
+            'file'        => $file,
+            'name'        => $data['Name'],
+            'version'     => $data['Version'],
+            'author'      => wp_strip_all_tags( $data['Author'] ),
+            'active'      => is_plugin_active( $file ),
+            'auto_update' => in_array( $file, $auto_plugins, true ),
+            'slug'        => $seen->slug ?? ( dirname( $file ) === '.' ? basename( $file, '.php' ) : dirname( $file ) ),
+            // wordpress.org plugins can be rolled back to any published version.
+            'wporg'       => isset( $seen->id ) && strpos( (string) $seen->id, 'w.org/plugins/' ) === 0,
+            'self'        => $file === $self,
+            'update'      => $u ? array(
+                'version'      => $u->new_version ?? null,
+                // No package = a premium plugin whose licence is missing or expired.
+                'package'      => ! empty( $u->package ),
+                'tested'       => $u->tested ?? null,
+                'requires_php' => $u->requires_php ?? null,
+                'php_ok'       => empty( $u->requires_php ) || version_compare( PHP_VERSION, $u->requires_php, '>=' ),
+            ) : null,
+        );
+    }
+
+    $theme_updates = get_site_transient( 'update_themes' );
+    $themes        = array();
+    foreach ( wp_get_themes() as $slug => $theme ) {
+        $u        = $theme_updates->response[ $slug ] ?? null;
+        $themes[] = array(
+            'stylesheet' => $slug,
+            'name'       => $theme->get( 'Name' ),
+            'version'    => $theme->get( 'Version' ),
+            'parent'     => $theme->get( 'Template' ) !== $slug ? $theme->get( 'Template' ) : '',
+            'active'     => $slug === get_stylesheet(),
+            'in_use'     => $slug === get_stylesheet() || $slug === get_template(),
+            'update'     => $u ? array(
+                'version' => $u['new_version'] ?? null,
+                'package' => ! empty( $u['package'] ),
+            ) : null,
+        );
+    }
+
+    $maintenance_file = ABSPATH . '.maintenance';
+    return new WP_REST_Response( array(
+        'name'           => get_bloginfo( 'name' ),
+        'home_url'       => home_url( '/' ),
+        'plugin_version' => CLAUDE_CONNECTOR_VERSION,
+        'php_version'    => PHP_VERSION,
+        'core'           => claude_maint_core_info(),
+        'plugins'        => $plugins,
+        'themes'         => $themes,
+        'translations'   => count( wp_get_translation_updates() ),
+        'mailer'         => claude_maint_mailer(),
+        'filesystem'     => array(
+            'method'    => get_filesystem_method(),
+            'file_mods' => wp_is_file_mod_allowed( 'claude_connector_maintenance' ),
+        ),
+        // A .maintenance file left behind by an interrupted update shows every
+        // visitor "Briefly unavailable for scheduled maintenance" indefinitely.
+        'stuck_maintenance' => file_exists( $maintenance_file ) && filemtime( $maintenance_file ) < time() - 10 * MINUTE_IN_SECONDS,
+        'last_checked'   => isset( $plugin_updates->last_checked ) ? gmdate( 'c', $plugin_updates->last_checked ) : null,
+    ) );
+}
+
+function claude_maint_health() {
+    $maintenance_file = ABSPATH . '.maintenance';
+    return new WP_REST_Response( array_merge(
+        claude_loopback_health(),
+        array( 'stuck_maintenance' => file_exists( $maintenance_file ) && filemtime( $maintenance_file ) < time() - 10 * MINUTE_IN_SECONDS )
+    ) );
+}
+
+// ── Backups for rollback ─────────────────────────────────────────────────────
+
+/**
+ * Invalidates opcache for a plugin/theme folder or file, so the health check
+ * (and a restore) run the bytes on disk rather than cached ones.
+ */
+function claude_maint_opcache( $path ) {
+    if ( is_dir( $path ) ) {
+        if ( function_exists( 'wp_opcache_invalidate_directory' ) ) {
+            wp_opcache_invalidate_directory( $path );
+            return;
+        }
+        $it = new RecursiveIteratorIterator( new RecursiveDirectoryIterator( $path, FilesystemIterator::SKIP_DOTS ) );
+        foreach ( $it as $f ) {
+            if ( substr( $f->getFilename(), -4 ) === '.php' ) wp_opcache_invalidate( $f->getPathname(), true );
+        }
+    } elseif ( is_file( $path ) ) {
+        wp_opcache_invalidate( $path, true );
+    }
+}
+
+/**
+ * Copies a plugin/theme (folder or single file) to wp-content/claude-rollback
+ * before it is updated. Kept only for the length of the request.
+ *
+ * Not wp-content/upgrade: WP_Upgrader::unpack_package() empties that folder
+ * before every unpack, which would delete the backup mid-update.
+ *
+ * @return array|WP_Error { src, copy, root }
+ */
+function claude_maint_backup( $src ) {
+    global $wp_filesystem;
+    $base = WP_CONTENT_DIR . '/claude-rollback';
+    if ( ! wp_mkdir_p( $base ) ) {
+        return new WP_Error( 'backup_failed', "Could not create {$base} to back up before updating - update not attempted.", array( 'status' => 500 ) );
+    }
+    // The copy holds runnable PHP for a few seconds; keep it unreachable on Apache.
+    if ( ! file_exists( $base . '/.htaccess' ) ) {
+        $wp_filesystem->put_contents( $base . '/.htaccess', "Require all denied\nDeny from all\n" );
+        $wp_filesystem->put_contents( $base . '/index.php', "<?php\n// Silence is golden.\n" );
+    }
+    // Clear out copies left by a request that died part-way.
+    foreach ( (array) glob( $base . '/*', GLOB_ONLYDIR ) as $old ) {
+        if ( $old && filemtime( $old ) < time() - DAY_IN_SECONDS ) $wp_filesystem->delete( $old, true );
+    }
+
+    $root = $base . '/' . gmdate( 'Ymd-His' ) . '-' . strtolower( wp_generate_password( 6, false, false ) );
+    if ( ! wp_mkdir_p( $root ) ) {
+        return new WP_Error( 'backup_failed', "Could not create {$root} to back up before updating - update not attempted.", array( 'status' => 500 ) );
+    }
+
+    $copy = $root . '/' . basename( $src );
+    if ( is_dir( $src ) ) {
+        wp_mkdir_p( $copy );
+        $ok = copy_dir( $src, $copy );
+    } else {
+        $ok = $wp_filesystem->copy( $src, $copy, true );
+    }
+    if ( ! $ok || is_wp_error( $ok ) ) {
+        $wp_filesystem->delete( $root, true );
+        $why = is_wp_error( $ok ) ? ': ' . $ok->get_error_message() : '';
+        return new WP_Error( 'backup_failed', 'Could not back up ' . basename( $src ) . " before updating{$why} - update not attempted.", array( 'status' => 500 ) );
+    }
+    return array( 'src' => $src, 'copy' => $copy, 'root' => $root );
+}
+
+function claude_maint_backup_drop( $backup ) {
+    global $wp_filesystem;
+    $wp_filesystem->delete( $backup['root'], true );
+}
+
+/**
+ * Puts a backup back in place of whatever is installed now.
+ */
+function claude_maint_restore( $backup ) {
+    global $wp_filesystem;
+    if ( file_exists( $backup['src'] ) ) $wp_filesystem->delete( $backup['src'], true );
+    $ok = $wp_filesystem->move( $backup['copy'], $backup['src'], true );
+    if ( ! $ok ) {
+        // Rename can fail across mounts; fall back to copying.
+        if ( is_dir( $backup['copy'] ) ) {
+            wp_mkdir_p( $backup['src'] );
+            $ok = copy_dir( $backup['copy'], $backup['src'] ) === true;
+        } else {
+            $ok = $wp_filesystem->copy( $backup['copy'], $backup['src'], true );
+        }
+    }
+    claude_maint_opcache( $backup['src'] );
+    if ( $ok ) claude_maint_backup_drop( $backup );
+    return (bool) $ok;
+}
+
+/**
+ * After a failed update or install: core restores its own temp backup since
+ * 6.3, but older versions may already have deleted the old copy - put ours back
+ * if so, otherwise just discard it.
+ *
+ * @return bool  Whether the previous version is in place.
+ */
+function claude_maint_settle_failed( $backup ) {
+    if ( ! file_exists( $backup['src'] ) ) return claude_maint_restore( $backup );
+    claude_maint_backup_drop( $backup );
+    return true;
+}
+
+/**
+ * Runs one upgrader call with output captured, so a skin or a plugin's
+ * upgrade hook echoing HTML cannot corrupt the JSON response.
+ *
+ * @return array { result, messages }
+ */
+function claude_maint_run_upgrader( callable $fn, $skin ) {
+    ob_start();
+    try {
+        $result = $fn();
+    } finally {
+        $stray = trim( wp_strip_all_tags( (string) ob_get_clean() ) );
+    }
+    $messages = array();
+    foreach ( (array) $skin->get_upgrade_messages() as $m ) {
+        $m = trim( html_entity_decode( wp_strip_all_tags( (string) $m ), ENT_QUOTES, 'UTF-8' ) );
+        if ( $m !== '' ) $messages[] = $m;
+    }
+    if ( $stray !== '' ) $messages[] = $stray;
+    if ( ( $result === null || $result === false ) && is_wp_error( $skin->result ) ) $result = $skin->result;
+    return array( 'result' => $result, 'messages' => $messages );
+}
+
+/**
+ * Health-checks after an update and rolls back on a fatal. Shared by plugin and
+ * theme updates, and by installs that overwrite an existing copy.
+ *
+ * @return array|WP_Error  Response fields on success, WP_Error after a rollback.
+ */
+function claude_maint_verify( $backup, $label, $from, $to, $check ) {
+    claude_maint_opcache( $backup['src'] );
+    $health = $check ? claude_loopback_health() : array( 'status' => 'skipped', 'message' => 'Not active, so it cannot affect the site.' );
+    if ( $health['status'] !== 'fatal' ) {
+        claude_maint_backup_drop( $backup );
+        return array( 'health' => $health );
+    }
+
+    if ( ! claude_maint_restore( $backup ) ) {
+        return new WP_Error(
+            'rollback_failed',
+            "{$label} {$to} broke the site ({$health['message']}) and restoring {$from} FAILED. The previous copy is in " . $backup['root'] . ' - move it back by FTP / file manager.',
+            array( 'status' => 500, 'health' => $health )
+        );
+    }
+    return new WP_Error(
+        'update_rolled_back',
+        "{$label} {$to} broke the site, so {$from} was put back. Error: {$health['message']}",
+        array( 'status' => 422, 'health' => $health, 'after_rollback' => claude_loopback_health(), 'from' => $from, 'to' => $to )
+    );
+}
+
+// ── Updates ──────────────────────────────────────────────────────────────────
+
+function claude_maint_update_plugin( $file ) {
+    $installed = get_plugins();
+    if ( ! isset( $installed[ $file ] ) ) {
+        return new WP_Error( 'not_found', "Plugin '{$file}' is not installed.", array( 'status' => 404 ) );
+    }
+    wp_update_plugins();
+    $current = get_site_transient( 'update_plugins' );
+    $offer   = $current->response[ $file ] ?? null;
+    $from    = $installed[ $file ]['Version'];
+    $name    = $installed[ $file ]['Name'];
+    if ( ! $offer ) {
+        return array( 'status' => 'up_to_date', 'item' => $file, 'name' => $name, 'version' => $from );
+    }
+    if ( empty( $offer->package ) ) {
+        return new WP_Error( 'no_package', "{$name} {$offer->new_version} is available but has no download - usually a missing or expired licence key. Update it from the vendor's dashboard.", array( 'status' => 422 ) );
+    }
+
+    $was_active = is_plugin_active( $file );
+    $src        = WP_PLUGIN_DIR . '/' . ( dirname( $file ) === '.' ? $file : dirname( $file ) );
+    $backup     = claude_maint_backup( $src );
+    if ( is_wp_error( $backup ) ) return $backup;
+
+    // Plugin_Upgrader silently deactivates an active plugin before updating it,
+    // and wp-admin turns it back on from an iframe that a REST call never loads.
+    // Background (cron) updates skip the deactivation - run as one.
+    add_filter( 'wp_doing_cron', '__return_true' );
+    $skin = new Automatic_Upgrader_Skin();
+    $run  = claude_maint_run_upgrader( function () use ( $skin, $file ) {
+        return ( new Plugin_Upgrader( $skin ) )->upgrade( $file );
+    }, $skin );
+    remove_filter( 'wp_doing_cron', '__return_true' );
+
+    if ( ! $run['result'] || is_wp_error( $run['result'] ) ) {
+        $restored = claude_maint_settle_failed( $backup );
+        $why      = is_wp_error( $run['result'] ) ? $run['result']->get_error_message() : 'the upgrader gave no reason';
+        return new WP_Error( 'update_failed', "{$name} could not be updated: {$why}", array( 'status' => 500, 'messages' => $run['messages'], 'previous_restored' => $restored ) );
+    }
+
+    wp_clean_plugins_cache( false );
+    $data = get_plugin_data( WP_PLUGIN_DIR . '/' . $file, false, false );
+    $to   = $data['Version'] ?: $offer->new_version;
+    if ( $was_active && ! is_plugin_active( $file ) ) {
+        // Re-add without running the plugin's code in this request.
+        $active   = (array) get_option( 'active_plugins', array() );
+        $active[] = $file;
+        update_option( 'active_plugins', array_values( array_unique( $active ) ) );
+    }
+
+    $verified = claude_maint_verify( $backup, $name, $from, $to, $was_active );
+    if ( is_wp_error( $verified ) ) return $verified;
+    return array_merge( array( 'status' => 'updated', 'item' => $file, 'name' => $name, 'from' => $from, 'to' => $to, 'messages' => $run['messages'] ), $verified );
+}
+
+function claude_maint_update_theme( $stylesheet ) {
+    $theme = wp_get_theme( $stylesheet );
+    if ( ! $theme->exists() ) {
+        return new WP_Error( 'not_found', "Theme '{$stylesheet}' is not installed.", array( 'status' => 404 ) );
+    }
+    wp_update_themes();
+    $current = get_site_transient( 'update_themes' );
+    $offer   = $current->response[ $stylesheet ] ?? null;
+    $from    = $theme->get( 'Version' );
+    $name    = $theme->get( 'Name' );
+    if ( ! $offer ) {
+        return array( 'status' => 'up_to_date', 'item' => $stylesheet, 'name' => $name, 'version' => $from );
+    }
+    if ( empty( $offer['package'] ) ) {
+        return new WP_Error( 'no_package', "{$name} {$offer['new_version']} is available but has no download - usually a missing or expired licence key.", array( 'status' => 422 ) );
+    }
+
+    $backup = claude_maint_backup( $theme->get_stylesheet_directory() );
+    if ( is_wp_error( $backup ) ) return $backup;
+
+    $skin = new Automatic_Upgrader_Skin();
+    $run  = claude_maint_run_upgrader( function () use ( $skin, $stylesheet ) {
+        return ( new Theme_Upgrader( $skin ) )->upgrade( $stylesheet );
+    }, $skin );
+
+    if ( ! $run['result'] || is_wp_error( $run['result'] ) ) {
+        $restored = claude_maint_settle_failed( $backup );
+        $why      = is_wp_error( $run['result'] ) ? $run['result']->get_error_message() : 'the upgrader gave no reason';
+        return new WP_Error( 'update_failed', "{$name} could not be updated: {$why}", array( 'status' => 500, 'messages' => $run['messages'], 'previous_restored' => $restored ) );
+    }
+
+    wp_clean_themes_cache();
+    $to       = wp_get_theme( $stylesheet )->get( 'Version' ) ?: $offer['new_version'];
+    $in_use   = $stylesheet === get_stylesheet() || $stylesheet === get_template();
+    $verified = claude_maint_verify( $backup, $name, $from, $to, $in_use );
+    if ( is_wp_error( $verified ) ) return $verified;
+    return array_merge( array( 'status' => 'updated', 'item' => $stylesheet, 'name' => $name, 'from' => $from, 'to' => $to, 'messages' => $run['messages'] ), $verified );
+}
+
+function claude_maint_update_core( $allow_major ) {
+    $from  = get_bloginfo( 'version' );
+    $offer = claude_maint_core_offer( $allow_major );
+    if ( ! $offer ) {
+        $major = claude_maint_core_offer( true );
+        return array(
+            'status'  => 'up_to_date',
+            'item'    => 'core',
+            'version' => $from,
+            'note'    => $major ? "WordPress {$major->current} is available - a major update, skipped unless allow_major is set." : null,
+        );
+    }
+    if ( ! empty( $offer->php_version ) && version_compare( PHP_VERSION, $offer->php_version, '<' ) ) {
+        return new WP_Error( 'php_too_old', "WordPress {$offer->current} needs PHP {$offer->php_version}; this site runs " . PHP_VERSION . '.', array( 'status' => 422 ) );
+    }
+
+    $skin = new Automatic_Upgrader_Skin();
+    // update_core() reports progress through this filter and would echo it otherwise.
+    add_filter( 'update_feedback', array( $skin, 'feedback' ) );
+    $run = claude_maint_run_upgrader( function () use ( $skin, $offer ) {
+        return ( new Core_Upgrader( $skin ) )->upgrade( $offer );
+    }, $skin );
+    remove_filter( 'update_feedback', array( $skin, 'feedback' ) );
+
+    if ( ! $run['result'] || is_wp_error( $run['result'] ) ) {
+        $why = is_wp_error( $run['result'] ) ? $run['result']->get_error_message() : 'the upgrader gave no reason';
+        return new WP_Error( 'update_failed', "WordPress could not be updated to {$offer->current}: {$why}", array( 'status' => 500, 'messages' => $run['messages'] ) );
+    }
+    // No automatic rollback for core: half-restoring core is worse than a fatal
+    // the health check reports.
+    return array(
+        'status'   => 'updated',
+        'item'     => 'core',
+        'name'     => 'WordPress',
+        'from'     => $from,
+        'to'       => is_string( $run['result'] ) ? $run['result'] : $offer->current,
+        'messages' => $run['messages'],
+        'health'   => claude_loopback_health(),
+    );
+}
+
+function claude_maint_update_translations() {
+    $updates = wp_get_translation_updates();
+    if ( ! $updates ) {
+        return array( 'status' => 'up_to_date', 'item' => 'translations' );
+    }
+    $skin = new Automatic_Upgrader_Skin();
+    $run  = claude_maint_run_upgrader( function () use ( $skin, $updates ) {
+        return ( new Language_Pack_Upgrader( $skin ) )->bulk_upgrade( $updates );
+    }, $skin );
+    if ( is_wp_error( $run['result'] ) ) {
+        return new WP_Error( 'update_failed', 'Translations could not be updated: ' . $run['result']->get_error_message(), array( 'status' => 500 ) );
+    }
+    $done = is_array( $run['result'] ) ? count( array_filter( $run['result'], function ( $r ) { return $r && ! is_wp_error( $r ); } ) ) : 0;
+    return array( 'status' => 'updated', 'item' => 'translations', 'name' => 'Translations', 'count' => $done, 'of' => count( $updates ), 'messages' => $run['messages'] );
+}
+
+/**
+ * POST /maintenance/update { type: plugin|theme|core|translations, item?, allow_major? }
+ */
+function claude_maint_update( $req ) {
+    claude_maint_load();
+    $fs = claude_maint_filesystem();
+    if ( is_wp_error( $fs ) ) return $fs;
+    @set_time_limit( 300 ); // phpcs:ignore
+
+    $type = sanitize_key( (string) $req->get_param( 'type' ) );
+    $item = sanitize_text_field( (string) $req->get_param( 'item' ) );
+    if ( in_array( $type, array( 'plugin', 'theme' ), true ) && $item === '' ) {
+        return new WP_Error( 'missing', "type \"{$type}\" needs \"item\" (plugin file or theme stylesheet).", array( 'status' => 400 ) );
+    }
+    switch ( $type ) {
+        case 'plugin':       $r = claude_maint_update_plugin( $item ); break;
+        case 'theme':        $r = claude_maint_update_theme( $item ); break;
+        case 'core':         $r = claude_maint_update_core( rest_sanitize_boolean( $req->get_param( 'allow_major' ) ) ); break;
+        case 'translations': $r = claude_maint_update_translations(); break;
+        default:
+            return new WP_Error( 'invalid_type', 'type must be plugin, theme, core or translations.', array( 'status' => 400 ) );
+    }
+    if ( is_wp_error( $r ) ) return $r;
+    return new WP_REST_Response( array_merge( array( 'type' => $type ), $r ) );
+}
+
+// ── Installs ─────────────────────────────────────────────────────────────────
+
+/**
+ * Installs a plugin from wordpress.org (slug, optionally a specific version)
+ * or a zip URL. With overwrite, replaces the installed copy - which is also how
+ * a wordpress.org plugin is rolled back to an older version.
+ */
+function claude_maint_install_plugin( $req ) {
+    claude_maint_load();
+    $fs = claude_maint_filesystem();
+    if ( is_wp_error( $fs ) ) return $fs;
+    @set_time_limit( 300 ); // phpcs:ignore
+
+    $slug      = sanitize_key( (string) $req->get_param( 'slug' ) );
+    $url       = esc_url_raw( (string) $req->get_param( 'url' ) );
+    $version   = sanitize_text_field( (string) $req->get_param( 'version' ) );
+    $activate  = rest_sanitize_boolean( $req->get_param( 'activate' ) );
+    $overwrite = rest_sanitize_boolean( $req->get_param( 'overwrite' ) );
+
+    if ( $slug ) {
+        $api = plugins_api( 'plugin_information', array( 'slug' => $slug, 'fields' => array( 'sections' => false, 'versions' => $version !== '' ) ) );
+        if ( is_wp_error( $api ) ) {
+            return new WP_Error( 'not_found', "No plugin '{$slug}' on wordpress.org: " . $api->get_error_message(), array( 'status' => 404 ) );
+        }
+        if ( $version !== '' && empty( $api->versions[ $version ] ) ) {
+            return new WP_Error( 'no_such_version', "{$api->name} has no version {$version} on wordpress.org.", array( 'status' => 404 ) );
+        }
+        $package = $version !== '' ? $api->versions[ $version ] : $api->download_link;
+    } elseif ( $url ) {
+        $package = $url;
+    } else {
+        return new WP_Error( 'missing', 'install needs "slug" (wordpress.org) or "url" (a plugin zip).', array( 'status' => 400 ) );
+    }
+
+    // Already installed? Find it by folder.
+    $existing = null;
+    if ( $slug ) {
+        foreach ( array_keys( get_plugins() ) as $file ) {
+            if ( dirname( $file ) === $slug ) { $existing = $file; break; }
+        }
+    }
+    if ( $existing && ! $overwrite ) {
+        return new WP_Error( 'already_installed', "{$slug} is already installed ({$existing}). Pass overwrite to replace it, e.g. to roll back to a version.", array( 'status' => 409, 'file' => $existing ) );
+    }
+
+    $backup     = null;
+    $from       = null;
+    $was_active = false;
+    if ( $existing ) {
+        $from       = get_plugins()[ $existing ]['Version'];
+        $was_active = is_plugin_active( $existing );
+        $backup     = claude_maint_backup( WP_PLUGIN_DIR . '/' . dirname( $existing ) );
+        if ( is_wp_error( $backup ) ) return $backup;
+    }
+
+    $skin = new Automatic_Upgrader_Skin();
+    $up   = null;
+    $run  = claude_maint_run_upgrader( function () use ( $skin, $package, $overwrite, &$up ) {
+        $up = new Plugin_Upgrader( $skin );
+        return $up->install( $package, array( 'overwrite_package' => $overwrite ) );
+    }, $skin );
+    if ( ! $run['result'] || is_wp_error( $run['result'] ) ) {
+        if ( $backup ) claude_maint_settle_failed( $backup );
+        $why = is_wp_error( $run['result'] ) ? $run['result']->get_error_message() : 'the upgrader gave no reason';
+        return new WP_Error( 'install_failed', "Install failed: {$why}", array( 'status' => 500, 'messages' => $run['messages'] ) );
+    }
+
+    wp_clean_plugins_cache( false );
+    $file = $up->plugin_info();
+    if ( ! $file ) {
+        if ( $backup ) claude_maint_backup_drop( $backup );
+        return new WP_Error( 'install_failed', 'The package installed but contains no plugin file WordPress recognises.', array( 'status' => 500, 'messages' => $run['messages'] ) );
+    }
+    $data   = get_plugin_data( WP_PLUGIN_DIR . '/' . $file, false, false );
+    $result = array( 'status' => 'installed', 'file' => $file, 'name' => $data['Name'], 'version' => $data['Version'], 'messages' => $run['messages'] );
+
+    if ( $backup ) {
+        $verified = claude_maint_verify( $backup, $data['Name'], $from, $data['Version'], $was_active );
+        if ( is_wp_error( $verified ) ) return $verified;
+        $result = array_merge( $result, array( 'status' => 'replaced', 'from' => $from ), $verified );
+    }
+
+    if ( $activate && ! is_plugin_active( $file ) ) {
+        $activated = claude_maint_activate_checked( $file );
+        if ( is_wp_error( $activated ) ) return $activated;
+        $result = array_merge( $result, array( 'active' => true, 'health' => $activated['health'] ) );
+    }
+    return new WP_REST_Response( $result );
+}
+
+/**
+ * Activates a plugin only if the site still loads with it.
+ *
+ * activate_plugin() includes the plugin in this request, so a plugin that
+ * fatals on load would kill the response before anything could be reported.
+ * Load it in a separate request first by listing it as active for the length
+ * of one health check, and only then activate it properly (which also runs its
+ * activation hook).
+ *
+ * @return array|WP_Error
+ */
+function claude_maint_activate_checked( $file ) {
+    if ( is_plugin_active( $file ) ) return array( 'health' => array( 'status' => 'skipped', 'message' => 'Already active.' ) );
+    $validate = validate_plugin( $file );
+    if ( is_wp_error( $validate ) ) return $validate;
+
+    $active = (array) get_option( 'active_plugins', array() );
+    update_option( 'active_plugins', array_values( array_unique( array_merge( $active, array( $file ) ) ) ) );
+    $trial = claude_loopback_health();
+    update_option( 'active_plugins', $active );
+    if ( $trial['status'] === 'fatal' ) {
+        return new WP_Error(
+            'activation_blocked',
+            "Not activated: the site fails with {$file} loaded. Error: {$trial['message']}",
+            array( 'status' => 422, 'health' => $trial )
+        );
+    }
+
+    ob_start();
+    $r = activate_plugin( $file );
+    ob_end_clean();
+    if ( is_wp_error( $r ) ) return $r;
+    $health = claude_loopback_health();
+    if ( $health['status'] === 'fatal' ) {
+        deactivate_plugins( $file, true );
+        return new WP_Error(
+            'activation_rolled_back',
+            "Activating {$file} broke the site, so it was deactivated again. Error: {$health['message']}",
+            array( 'status' => 422, 'health' => $health )
+        );
+    }
+    return array( 'health' => $health );
+}
+
+function claude_maint_delete_plugin( $file ) {
+    claude_maint_load();
+    if ( $file === claude_connector_basename() ) {
+        return new WP_Error( 'forbidden', 'Refusing to delete Claude Connector through its own API - that would cut off access to this site.', array( 'status' => 403 ) );
+    }
+    if ( ! isset( get_plugins()[ $file ] ) ) {
+        return new WP_Error( 'not_found', "Plugin '{$file}' is not installed.", array( 'status' => 404 ) );
+    }
+    $fs = claude_maint_filesystem();
+    if ( is_wp_error( $fs ) ) return $fs;
+    if ( is_plugin_active( $file ) ) deactivate_plugins( $file );
+    ob_start();
+    $r = delete_plugins( array( $file ) );
+    ob_end_clean();
+    if ( is_wp_error( $r ) ) return $r;
+    if ( ! $r ) return new WP_Error( 'delete_failed', "Could not delete {$file}.", array( 'status' => 500 ) );
+    return new WP_REST_Response( array( 'deleted' => $file ) );
+}
+
+// ── Forms & email ────────────────────────────────────────────────────────────
+
+/**
+ * Finds published pages that carry a contact form, so the dashboard knows
+ * where to send its test submission. Pages with "contact" in the slug or title
+ * come first.
+ */
+function claude_maint_find_forms() {
+    global $wpdb;
+    $markers = array(
+        'divi'          => array( '[et_pb_contact_form', '<!-- wp:divi/contact-form' ),
+        'contact-form-7'=> array( '[contact-form-7', '<!-- wp:contact-form-7/' ),
+        'gravity-forms' => array( '[gravityform', '<!-- wp:gravityforms/' ),
+        'wpforms'       => array( '[wpforms', '<!-- wp:wpforms/' ),
+        'fluent-forms'  => array( '[fluentform', '<!-- wp:fluentfom/' ),
+        'forminator'    => array( '[forminator_form', '<!-- wp:forminator/' ),
+        'ninja-forms'   => array( '[ninja_form', '<!-- wp:ninja-forms/' ),
+    );
+    $types = array_values( array_diff( get_post_types( array( 'public' => true ) ), array( 'attachment' ) ) );
+    // Divi Theme Builder layouts: a form in a global footer shows on every page.
+    $layouts = array( 'et_header_layout', 'et_body_layout', 'et_footer_layout' );
+
+    $likes = array();
+    foreach ( $markers as $list ) {
+        foreach ( $list as $m ) $likes[] = $wpdb->prepare( 'post_content LIKE %s', '%' . $wpdb->esc_like( $m ) . '%' );
+    }
+    $in   = implode( ',', array_map( function ( $t ) use ( $wpdb ) { return $wpdb->prepare( '%s', $t ); }, array_merge( $types, $layouts ) ) );
+    $rows = $wpdb->get_results( "SELECT ID, post_title, post_name, post_type, post_content FROM {$wpdb->posts} WHERE post_status = 'publish' AND post_type IN ({$in}) AND (" . implode( ' OR ', $likes ) . ') ORDER BY post_date DESC LIMIT 50' ); // phpcs:ignore
+
+    $found = array();
+    foreach ( $rows as $row ) {
+        $plugins = array();
+        foreach ( $markers as $plugin => $list ) {
+            foreach ( $list as $m ) {
+                if ( strpos( $row->post_content, $m ) !== false ) { $plugins[] = $plugin; break; }
+            }
+        }
+        $layout  = in_array( $row->post_type, $layouts, true );
+        $found[] = array(
+            'post_id' => (int) $row->ID,
+            'title'   => $row->post_title,
+            'url'     => $layout ? home_url( '/' ) : get_permalink( $row->ID ),
+            'via'     => $layout ? 'divi-theme-builder' : 'content',
+            'plugins' => $plugins,
+            'contact' => (bool) preg_match( '/contact|enquir|inquir|get-in-touch|quote/i', $row->post_name . ' ' . $row->post_title ),
+        );
+    }
+
+    // Elementor Pro form widgets live in postmeta, not post_content.
+    if ( defined( 'ELEMENTOR_VERSION' ) ) {
+        $rows = $wpdb->get_results( $wpdb->prepare(
+            "SELECT p.ID, p.post_title, p.post_name, p.post_type FROM {$wpdb->posts} p JOIN {$wpdb->postmeta} m ON m.post_id = p.ID
+             WHERE m.meta_key = '_elementor_data' AND m.meta_value LIKE %s AND p.post_status = 'publish' LIMIT 30",
+            '%' . $wpdb->esc_like( '"widgetType":"form"' ) . '%'
+        ) );
+        foreach ( $rows as $row ) {
+            $template = $row->post_type === 'elementor_library';
+            $found[]  = array(
+                'post_id' => (int) $row->ID,
+                'title'   => $row->post_title,
+                'url'     => $template ? home_url( '/' ) : get_permalink( $row->ID ),
+                'via'     => $template ? 'elementor-template' : 'content',
+                'plugins' => array( 'elementor-pro' ),
+                'contact' => (bool) preg_match( '/contact|enquir|inquir|get-in-touch|quote/i', $row->post_name . ' ' . $row->post_title ),
+            );
+        }
+    }
+
+    usort( $found, function ( $a, $b ) {
+        if ( $a['contact'] !== $b['contact'] ) return $a['contact'] ? -1 : 1;
+        if ( ( $a['via'] === 'content' ) !== ( $b['via'] === 'content' ) ) return $a['via'] === 'content' ? -1 : 1;
+        return 0;
+    } );
+    return $found;
+}
+
+function claude_maint_forms() {
+    if ( ! function_exists( 'is_plugin_active' ) ) require_once ABSPATH . 'wp-admin/includes/plugin.php';
+    return new WP_REST_Response( array( 'forms' => claude_maint_find_forms(), 'mailer' => claude_maint_mailer() ) );
+}
+
+/**
+ * Plain wp_mail() check - for sites with no form, or to tell a broken form
+ * apart from broken mail delivery.
+ */
+function claude_maint_test_email( $req ) {
+    if ( ! function_exists( 'is_plugin_active' ) ) require_once ABSPATH . 'wp-admin/includes/plugin.php';
+    $to  = sanitize_email( (string) $req->get_param( 'to' ) ) ?: get_option( 'admin_email' );
+    $ref = sanitize_text_field( (string) $req->get_param( 'ref' ) ) ?: strtoupper( wp_generate_password( 8, false, false ) );
+
+    $error = null;
+    $catch = function ( $e ) use ( &$error ) { $error = $e->get_error_message(); };
+    add_action( 'wp_mail_failed', $catch );
+    $sent = wp_mail(
+        $to,
+        sprintf( '[%s] Maintenance email test %s', wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES ), $ref ),
+        "This is an automated maintenance check that this site can send email.\n\nSite: " . home_url( '/' ) . "\nReference: {$ref}\nSent: " . wp_date( 'Y-m-d H:i:s T' ) . "\n"
+    );
+    remove_action( 'wp_mail_failed', $catch );
+
+    return new WP_REST_Response( array( 'sent' => (bool) $sent, 'to' => $to, 'ref' => $ref, 'error' => $error, 'mailer' => claude_maint_mailer() ) );
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

@@ -53,7 +53,7 @@ async function directCall(site, method, endpoint, params = null, body = null) {
   return data;
 }
 
-async function relayCall(site, method, endpoint, params = null, body = null) {
+async function relayCall(site, method, endpoint, params = null, body = null, timeoutMs = 30_000) {
   const pushRes = await fetch(`${site.relayUrl}/push`, {
     method: 'POST',
     headers: { 'X-Relay-Key': site.relayKey, 'Content-Type': 'application/json' },
@@ -62,7 +62,7 @@ async function relayCall(site, method, endpoint, params = null, body = null) {
   if (!pushRes.ok) throw new Error(`Relay push failed: ${pushRes.status}`);
   const { id } = await pushRes.json();
 
-  const deadline = Date.now() + 30_000;
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 1500));
     const res = await fetch(`${site.relayUrl}/result/${id}`, { headers: { 'X-Relay-Key': site.relayKey } });
@@ -72,7 +72,7 @@ async function relayCall(site, method, endpoint, params = null, body = null) {
       return result.body;
     }
   }
-  throw new Error('Relay timeout: no result after 30 s');
+  throw new Error(`Relay timeout: no result after ${Math.round(timeoutMs / 1000)} s`);
 }
 
 async function ajaxCall(site, method, endpoint, params = null, body = null) {
@@ -127,13 +127,14 @@ async function encCall(site, method, endpoint, params = null, body = null) {
   return data.body;
 }
 
-function api(method, endpoint, params = null, body = null, siteName = null) {
+// timeoutMs only bounds relay polling; the other transports wait for the response.
+function api(method, endpoint, params = null, body = null, siteName = null, timeoutMs = 30_000) {
   const site = getSite(siteName);
   if (site.mode === 'enc')  return encCall(site, method, endpoint, params, body);
   if (site.mode === 'ajax') return ajaxCall(site, method, endpoint, params, body);
   const useRelay = !!(site.relayUrl && site.relayKey);
   return useRelay
-    ? relayCall(site, method, endpoint, params, body)
+    ? relayCall(site, method, endpoint, params, body, timeoutMs)
     : directCall(site, method, endpoint, params, body);
 }
 
@@ -151,7 +152,7 @@ async function safeCall(fn) {
 // Kept in step with CLAUDE_CONNECTOR_VERSION in claude-connector.php. The two
 // halves ship together, and a stale copy of this file silently hides whole
 // tools - which is much harder to notice than an outright error.
-const MCP_VERSION = '1.7.2';
+const MCP_VERSION = '1.8.0';
 
 const server = new McpServer({ name: 'claude-connector', version: MCP_VERSION });
 
@@ -336,13 +337,68 @@ server.tool('wp_plugins_list',
   ({ site }) => safeCall(async () => ok(await api('GET', '/plugins', null, null, site)))
 );
 
+// Updates download and unpack server-side; core can take a minute or more.
+const LONG_MS = 360_000;
+
 // Plugins - manage
-server.tool('wp_plugins_manage', 'Activate or deactivate a WordPress plugin', {
-  site:   S,
-  plugin: z.string().describe('Plugin file path, e.g. akismet/akismet.php'),
-  action: z.enum(['activate', 'deactivate']),
-}, ({ site, plugin, action }) =>
-  safeCall(async () => ok(await api('POST', '/plugins', null, { plugin, action }, site)))
+server.tool('wp_plugins_manage',
+  'Activate, deactivate, install, update or delete a WordPress plugin. '
+  + 'activate loads the site with the plugin first and refuses (activation_blocked) if that fatals. '
+  + 'install takes a wordpress.org slug (optionally a version - with overwrite:true that rolls an installed plugin back) or a zip url. '
+  + 'update backs the plugin up, updates it, health-checks the site and restores the old version on a fatal (update_rolled_back). '
+  + 'Claude Connector itself cannot be deactivated or deleted this way.', {
+  site:      S,
+  action:    z.enum(['activate', 'deactivate', 'install', 'update', 'delete']),
+  plugin:    z.string().optional().describe('Plugin file path, e.g. akismet/akismet.php (not needed for install)'),
+  slug:      z.string().optional().describe('install: wordpress.org slug, e.g. wp-mail-smtp'),
+  url:       z.string().optional().describe('install: URL of a plugin zip, instead of slug'),
+  version:   z.string().optional().describe('install: a specific wordpress.org version'),
+  activate:  z.boolean().optional().describe('install: activate afterwards'),
+  overwrite: z.boolean().optional().describe('install: replace an installed copy (needed to change version)'),
+}, ({ site, ...body }) =>
+  safeCall(async () => ok(await api('POST', '/plugins', null, body, site, LONG_MS)))
+);
+
+// Maintenance
+
+server.tool('wp_maintenance_overview',
+  'Everything needed to plan maintenance in one call: WordPress core (minor/major update offers), PHP version, '
+  + 'every plugin and theme with version, available update (package:false = licence missing), active state, '
+  + 'pending translations, the mailer in use, and whether the host allows file writes. refresh:true re-asks wordpress.org first.',
+  { site: S, refresh: z.boolean().optional() },
+  ({ site, refresh }) => safeCall(async () => ok(await api('GET', '/maintenance/overview', refresh ? { refresh: '1' } : null, null, site, 120_000)))
+);
+
+server.tool('wp_maintenance_update',
+  'Update ONE thing: a plugin (item = plugin file), a theme (item = stylesheet), core (minor only unless allow_major) or translations. '
+  + 'Plugins/themes are backed up first; after updating, the site is loaded and if it fatals the previous version is put back '
+  + 'and the error is update_rolled_back. Update items one at a time and check each result before the next.', {
+  site:        S,
+  type:        z.enum(['plugin', 'theme', 'core', 'translations']),
+  item:        z.string().optional().describe('Plugin file (akismet/akismet.php) or theme stylesheet'),
+  allow_major: z.boolean().optional().describe('core: allow e.g. 6.8 -> 6.9 (default: minor only)'),
+}, ({ site, ...body }) => safeCall(async () => ok(await api('POST', '/maintenance/update', null, body, site, LONG_MS)))
+);
+
+server.tool('wp_maintenance_health',
+  'Load the dashboard and homepage and report status ok / fatal (with the PHP error) / unverified (loopback blocked or page cache), '
+  + 'plus whether a stuck .maintenance file is showing visitors the maintenance screen.',
+  { site: S },
+  ({ site }) => safeCall(async () => ok(await api('GET', '/maintenance/health', null, null, site, 90_000)))
+);
+
+server.tool('wp_forms_list',
+  'Pages with a contact form (Divi 4/5, Contact Form 7, Gravity Forms, WPForms, Elementor Pro, Fluent Forms, Forminator, Ninja Forms, '
+  + 'Divi Theme Builder footers), contact pages first, plus the mailer in use.',
+  { site: S },
+  ({ site }) => safeCall(async () => ok(await api('GET', '/maintenance/forms', null, null, site)))
+);
+
+server.tool('wp_test_email',
+  'Send a plain wp_mail() test (to the admin email unless "to" is given) and report whether WordPress accepted it, '
+  + 'any mailer error, and which SMTP plugin is active. Tells broken mail delivery apart from a broken form.',
+  { site: S, to: z.string().optional(), ref: z.string().optional().describe('Reference code to put in the subject') },
+  ({ site, to, ref }) => safeCall(async () => ok(await api('POST', '/maintenance/test-email', null, { to, ref }, site)))
 );
 
 // Themes - list

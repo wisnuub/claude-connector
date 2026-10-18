@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Site Maintenance</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232459d6'/%3E%3Cpath d='M9 17l4 4 10-10' stroke='white' stroke-width='3.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <h1>Site Maintenance<span class="ver" id="ver"></span></h1>
+    <div class="stats" id="stats"></div>
+    <div class="actions">
+      <button class="btn" data-action="check-all">Check all for updates</button>
+      <button class="btn" data-action="add-site">Add site</button>
+      <button class="btn" data-action="settings">Settings</button>
+    </div>
+  </header>
+
+  <main>
+    <div class="toolbar" id="toolbar"></div>
+    <div class="sites" id="sites"></div>
+  </main>
+
+  <aside class="drawer min" id="drawer" hidden></aside>
+
+  <!-- Settings -->
+  <dialog id="dlg-settings">
+    <form method="dialog" id="form-settings">
+      <div class="dh"><h3>Settings</h3><button class="btn ghost sm" value="cancel">Close</button></div>
+      <div class="db">
+        <h5>Agencies</h5>
+        <p class="hint">Each site belongs to an agency. Its form test types in that agency's details below. Sites with no agency use the default.</p>
+        <div class="profile-tabs" id="agency-tabs"></div>
+        <div id="agency-editor"></div>
+
+        <h5>Updates</h5>
+        <label class="check"><input type="checkbox" name="allowMajorCore"> Include major WordPress updates (e.g. 6.8 → 6.9) in "Update everything"</label>
+        <label class="field" style="max-width:420px">After "Update everything", the form test…
+          <select name="formTestMode">
+            <option value="queue">Waits for the morning run</option>
+            <option value="now">Runs straight away</option>
+            <option value="off">Is skipped</option>
+          </select>
+        </label>
+        <label class="check"><input type="checkbox" name="mailTestWhenNoForm"> Send a wp_mail() test when a site has no contact form</label>
+
+        <h5>Morning form test</h5>
+        <label class="check"><input type="checkbox" name="scheduleEnabled"> Run form tests automatically</label>
+        <div class="bar" style="margin:0">
+          <label class="field">Time<input type="time" name="scheduleTime" style="height:32px"></label>
+          <div class="field">Days<div class="bar" style="margin:0" id="sched-days"></div></div>
+        </div>
+        <label class="field" style="max-width:420px">Which sites
+          <select name="scheduleWhat">
+            <option value="queued">Sites queued after updates</option>
+            <option value="all">Every site</option>
+          </select>
+        </label>
+        <p class="hint">Runs while the dashboard is running. Keep it running in the background with <code>npm run service:install</code> (macOS). If the Mac is asleep at the set time, the test runs when it wakes, up to midday.</p>
+        <label class="check"><input type="checkbox" name="showBrowser"> Show the browser window during form tests</label>
+        <label class="field" style="max-width:220px">Sites updated at the same time
+          <input type="number" name="concurrency" min="1" max="10">
+        </label>
+        <div id="hidden-sites"></div>
+      </div>
+      <div class="df"><button class="btn" value="cancel">Cancel</button><button class="btn primary" value="save" data-action="save-settings">Save</button></div>
+    </form>
+  </dialog>
+
+  <!-- Add site -->
+  <dialog id="dlg-add">
+    <form method="dialog" id="form-add">
+      <div class="dh"><h3>Add a site</h3></div>
+      <div class="db">
+        <p class="hint">Sites set up with the one-click installer (~/claude-sites) and mcp-server/sites.json are found automatically.</p>
+        <div class="fields">
+          <label class="field">Name<input type="text" name="name" placeholder="Client site"></label>
+          <label class="field">URL<input type="url" name="url" placeholder="https://example.com" required></label>
+          <label class="field full">API key<input type="password" name="key" required autocomplete="off" placeholder="From WP Admin → Settings → Claude Connector"></label>
+          <label class="field">Connection
+            <select name="mode">
+              <option value="rest">REST (default)</option>
+              <option value="ajax">Admin-AJAX (WAF blocks /wp-json/)</option>
+              <option value="enc">Encrypted (Imunify360 / body-inspection WAF)</option>
+            </select>
+          </label>
+          <label class="field">Agency<select name="agencyId"></select></label>
+        </div>
+      </div>
+      <div class="df"><button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn primary" value="save" data-action="save-site">Add site</button></div>
+    </form>
+  </dialog>
+
+  <!-- Bulk plugin action -->
+  <dialog id="dlg-plugin">
+    <form method="dialog" id="form-plugin">
+      <div class="dh"><h3>Plugin action on <span data-n></span></h3></div>
+      <div class="db">
+        <label class="field">Action
+          <select name="action">
+            <option value="install">Install from wordpress.org</option>
+            <option value="update">Update</option>
+            <option value="activate">Activate</option>
+            <option value="deactivate">Deactivate</option>
+            <option value="delete">Delete</option>
+          </select>
+        </label>
+        <label class="field">Plugin (wordpress.org slug or folder name)
+          <input type="search" name="slug" placeholder="Search wordpress.org, e.g. wp-mail-smtp" autocomplete="off" required>
+        </label>
+        <div class="search-results" data-results hidden></div>
+        <label class="check" data-install-only><input type="checkbox" name="activate" checked> Activate after installing</label>
+        <p class="hint">Sites where the plugin is not installed are skipped. Activation is checked first: a plugin that breaks a site is not left active.</p>
+      </div>
+      <div class="df"><button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn primary" value="go" data-action="run-plugin-bulk">Run</button></div>
+    </form>
+  </dialog>
+
+  <!-- Assign agency -->
+  <dialog id="dlg-agency">
+    <form method="dialog" id="form-agency">
+      <div class="dh"><h3>Assign agency to <span data-n></span></h3></div>
+      <div class="db"><label class="field">Agency<select name="agencyId"></select></label></div>
+      <div class="df"><button class="btn" value="cancel">Cancel</button><button class="btn primary" value="go" data-action="run-assign">Assign</button></div>
+    </form>
+  </dialog>
+
+  <!-- Roll back -->
+  <dialog id="dlg-rollback">
+    <form method="dialog" id="form-rollback">
+      <div class="dh"><h3>Install another version of <span data-name></span></h3></div>
+      <div class="db">
+        <label class="field">Version<select name="version"></select></label>
+        <p class="hint">Replaces the installed copy with this version from wordpress.org. If the site breaks with it, the current version is put back.</p>
+      </div>
+      <div class="df"><button class="btn" value="cancel">Cancel</button><button class="btn primary" value="go" data-action="run-rollback">Install this version</button></div>
+    </form>
+  </dialog>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+{
+  "name": "claude-connector-dashboard",
+  "version": "1.8.0",
+  "private": true,
+  "description": "Local maintenance dashboard for many Claude Connector WordPress sites: bulk updates with rollback, plugin management, form tests",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "service:install": "node service.js install",
+    "service:uninstall": "node service.js uninstall",
+    "service:status": "node service.js status"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "playwright-core": "^1.50.0"
+  }
+}

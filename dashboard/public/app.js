@@ -1,0 +1,983 @@
+// Site Maintenance dashboard UI. Plain DOM, no build step.
+
+const S = {
+  version: '',
+  sites: [],
+  settings: null,
+  jobs: new Map(),
+  open: new Set(),          // expanded site ids
+  tab: {},                  // site id -> tab
+  selected: new Set(),      // selected site ids
+  pluginSel: {},            // site id -> Set(plugin files)
+  search: {},               // site id -> { q, results, busy }
+  history: {},              // site id -> entries
+  openJobs: new Set(),
+  collapsed: new Set(),     // collapsed agency groups
+  filter: 'all',
+  agency: 'all',
+  q: '',
+  drawerMin: true,
+  schedule: null,           // { next, sites, last }
+};
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+const $ = (sel, el = document) => el.querySelector(sel);
+const h = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+async function api(method, path, body) {
+  const r = await fetch(path, {
+    method,
+    headers: { 'Content-Type': 'application/json', 'X-CC-Dashboard': '1' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.message || `HTTP ${r.status}`);
+  return d;
+}
+
+let toastTimer;
+function toast(msg) {
+  let el = $('.toast');
+  if (!el) { el = document.createElement('div'); el.className = 'toast'; document.body.append(el); }
+  el.textContent = msg;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.remove(), 4000);
+}
+
+function ago(iso) {
+  if (!iso) return '';
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  if (s < 86400 * 30) return `${Math.floor(s / 86400)} d ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
+// PHP end-of-life dates (php.net/supported-versions). Past = unsupported;
+// within 6 months = plan the upgrade.
+const PHP_EOL = { '7.0': '2019-01-10', '7.1': '2019-12-01', '7.2': '2020-11-30', '7.3': '2021-12-06', '7.4': '2022-11-28', '8.0': '2023-11-26', '8.1': '2025-12-31', '8.2': '2026-12-31', '8.3': '2027-12-31', '8.4': '2028-12-31', '8.5': '2029-12-31' };
+function phpInfo(v) {
+  if (!v) return null;
+  const branch = v.split('.').slice(0, 2).join('.');
+  const eol = PHP_EOL[branch];
+  if (!eol) return { cls: parseFloat(branch) < 7 ? 'bad' : 'ok', text: branch, title: `PHP ${v}` };
+  const left = (new Date(eol) - Date.now()) / 86400000;
+  if (left < 0) return { cls: 'bad', text: branch, title: `PHP ${v} - no longer supported since ${eol}` };
+  if (left < 183) return { cls: 'warn', text: branch, title: `PHP ${v} - security support ends ${eol}` };
+  return { cls: 'ok', text: branch, title: `PHP ${v} - supported until ${eol}` };
+}
+
+const agencies = () => S.settings?.agencies || [];
+const agencyOf = site => agencies().find(a => a.id === site.agencyId) || agencies().find(a => a.id === S.settings.defaultAgency) || agencies()[0];
+
+function counts(site) {
+  const ov = site.overview;
+  if (!ov) return { plugins: 0, themes: 0, core: 0, translations: 0, total: 0 };
+  const plugins = ov.plugins.filter(p => p.update).length;
+  const themes = ov.themes.filter(t => t.update).length;
+  const core = ov.core.minor || ov.core.major ? 1 : 0;
+  const translations = ov.translations > 0 ? 1 : 0;
+  return { plugins, themes, core, translations, total: plugins + themes + core + translations };
+}
+
+function issue(site) {
+  if (site.overviewError) return 'bad';
+  if (site.health?.status === 'fatal' || site.lastRun?.status === 'failed' || ['failed', 'error', 'mail_failed'].includes(site.formTest?.status)) return 'bad';
+  if (site.health?.status === 'warning' || site.lastRun?.status === 'warning' || site.overview?.stuck_maintenance) return 'warn';
+  return null;
+}
+
+/** The step currently running on a site, if any job is working on it. */
+function running(siteId) {
+  for (const j of S.jobs.values()) {
+    const e = j.sites?.[siteId];
+    if (e && (e.status === 'running' || e.status === 'queued') && j.status === 'running') {
+      const last = e.steps[e.steps.length - 1];
+      return { job: j, entry: e, label: e.status === 'queued' ? `Queued: ${j.title}` : last?.label || j.title };
+    }
+  }
+  return null;
+}
+
+function visibleSites() {
+  const q = S.q.toLowerCase();
+  return S.sites.filter(s => !s.hidden).filter(s => {
+    if (q && !`${s.name} ${s.url}`.toLowerCase().includes(q)) return false;
+    if (S.agency !== 'all' && agencyOf(s)?.id !== S.agency) return false;
+    if (S.filter === 'updates' && !counts(s).total) return false;
+    if (S.filter === 'issues' && !issue(s)) return false;
+    return true;
+  });
+}
+
+// ── Rendering ────────────────────────────────────────────────────────────────
+
+function renderStats() {
+  const sites = S.sites.filter(s => !s.hidden);
+  const upd = sites.reduce((n, s) => n + counts(s).total, 0);
+  const withUpd = sites.filter(s => counts(s).total).length;
+  const bad = sites.filter(s => issue(s) === 'bad').length;
+  const warn = sites.filter(s => issue(s) === 'warn').length;
+  const unchecked = sites.filter(s => !s.overview && !s.overviewError).length;
+  $('#stats').innerHTML = `
+    <span><b>${sites.length}</b> sites</span>
+    <span class="${upd ? 'warn' : ''}"><b>${upd}</b> updates on ${withUpd} sites</span>
+    <span class="${bad ? 'bad' : ''}"><b>${bad}</b> need attention</span>
+    ${warn ? `<span class="warn"><b>${warn}</b> warnings</span>` : ''}
+    ${unchecked ? `<span><b>${unchecked}</b> not checked yet</span>` : ''}`;
+  $('#ver').textContent = S.version ? ` v${S.version}` : '';
+}
+
+function renderToolbar() {
+  const vis = visibleSites();
+  const n = [...S.selected].filter(id => S.sites.some(s => s.id === id && !s.hidden)).length;
+  const allSel = vis.length && vis.every(s => S.selected.has(s.id));
+  const dis = n ? '' : 'disabled';
+  const focused = document.activeElement?.id === 'q';
+  $('#toolbar').innerHTML = `
+    <input type="checkbox" data-action="select-all" ${allSel ? 'checked' : ''} aria-label="Select all shown sites">
+    <span class="count">${n ? `${n} selected` : `${vis.length} shown`}</span>
+    <button class="btn primary sm" data-action="bulk-maintain" ${dis}>Update everything</button>
+    <button class="btn sm" data-action="bulk-refresh" ${dis}>Check for updates</button>
+    <button class="btn sm" data-action="bulk-form" ${dis}>Form test now</button>
+    <button class="btn sm" data-action="bulk-queue" ${dis} title="Add to the morning form-test run">Queue form test</button>
+    <button class="btn sm" data-action="bulk-plugin" ${dis}>Plugin…</button>
+    <button class="btn sm" data-action="bulk-agency" ${dis}>Agency…</button>
+    <span class="grow"></span>
+    ${scheduleChip()}
+    ${agencies().length > 1 ? `<select data-action="agency-filter" aria-label="Agency">
+      <option value="all">All agencies</option>
+      ${agencies().map(a => `<option value="${h(a.id)}" ${S.agency === a.id ? 'selected' : ''}>${h(a.label)}</option>`).join('')}
+    </select>` : ''}
+    <div class="seg" role="group" aria-label="Filter">
+      ${[['all', 'All'], ['updates', 'Updates'], ['issues', 'Issues']].map(([k, l]) => `<button data-action="filter" data-v="${k}" class="${S.filter === k ? 'on' : ''}">${l}</button>`).join('')}
+    </div>
+    <input type="search" id="q" placeholder="Search sites" value="${h(S.q)}" data-action="search-sites">`;
+  if (focused) { const q = $('#q'); q.focus(); q.setSelectionRange(q.value.length, q.value.length); }
+}
+
+function scheduleChip() {
+  const sc = S.settings?.schedule;
+  const info = S.schedule;
+  if (!sc || !info) return '';
+  const queued = S.sites.filter(s => !s.hidden && s.formTestQueued).length;
+  const when = info.next ? new Date(info.next).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : null;
+  const label = sc.enabled
+    ? `Morning test: ${sc.what === 'all' ? 'all sites' : `${queued} queued`}${when ? ` · ${when}` : ''}`
+    : `${queued} form test${queued === 1 ? '' : 's'} queued · schedule off`;
+  if (!sc.enabled && !queued) return '';
+  return `<span class="pill ${sc.enabled ? 'accent' : 'warn'}" title="${h(info.last ? `Last scheduled run: ${new Date(info.last.at).toLocaleString()} - ${info.last.sites} site(s)${info.last.note ? ` (${info.last.note})` : ''}` : 'No scheduled run yet')}">${h(label)}</span>
+    ${queued ? '<button class="btn sm ghost" data-action="run-queue" title="Run the queued form tests now">Run queue now</button>' : ''}`;
+}
+
+const chevron = `<svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5L10.5 8 6 12.5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+function statusPill(kind, text, title = '') {
+  return `<span class="pill ${kind}" title="${h(title)}"><span class="dot"></span>${h(text)}</span>`;
+}
+
+function healthPill(site) {
+  if (site.overviewError) return statusPill('bad', 'Unreachable', site.overviewError.message);
+  const hs = site.health;
+  if (!hs) return site.overview ? statusPill('', 'Not checked') : '<span class="faint">-</span>';
+  const why = [hs.inside?.message, hs.outside?.message].filter(Boolean).join(' · ');
+  if (hs.status === 'fatal') return statusPill('bad', 'Broken', why);
+  if (hs.status === 'warning') return statusPill('warn', 'Check', why);
+  return statusPill('ok', 'Healthy', `Homepage ${hs.outside?.code} in ${hs.outside?.ms} ms · checked ${ago(hs.at)}`);
+}
+
+function formPill(site) {
+  const f = site.formTest;
+  if (site.formTestQueued && (!f || f.at < site.formTestQueued)) return statusPill('accent', 'Queued', `Queued ${ago(site.formTestQueued)} for the morning run`);
+  if (!f) return '<span class="faint">-</span>';
+  const t = `${f.message || ''}${f.ref ? ` · ref ${f.ref}` : ''} · ${ago(f.at)}`;
+  const map = { sent: ['ok', 'Sent'], mail_sent: ['ok', 'Mail sent'], failed: ['bad', 'Failed'], mail_failed: ['bad', 'Mail failed'], error: ['bad', 'Error'], blocked: ['warn', 'Captcha'], unknown: ['warn', 'No reply'], no_form: ['warn', 'No form'] };
+  const [k, l] = map[f.status] || ['', f.status];
+  return statusPill(k, l, t);
+}
+
+function lastRunCell(site) {
+  const r = site.lastRun;
+  if (!r) return '<span class="faint">Never</span>';
+  const k = r.status === 'ok' ? 'ok' : r.status === 'warning' ? 'warn' : r.status === 'failed' ? 'bad' : '';
+  return `<span title="${h(r.summary || '')}"><span class="pill ${k}"><span class="dot"></span>${h(ago(r.at))}</span></span>`;
+}
+
+function siteRow(site) {
+  const ov = site.overview;
+  const c = counts(site);
+  const run = running(site.id);
+  const php = phpInfo(ov?.php_version);
+  const wp = ov ? `${h(ov.core.version)}${ov.core.minor ? ` <span class="ver-arrow" title="Minor update available">→ ${h(ov.core.minor.version)}</span>` : ov.core.major ? ` <span class="tag accent" title="Major update available">${h(ov.core.major.version)}</span>` : ''}` : '<span class="faint">-</span>';
+  const upd = !ov ? (site.overviewError ? '<span class="faint">-</span>' : '<span class="faint">Not checked</span>')
+    : c.total ? `<span class="pill warn" title="${c.plugins} plugins · ${c.themes} themes${c.core ? ' · WordPress' : ''}${c.translations ? ' · translations' : ''}">${c.total} update${c.total === 1 ? '' : 's'}</span>`
+    : '<span class="pill ok">Up to date</span>';
+  const open = S.open.has(site.id);
+  return `
+  <section class="site ${open ? 'open' : ''} ${S.selected.has(site.id) ? 'selected' : ''}" data-site="${h(site.id)}">
+    <div class="row" data-action="toggle-site">
+      <input type="checkbox" data-action="select-site" ${S.selected.has(site.id) ? 'checked' : ''} aria-label="Select ${h(site.name)}">
+      <div class="name">${chevron}<div class="title"><b>${h(site.name)}</b><a href="${h(site.url)}" target="_blank" rel="noopener" data-stop>${h(site.url.replace(/^https?:\/\//, ''))}</a></div></div>
+      <div class="cells">
+        <div class="cell"><small>WordPress</small>${wp}</div>
+        <div class="cell"><small>PHP</small>${php ? `<span class="pill ${php.cls}" title="${h(php.title)}">${h(ov.php_version)}</span>` : '<span class="faint">-</span>'}</div>
+        <div class="cell"><small>Updates</small>${upd}</div>
+        <div class="cell"><small>Health</small>${healthPill(site)}</div>
+        <div class="cell"><small>Form test</small>${formPill(site)}</div>
+        <div class="cell"><small>Last run</small>${lastRunCell(site)}</div>
+      </div>
+      <div class="row-actions">
+        <button class="btn sm ${c.total ? 'primary' : ''}" data-action="site-maintain" data-stop ${run ? 'disabled' : ''}>Update all</button>
+        <a class="btn sm ghost" href="${h(site.url)}/wp-admin/" target="_blank" rel="noopener" data-stop title="Open wp-admin">WP</a>
+      </div>
+      ${run ? `<div class="progress"><span class="spin"></span><span>${h(run.label)}</span></div>` : ''}
+    </div>
+    ${open ? `<div class="panel">${panel(site)}</div>` : ''}
+  </section>`;
+}
+
+function panel(site) {
+  const ov = site.overview;
+  const tab = S.tab[site.id] || 'plugins';
+  const c = counts(site);
+  const run = running(site.id);
+  let notice = '';
+  if (site.overviewError) notice = `<div class="notice bad"><b>Could not reach the site:</b> ${h(site.overviewError.message)}</div>`;
+  else if (!ov) notice = `<div class="notice">Not checked yet. <button class="btn sm" data-action="site-refresh">Check now</button></div>`;
+  if (ov?.stuck_maintenance) notice += `<div class="notice warn">A <code>.maintenance</code> file from an interrupted update is still in place - visitors see "Briefly unavailable for scheduled maintenance". Delete it from the site root.</div>`;
+  if (ov && !ov.filesystem.file_mods) notice += `<div class="notice warn">This site blocks installs and updates (DISALLOW_FILE_MODS).</div>`;
+  if (ov && ov.filesystem.method !== 'direct') notice += `<div class="notice warn">WordPress cannot write files directly here (method: ${h(ov.filesystem.method)}). Updates need FTP credentials in wp-config.php.</div>`;
+  if (run) notice += `<div class="notice"><ul class="steps">${run.entry.steps.slice(-6).map(stepLi).join('')}</ul></div>`;
+
+  const tabs = [
+    ['plugins', 'Plugins', ov ? ov.plugins.length : null, c.plugins],
+    ['themes', 'Themes', ov ? ov.themes.length : null, c.themes],
+    ['wordpress', 'WordPress & server', null, c.core + c.translations],
+    ['forms', 'Form test', null, 0],
+    ['history', 'History', null, 0],
+  ];
+  const body = !ov && ['plugins', 'themes', 'wordpress'].includes(tab) ? '' :
+    tab === 'plugins' ? pluginsTab(site) : tab === 'themes' ? themesTab(site) : tab === 'wordpress' ? wordpressTab(site) : tab === 'forms' ? formsTab(site) : historyTab(site);
+  return `${notice}
+    <div class="tabs">${tabs.map(([k, l, n, u]) => `<button data-action="tab" data-v="${k}" class="${tab === k ? 'on' : ''}">${l}${u ? `<span class="n warn">${u}</span>` : n != null ? `<span class="n">${n}</span>` : ''}</button>`).join('')}
+      <span style="flex:1"></span>
+      <button class="btn ghost sm" data-action="site-refresh" title="Re-check updates now">↻ ${site.overviewAt ? `Checked ${h(ago(site.overviewAt))}` : 'Check'}</button>
+    </div>
+    ${body}`;
+}
+
+function pluginsTab(site) {
+  const ov = site.overview;
+  const sel = S.pluginSel[site.id] || (S.pluginSel[site.id] = new Set());
+  const n = [...sel].filter(f => ov.plugins.some(p => p.file === f)).length;
+  const withUpd = ov.plugins.filter(p => p.update && p.update.package);
+  const sr = S.search[site.id] || {};
+  const dis = n ? '' : 'disabled';
+  const rows = ov.plugins.map(p => {
+    const u = p.update;
+    const updCell = !u ? '<span class="faint">-</span>'
+      : `<span class="ver-arrow">→ ${h(u.version)}</span>${!u.package ? '<span class="tag warn" title="No download - licence key missing or expired">licence</span>' : ''}${!u.php_ok ? `<span class="tag bad" title="Needs PHP ${h(u.requires_php)}">PHP ${h(u.requires_php)}</span>` : u.requires_php ? `<span class="tag hide-sm" title="Requires PHP ${h(u.requires_php)}">PHP ${h(u.requires_php)}+</span>` : ''}`;
+    return `<tr class="${p.active ? '' : 'inactive'}" data-file="${h(p.file)}">
+      <td class="w1"><input type="checkbox" data-action="select-plugin" ${sel.has(p.file) ? 'checked' : ''} aria-label="Select ${h(p.name)}"></td>
+      <td class="pname"><b>${h(p.name)}</b>${p.self ? '<span class="tag accent">this connector</span>' : ''}${p.auto_update ? '<span class="tag" title="WordPress auto-updates this plugin">auto</span>' : ''}<code>${h(p.file)}</code></td>
+      <td>${h(p.version)}</td>
+      <td>${updCell}</td>
+      <td><label class="switch" title="${p.self ? 'Claude Connector must stay active' : ''}"><input type="checkbox" data-action="toggle-plugin" ${p.active ? 'checked' : ''} ${p.self ? 'disabled' : ''}><span class="track"></span>${p.active ? 'Active' : 'Inactive'}</label></td>
+      <td class="acts">
+        ${u && u.package ? `<button class="btn sm" data-action="plugin-update">Update</button>` : ''}
+        ${p.wporg ? `<button class="btn sm ghost" data-action="plugin-rollback" data-slug="${h(p.slug)}" data-name="${h(p.name)}" title="Install another version from wordpress.org">Versions</button>` : ''}
+        ${p.self ? '' : `<button class="btn sm ghost danger" data-action="plugin-delete" title="Delete">Delete</button>`}
+      </td>
+    </tr>`;
+  }).join('');
+  return `
+    <div class="bar">
+      <button class="btn sm primary" data-action="plugins-update-all" ${withUpd.length ? '' : 'disabled'}>Update all plugins (${withUpd.length})</button>
+      <span class="sep"></span>
+      <button class="btn sm" data-action="plugins-bulk" data-v="update" ${dis}>Update selected</button>
+      <button class="btn sm" data-action="plugins-bulk" data-v="activate" ${dis}>Activate</button>
+      <button class="btn sm" data-action="plugins-bulk" data-v="deactivate" ${dis}>Deactivate</button>
+      <button class="btn sm danger" data-action="plugins-bulk" data-v="delete" ${dis}>Delete</button>
+      <span class="grow"></span>
+      <input type="search" placeholder="Install a plugin from wordpress.org…" data-action="wporg-search" data-scope="site" value="${h(sr.q || '')}" style="width:280px">
+    </div>
+    ${sr.results ? `<div class="search-results">${sr.results.length ? sr.results.map(r => {
+      const installed = ov.plugins.find(p => p.slug === r.slug || p.file.split('/')[0] === r.slug);
+      return `<div class="r"><div class="t"><b>${h(r.name)}</b><span>${h(r.slug)} · v${h(r.version)} · ${Number(r.installs || 0).toLocaleString()}+ installs · ${h(r.short || '')}</span></div>
+        ${installed ? '<span class="tag">installed</span>' : `<button class="btn sm" data-action="plugin-install" data-slug="${h(r.slug)}">Install</button><button class="btn sm primary" data-action="plugin-install" data-slug="${h(r.slug)}" data-activate="1">Install &amp; activate</button>`}</div>`;
+    }).join('') : '<div class="r muted">No plugins found.</div>'}</div>` : ''}
+    <div class="tablewrap"><table class="list">
+      <thead><tr><th class="w1"><input type="checkbox" data-action="select-all-plugins" ${n && n === ov.plugins.length ? 'checked' : ''} aria-label="Select all plugins"></th><th>Plugin</th><th>Version</th><th>Update</th><th>Status</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+}
+
+function themesTab(site) {
+  const ov = site.overview;
+  const withUpd = ov.themes.filter(t => t.update && t.update.package);
+  return `
+    <div class="bar"><button class="btn sm primary" data-action="themes-update-all" ${withUpd.length ? '' : 'disabled'}>Update all themes (${withUpd.length})</button></div>
+    <div class="tablewrap"><table class="list">
+      <thead><tr><th>Theme</th><th>Version</th><th>Update</th><th></th></tr></thead>
+      <tbody>${ov.themes.map(t => `<tr data-theme="${h(t.stylesheet)}">
+        <td class="pname"><b>${h(t.name)}</b>${t.active ? '<span class="tag accent">active</span>' : t.in_use ? '<span class="tag accent">parent of active</span>' : ''}${t.parent ? `<span class="tag">child of ${h(t.parent)}</span>` : ''}<code>${h(t.stylesheet)}</code></td>
+        <td>${h(t.version || '-')}</td>
+        <td>${t.update ? `<span class="ver-arrow">→ ${h(t.update.version)}</span>${!t.update.package ? '<span class="tag warn">licence</span>' : ''}` : '<span class="faint">-</span>'}</td>
+        <td class="acts">${t.update && t.update.package ? '<button class="btn sm" data-action="theme-update">Update</button>' : ''}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>`;
+}
+
+function wordpressTab(site) {
+  const ov = site.overview;
+  const php = phpInfo(ov.php_version);
+  const core = ov.core;
+  return `<div class="grid2">
+    <div class="card"><h4>WordPress core</h4>
+      <dl class="kv"><dt>Installed</dt><dd>${h(core.version)}</dd>
+        <dt>Minor update</dt><dd>${core.minor ? `<span class="ver-arrow">${h(core.minor.version)}</span>` : 'None'}</dd>
+        <dt>Major update</dt><dd>${core.major ? `${h(core.major.version)}${core.major.php_compatible ? '' : ` <span class="tag bad">needs PHP ${h(core.major.php_required)}</span>`}` : 'None'}</dd></dl>
+      <div class="bar" style="margin:10px 0 0">
+        ${core.minor ? `<button class="btn sm primary" data-action="core-update">Update to ${h(core.minor.version)}</button>` : ''}
+        ${core.major ? `<button class="btn sm" data-action="core-update" data-major="1" ${core.major.php_compatible ? '' : 'disabled'}>Update to ${h(core.major.version)} (major)</button>` : ''}
+      </div></div>
+    <div class="card"><h4>PHP</h4>
+      <dl class="kv"><dt>Version</dt><dd><span class="pill ${php.cls}">${h(ov.php_version)}</span></dd><dt>Support</dt><dd>${h(php.title.replace(/^PHP [\d.]+ - /, ''))}</dd></dl>
+      ${php.cls !== 'ok' ? '<p class="hint" style="margin-top:8px">PHP is changed in the hosting control panel (cPanel → Select PHP Version / MultiPHP Manager, or the host\'s dashboard), not in WordPress.</p>' : ''}</div>
+    <div class="card"><h4>Translations</h4>
+      <p style="margin:0 0 10px">${ov.translations ? `${ov.translations} translation update${ov.translations === 1 ? '' : 's'} available` : 'Up to date'}</p>
+      ${ov.translations ? '<button class="btn sm" data-action="translations-update">Update translations</button>' : ''}</div>
+    <div class="card"><h4>Server</h4>
+      <dl class="kv"><dt>File writes</dt><dd>${h(ov.filesystem.method)}${ov.filesystem.file_mods ? '' : ' (blocked)'}</dd>
+        <dt>Connector</dt><dd>${h(ov.plugin_version)}</dd><dt>Connection</dt><dd>${h(site.mode)}</dd>
+        <dt>Last check</dt><dd>${h(ago(ov.last_checked))}</dd><dt>Found in</dt><dd>${h(site.source)}</dd></dl>
+      <div class="bar" style="margin:10px 0 0"><button class="btn sm ghost danger" data-action="site-hide">${site.source === 'manual' ? 'Remove site' : 'Hide from dashboard'}</button></div></div>
+  </div>`;
+}
+
+function formsTab(site) {
+  const f = site.formTest;
+  const forms = site.forms || [];
+  const current = site.formUrl || '';
+  const ag = agencyOf(site);
+  const fields = f?.fields?.length ? `<div class="tablewrap"><table class="list" style="margin-top:8px"><thead><tr><th>Field</th><th>Filled with</th></tr></thead><tbody>${f.fields.map(x => `<tr><td>${h(x.label)}${x.rule ? ` <span class="tag accent" title="From the agency's field rule">rule: ${h(x.rule)}</span>` : ''}</td><td>${h(x.value)}${x.shown ? ` <span class="faint">(${h(x.shown)})</span>` : ''}${x.error ? ` <span class="tag bad" title="${h(x.error)}">not filled</span>` : ''}</td></tr>`).join('')}</tbody></table></div>` : '';
+  return `<div class="grid2">
+    <div class="card"><h4>Agency</h4>
+      <label class="field">The form is filled in with this agency's details
+        <select data-action="site-agency">${agencies().map(a => `<option value="${h(a.id)}" ${ag?.id === a.id ? 'selected' : ''}>${h(a.label)}${a.id === S.settings.defaultAgency ? ' (default)' : ''}</option>`).join('')}</select>
+      </label>
+      <dl class="kv" style="margin-top:10px"><dt>Name</dt><dd>${h(ag?.name)}</dd><dt>Email</dt><dd>${ag?.email ? h(ag.email) : '<span class="tag bad">not set</span>'}</dd><dt>Phone</dt><dd>${h(ag?.phone)}</dd>${ag?.rules?.length ? `<dt>Field rules</dt><dd>${ag.rules.length}</dd>` : ''}</dl>
+    </div>
+    <div class="card"><h4>Form to test</h4>
+      <label class="field">Page
+        <select data-action="form-url">
+          <option value="">${forms.length ? `Automatic - ${h(forms[0].title)}` : 'Automatic (first contact form found)'}</option>
+          ${forms.map(x => `<option value="${h(x.url)}" ${current === x.url ? 'selected' : ''}>${h(x.title)} - ${h(x.plugins.join(', '))}${x.via !== 'content' ? ` (${h(x.via)})` : ''}</option>`).join('')}
+          ${current && !forms.some(x => x.url === current) ? `<option value="${h(current)}" selected>${h(current)}</option>` : ''}
+        </select>
+      </label>
+      <div class="bar" style="margin:10px 0 0">
+        <button class="btn sm primary" data-action="site-form">Run form test</button>
+        <button class="btn sm" data-action="find-forms">${site.forms ? 'Find forms again' : 'Find forms'}</button>
+        <button class="btn sm ghost" data-action="form-custom">Other URL…</button>
+        <button class="btn sm ghost" data-action="site-mail" title="Send a plain wp_mail() test - tells a broken form apart from broken email">wp_mail test</button>
+      </div>
+      ${site.mailer ? `<p class="hint" style="margin-top:10px">${site.mailer.plugin ? `Mail is sent through ${h(site.mailer.plugin)}.` : h(site.mailer.warning)}</p>` : ''}
+    </div>
+  </div>
+  ${f ? `<div class="card" style="margin-top:12px"><h4>Last result · ${h(ago(f.at))}${f.agency ? ` · as ${h(f.agency)}` : ''}</h4>
+    <p style="margin:0">${formPill(site)} ${h(f.message || '')}</p>
+    <dl class="kv" style="margin-top:8px">${f.ref ? `<dt>Reference</dt><dd><code>${h(f.ref)}</code> - search the inbox for this</dd>` : ''}${f.kind ? `<dt>Form</dt><dd>${h(f.kind)}</dd>` : ''}${f.url ? `<dt>Page</dt><dd><a href="${h(f.url)}" target="_blank" rel="noopener">${h(f.url)}</a></dd>` : ''}${f.to ? `<dt>Sent to</dt><dd>${h(f.to)}</dd>` : ''}</dl>
+    ${fields}
+    ${f.screenshot ? `<a href="/screens/${encodeURIComponent(f.screenshot)}" target="_blank" rel="noopener"><img class="shot" style="margin-top:10px" src="/screens/${encodeURIComponent(f.screenshot)}" alt="Page after submitting"></a>` : ''}
+  </div>` : ''}`;
+}
+
+function stepLi(s) {
+  const ic = { ok: '✓', warning: '!', failed: '✕', running: '<span class="spin"></span>' }[s.status] || '•';
+  return `<li class="${h(s.status)}"><span class="ic">${ic}</span><span>${h(s.label)}${s.detail ? `<span class="d">${h(s.detail)}</span>` : ''}</span></li>`;
+}
+
+function historyTab(site) {
+  const list = S.history[site.id];
+  if (!list) { loadHistory(site.id); return '<p class="muted">Loading…</p>'; }
+  if (!list.length) return '<p class="muted">Nothing has been run on this site from the dashboard yet.</p>';
+  return list.map(e => {
+    const k = e.status === 'ok' ? 'ok' : e.status === 'warning' ? 'warn' : e.status === 'failed' ? 'bad' : '';
+    return `<details class="card" style="margin-bottom:8px"><summary style="cursor:pointer"><span class="pill ${k}"><span class="dot"></span>${h(e.status)}</span> <b>${h(e.title)}</b> <span class="muted">· ${h(new Date(e.at).toLocaleString())}${e.summary ? ` · ${h(e.summary)}` : ''}</span></summary>
+      <ul class="steps" style="margin-top:8px">${e.steps.map(stepLi).join('')}</ul></details>`;
+  }).join('');
+}
+
+async function loadHistory(id) {
+  try { S.history[id] = await api('GET', `/api/history?site=${encodeURIComponent(id)}`); } catch { S.history[id] = []; }
+  renderSite(id);
+}
+
+function groupHeader(ag, sites) {
+  const ids = sites.map(s => s.id);
+  const all = ids.length && ids.every(id => S.selected.has(id));
+  const upd = sites.reduce((n, s) => n + counts(s).total, 0);
+  const bad = sites.filter(s => issue(s) === 'bad').length;
+  const collapsed = S.collapsed.has(ag.id);
+  return `<div class="group" data-group="${h(ag.id)}">
+    <input type="checkbox" data-action="select-group" ${all ? 'checked' : ''} aria-label="Select all ${h(ag.label)} sites">
+    <button class="gname" data-action="toggle-group"><span class="swatch" style="background:${h(ag.color)}"></span>${h(ag.label)}<span class="muted">${sites.length} site${sites.length === 1 ? '' : 's'}${upd ? ` · ${upd} updates` : ''}${bad ? ` · <span style="color:var(--bad)">${bad} need attention</span>` : ''}</span>${collapsed ? '<span class="faint">(hidden)</span>' : ''}</button>
+    <span style="flex:1"></span>
+    <button class="btn sm" data-action="group-maintain" ${sites.length ? '' : 'disabled'}>Update everything for ${h(ag.label)}</button>
+  </div>`;
+}
+
+function renderSites() {
+  const el = $('#sites');
+  const all = S.sites.filter(s => !s.hidden);
+  if (!all.length) {
+    el.innerHTML = `<div class="empty"><h2>No sites yet</h2><p>Sites set up with the one-click installer in <code>~/claude-sites</code> appear here automatically.<br>Or add one by hand with its API key.</p><button class="btn primary" data-action="add-site">Add site</button></div>`;
+    return;
+  }
+  const vis = visibleSites();
+  if (!vis.length) { el.innerHTML = '<div class="empty"><h2>No sites match</h2><p>Change the filter or search.</p></div>'; return; }
+  // Group by agency once there is more than one, in settings order.
+  if (agencies().length > 1) {
+    el.innerHTML = agencies().map(ag => {
+      const sites = vis.filter(s => agencyOf(s)?.id === ag.id);
+      if (!sites.length) return '';
+      return groupHeader(ag, sites) + (S.collapsed.has(ag.id) ? '' : sites.map(siteRow).join(''));
+    }).join('');
+  } else {
+    el.innerHTML = vis.map(siteRow).join('');
+  }
+}
+
+/** Re-render one site, unless the user is typing inside it (then on blur). */
+const pendingSites = new Set();
+function renderSite(id) {
+  const el = document.querySelector(`[data-site="${CSS.escape(id)}"]`);
+  const site = S.sites.find(s => s.id === id);
+  if (!el || !site) return;
+  if (el.contains(document.activeElement) && document.activeElement.matches('input[type=search], input[type=text], select')) {
+    pendingSites.add(id);
+    return;
+  }
+  el.outerHTML = siteRow(site);
+}
+document.addEventListener('focusout', () => setTimeout(() => {
+  for (const id of [...pendingSites]) { pendingSites.delete(id); renderSite(id); }
+}, 0));
+
+function renderDrawer() {
+  const d = $('#drawer');
+  const list = [...S.jobs.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  if (!list.length) { d.hidden = true; return; }
+  d.hidden = false;
+  const runningN = list.filter(j => j.status === 'running').length;
+  d.className = `drawer ${S.drawerMin ? 'min' : ''}`;
+  d.innerHTML = `<header data-action="toggle-drawer"><b>Activity</b>${runningN ? `<span class="pill run"><span class="spin"></span>${runningN} running</span>` : ''}<span class="faint">${S.drawerMin ? '▲' : '▼'}</span></header>
+    <div class="body">${list.slice(0, 15).map(j => {
+      const entries = Object.entries(j.sites);
+      const done = entries.filter(([, e]) => !['queued', 'running'].includes(e.status)).length;
+      const k = j.status === 'done' ? 'ok' : j.status === 'warning' ? 'warn' : j.status === 'failed' ? 'bad' : 'run';
+      return `<div class="job ${S.openJobs.has(j.id) ? 'open' : ''}" data-job="${h(j.id)}">
+        <div class="jh" data-action="toggle-job"><span class="pill ${k}">${j.status === 'running' ? '<span class="spin"></span>' : '<span class="dot"></span>'}${done}/${entries.length}</span><span class="t">${h(j.title)}</span><span class="faint">${h(ago(j.createdAt))}</span></div>
+        <div class="jb">${entries.map(([id, e]) => `<div class="js"><div>${h(e.name)} <span class="pill ${e.status === 'ok' ? 'ok' : e.status === 'warning' ? 'warn' : e.status === 'failed' ? 'bad' : 'run'}">${h(e.status)}</span>${e.summary ? `<span class="muted" style="font-weight:400">${h(e.summary)}</span>` : ''}</div><ul class="steps">${e.steps.map(stepLi).join('')}</ul></div>`).join('')}</div>
+      </div>`;
+    }).join('')}</div>`;
+}
+
+function renderAll() {
+  renderStats();
+  renderToolbar();
+  renderSites();
+  renderDrawer();
+}
+
+// ── Data ─────────────────────────────────────────────────────────────────────
+
+async function load() {
+  const d = await api('GET', '/api/state');
+  S.version = d.version;
+  S.sites = d.sites;
+  S.settings = d.settings;
+  S.schedule = d.schedule;
+  for (const j of d.jobs) S.jobs.set(j.id, j);
+  renderAll();
+}
+
+function connect() {
+  const es = new EventSource('/api/events');
+  es.addEventListener('site', ev => {
+    const s = JSON.parse(ev.data);
+    const i = S.sites.findIndex(x => x.id === s.id);
+    if (i >= 0) S.sites[i] = s; else S.sites.push(s);
+    delete S.history[s.id];
+    renderStats();
+    renderSite(s.id);
+  });
+  es.addEventListener('schedule', ev => { S.schedule = JSON.parse(ev.data); renderToolbar(); });
+  let drawerTimer;
+  es.addEventListener('job', ev => {
+    const j = JSON.parse(ev.data);
+    const prev = S.jobs.get(j.id);
+    S.jobs.set(j.id, j);
+    if (!prev) { S.drawerMin = false; S.openJobs.add(j.id); }
+    for (const id of Object.keys(j.sites)) renderSite(id);
+    clearTimeout(drawerTimer);
+    drawerTimer = setTimeout(renderDrawer, 120);
+    if (prev?.status === 'running' && j.status !== 'running') { renderStats(); toast(`${j.title}: ${j.status === 'done' ? 'done' : j.status}`); }
+  });
+  es.onerror = () => { /* EventSource reconnects by itself */ };
+}
+
+async function startJob(body, confirmText) {
+  if (confirmText && !confirm(confirmText)) return;
+  try {
+    await api('POST', '/api/jobs', body);
+  } catch (e) { toast(e.message); }
+}
+
+const selectedIds = () => [...S.selected].filter(id => S.sites.some(s => s.id === id && !s.hidden));
+const siteOf = el => S.sites.find(s => s.id === el.closest('[data-site]')?.dataset.site);
+
+// ── wordpress.org search ─────────────────────────────────────────────────────
+
+let searchTimer;
+async function wporgSearch(q) {
+  if (q.trim().length < 2) return [];
+  return api('GET', `/api/wporg?q=${encodeURIComponent(q.trim())}`);
+}
+
+// ── Settings dialog ──────────────────────────────────────────────────────────
+
+let draft = null;       // working copy of settings while the dialog is open
+let draftAgency = null;
+
+function renderAgencyEditor() {
+  $('#agency-tabs').innerHTML = draft.agencies.map(a => `<button type="button" class="btn sm ${a.id === draftAgency ? 'on' : ''}" data-action="pick-agency" data-v="${h(a.id)}"><span class="swatch" style="background:${h(a.color)}"></span>${h(a.label)}${a.id === draft.defaultAgency ? ' ★' : ''}</button>`).join('')
+    + '<button type="button" class="btn sm ghost" data-action="add-agency">+ Add agency</button>';
+  const a = draft.agencies.find(x => x.id === draftAgency);
+  const used = S.sites.filter(s => s.agencyId === a.id).length;
+  $('#agency-editor').innerHTML = `
+    <div class="fields" data-agency-form>
+      <label class="field">Agency name<input type="text" data-k="label" value="${h(a.label)}"></label>
+      <label class="field">Colour<input type="color" data-k="color" value="${h(a.color)}" style="height:32px;width:64px;padding:2px"></label>
+      <label class="field">Name typed into forms<input type="text" data-k="name" value="${h(a.name)}"></label>
+      <label class="field">Email<input type="email" data-k="email" value="${h(a.email)}" placeholder="where test replies can go"></label>
+      <label class="field">Phone<input type="text" data-k="phone" value="${h(a.phone)}"></label>
+      <label class="field">Company<input type="text" data-k="company" value="${h(a.company)}"></label>
+      <label class="field full">Subject<input type="text" data-k="subject" value="${h(a.subject)}"></label>
+      <label class="field full">Message<textarea data-k="message" rows="3">${h(a.message)}</textarea></label>
+      <label class="field full">Dropdowns and radio buttons no rule covers
+        <select data-k="choices">
+          <option value="first" ${a.choices !== 'random' ? 'selected' : ''}>Pick the first real option</option>
+          <option value="random" ${a.choices === 'random' ? 'selected' : ''}>Pick a random option</option>
+        </select>
+      </label>
+    </div>
+    <p class="hint">{ref} is replaced with a short code you can search the inbox for. First/last-name fields are split from the name.</p>
+    <div>
+      <h5 style="margin-bottom:6px">Field rules</h5>
+      <p class="hint" style="margin-bottom:8px">For fields the form test cannot guess, or to answer them your way. If a field's label, placeholder or name contains the text on the left, it gets the value on the right. For a dropdown or radio buttons the value picks the option with that text; <code>{random}</code> picks a random option, <code>{first}</code> the first one, and <code>{skip}</code> leaves the field alone. "yes" ticks a single checkbox.</p>
+      <div id="rules">${a.rules.map((r, i) => ruleRow(r, i)).join('')}</div>
+      <datalist id="rule-values"><option value="{random}"><option value="{first}"><option value="{skip}"><option value="yes"><option value="Google"><option value="{ref}"></datalist>
+      <button type="button" class="btn sm" data-action="add-rule" style="margin-top:6px">+ Add rule</button>
+    </div>
+    <div class="bar" style="margin:0">
+      ${a.id === draft.defaultAgency ? '<span class="muted">★ Default - sites with no agency use these details.</span>' : '<button type="button" class="btn sm" data-action="default-agency">Make default</button>'}
+      <span class="grow"></span>
+      ${draft.agencies.length > 1 ? `<button type="button" class="btn sm ghost danger" data-action="delete-agency">Delete agency${used ? ` (${used} sites move to the default)` : ''}</button>` : ''}
+    </div>`;
+}
+
+function ruleRow(r, i) {
+  return `<div class="bar" data-rule="${i}" style="margin-bottom:6px">
+    <input type="text" data-r="match" value="${h(r.match)}" placeholder="Label contains… e.g. hear about us" style="flex:1">
+    <input type="text" data-r="value" value="${h(r.value)}" placeholder="Value, e.g. Google or {random}" list="rule-values" style="flex:1">
+    <button type="button" class="btn sm ghost danger" data-action="del-rule" aria-label="Remove rule">✕</button>
+  </div>`;
+}
+
+function readAgencyForm() {
+  const a = draft.agencies.find(x => x.id === draftAgency);
+  if (!a) return;
+  for (const el of document.querySelectorAll('[data-agency-form] [data-k]')) a[el.dataset.k] = el.value;
+  a.rules = [...document.querySelectorAll('#rules [data-rule]')].map(row => ({ match: $('[data-r=match]', row).value, value: $('[data-r=value]', row).value }));
+}
+
+function openSettings() {
+  draft = JSON.parse(JSON.stringify(S.settings));
+  draftAgency = draft.defaultAgency;
+  const f = $('#form-settings');
+  for (const k of ['allowMajorCore', 'mailTestWhenNoForm', 'showBrowser']) f.elements[k].checked = !!draft[k];
+  f.elements.concurrency.value = draft.concurrency;
+  f.elements.formTestMode.value = draft.formTestMode;
+  f.elements.scheduleEnabled.checked = draft.schedule.enabled;
+  f.elements.scheduleTime.value = draft.schedule.time;
+  f.elements.scheduleWhat.value = draft.schedule.what;
+  $('#sched-days').innerHTML = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d, i) => `<label class="check"><input type="checkbox" data-day="${i}" ${draft.schedule.days.includes(i) ? 'checked' : ''}>${d}</label>`).join('');
+  const hidden = S.sites.filter(s => s.hidden);
+  $('#hidden-sites').innerHTML = hidden.length ? `<div class="bar"><span class="muted">${hidden.length} hidden site${hidden.length === 1 ? '' : 's'}: ${hidden.map(s => h(s.name)).join(', ')}</span><button type="button" class="btn sm" data-action="unhide">Show again</button></div>` : '';
+  renderAgencyEditor();
+  $('#dlg-settings').showModal();
+}
+
+function agencyOptions(sel, current) {
+  sel.innerHTML = agencies().map(a => `<option value="${h(a.id)}" ${a.id === current ? 'selected' : ''}>${h(a.label)}${a.id === S.settings.defaultAgency ? ' (default)' : ''}</option>`).join('');
+}
+
+// ── Events ───────────────────────────────────────────────────────────────────
+
+let rollbackCtx = null;
+
+document.addEventListener('click', async (ev) => {
+  const t = ev.target.closest('[data-action]');
+  if (ev.target.closest('[data-stop]') && t?.dataset.action === 'toggle-site') return;
+  if (!t) return;
+  const a = t.dataset.action;
+  const site = siteOf(t);
+
+  switch (a) {
+    case 'toggle-site': {
+      if (ev.target.closest('input, button, a, select, label')) return;
+      S.open.has(site.id) ? S.open.delete(site.id) : S.open.add(site.id);
+      renderSite(site.id);
+      return;
+    }
+    case 'select-site':
+      ev.stopPropagation();
+      t.checked ? S.selected.add(site.id) : S.selected.delete(site.id);
+      renderToolbar(); renderSite(site.id);
+      if (agencies().length > 1) renderSites();
+      return;
+    case 'select-all': {
+      const vis = visibleSites();
+      const on = t.checked;
+      for (const s of vis) on ? S.selected.add(s.id) : S.selected.delete(s.id);
+      renderToolbar(); renderSites();
+      return;
+    }
+    case 'select-group': {
+      const g = t.closest('[data-group]').dataset.group;
+      for (const s of visibleSites().filter(s => agencyOf(s)?.id === g)) t.checked ? S.selected.add(s.id) : S.selected.delete(s.id);
+      renderToolbar(); renderSites();
+      return;
+    }
+    case 'toggle-group': {
+      const g = t.closest('[data-group]').dataset.group;
+      S.collapsed.has(g) ? S.collapsed.delete(g) : S.collapsed.add(g);
+      renderSites();
+      return;
+    }
+    case 'group-maintain': {
+      const g = t.closest('[data-group]').dataset.group;
+      const ids = visibleSites().filter(s => agencyOf(s)?.id === g).map(s => s.id);
+      const ag = agencies().find(x => x.id === g);
+      return startJob({ type: 'maintain', sites: ids }, `Update everything on ${ids.length} ${ag.label} site${ids.length === 1 ? '' : 's'}?\n\nPlugins, themes, WordPress minor updates and translations - one at a time, with a health check and automatic rollback after each.`);
+    }
+    case 'filter': S.filter = t.dataset.v; renderToolbar(); renderSites(); return;
+    case 'tab': S.tab[site.id] = t.dataset.v; renderSite(site.id); return;
+    case 'toggle-drawer': S.drawerMin = !S.drawerMin; renderDrawer(); return;
+    case 'toggle-job': {
+      const id = t.closest('[data-job]').dataset.job;
+      S.openJobs.has(id) ? S.openJobs.delete(id) : S.openJobs.add(id);
+      renderDrawer();
+      return;
+    }
+
+    case 'check-all': return startJob({ type: 'refresh', sites: S.sites.filter(s => !s.hidden).map(s => s.id) });
+    case 'bulk-refresh': return startJob({ type: 'refresh', sites: selectedIds() });
+    case 'bulk-maintain': {
+      const ids = selectedIds();
+      return startJob({ type: 'maintain', sites: ids }, `Update everything on ${ids.length} site${ids.length === 1 ? '' : 's'}?\n\nPlugins, themes, WordPress minor updates and translations - one at a time, with a health check and automatic rollback after each.`);
+    }
+    case 'bulk-queue': {
+      await api('POST', '/api/jobs', { type: 'queue-form', sites: selectedIds() }).catch(e => toast(e.message));
+      toast(`Queued ${selectedIds().length} site(s) for the morning form test`);
+      return;
+    }
+    case 'run-queue': {
+      const ids = S.sites.filter(s => !s.hidden && s.formTestQueued).map(s => s.id);
+      return startJob({ type: 'formtest', sites: ids }, `Run the ${ids.length} queued form test(s) now? Each sends a real enquiry.`);
+    }
+    case 'bulk-form': return startJob({ type: 'formtest', sites: selectedIds() }, `Submit the contact form on ${selectedIds().length} site(s)? Each sends a real enquiry to that site's form recipients.`);
+    case 'bulk-plugin': {
+      const f = $('#form-plugin');
+      f.reset();
+      $('[data-n]', f).textContent = `${selectedIds().length} site${selectedIds().length === 1 ? '' : 's'}`;
+      $('[data-results]', f).hidden = true;
+      $('[data-install-only]', f).hidden = false;
+      $('#dlg-plugin').showModal();
+      return;
+    }
+    case 'bulk-agency': {
+      const f = $('#form-agency');
+      $('[data-n]', f).textContent = `${selectedIds().length} site${selectedIds().length === 1 ? '' : 's'}`;
+      agencyOptions(f.elements.agencyId, S.settings.defaultAgency);
+      $('#dlg-agency').showModal();
+      return;
+    }
+    case 'run-assign': {
+      ev.preventDefault();
+      const f = $('#form-agency');
+      await api('POST', '/api/sites/meta', { sites: selectedIds(), agencyId: f.elements.agencyId.value }).catch(e => toast(e.message));
+      $('#dlg-agency').close();
+      await load();
+      return;
+    }
+    case 'run-plugin-bulk': {
+      ev.preventDefault();
+      const f = $('#form-plugin');
+      const action = f.elements.action.value;
+      const slug = f.elements.slug.value.trim();
+      if (!slug) { f.elements.slug.focus(); return; }
+      const ids = selectedIds();
+      if (action === 'delete' && !confirm(`Delete ${slug} from ${ids.length} site(s)? This removes its files.`)) return;
+      $('#dlg-plugin').close();
+      return startJob({ type: 'plugin', sites: ids, action, slug, activate: f.elements.activate.checked });
+    }
+    case 'pick-slug': {
+      const f = $('#form-plugin');
+      f.elements.slug.value = t.dataset.slug;
+      $('[data-results]', f).hidden = true;
+      return;
+    }
+
+    case 'site-maintain': {
+      ev.stopPropagation();
+      return startJob({ type: 'maintain', sites: [site.id] }, `Update everything on ${site.name}?`);
+    }
+    case 'site-refresh': return startJob({ type: 'refresh', sites: [site.id] });
+    case 'site-form': return startJob({ type: 'formtest', sites: [site.id], url: site.formUrl || undefined }, `Submit the contact form on ${site.name}? It sends a real enquiry to the form's recipients.`);
+    case 'site-mail': return startJob({ type: 'mailtest', sites: [site.id] });
+    case 'find-forms': {
+      t.disabled = true;
+      try { await api('POST', `/api/sites/${encodeURIComponent(site.id)}/forms`, {}); } catch (e) { toast(e.message); }
+      return;
+    }
+    case 'form-custom': {
+      const url = prompt('URL of the page with the form', site.formUrl || site.url + '/contact/');
+      if (url) await api('POST', '/api/sites/meta', { sites: [site.id], formUrl: url }).catch(e => toast(e.message));
+      return;
+    }
+    case 'site-hide': {
+      if (!confirm(site.source === 'manual' ? `Remove ${site.name} from the dashboard?` : `Hide ${site.name}? Its ~/claude-sites folder is not touched; show it again from Settings.`)) return;
+      await api('DELETE', `/api/sites/${encodeURIComponent(site.id)}`).catch(e => toast(e.message));
+      await load();
+      return;
+    }
+
+    case 'select-plugin': {
+      const sel = S.pluginSel[site.id] || (S.pluginSel[site.id] = new Set());
+      const file = t.closest('[data-file]').dataset.file;
+      t.checked ? sel.add(file) : sel.delete(file);
+      renderSite(site.id);
+      return;
+    }
+    case 'select-all-plugins': {
+      S.pluginSel[site.id] = new Set(t.checked ? site.overview.plugins.map(p => p.file) : []);
+      renderSite(site.id);
+      return;
+    }
+    case 'toggle-plugin': {
+      const file = t.closest('[data-file]').dataset.file;
+      return startJob({ type: 'plugin', sites: [site.id], action: t.checked ? 'activate' : 'deactivate', files: [file] });
+    }
+    case 'plugin-update': {
+      const file = t.closest('[data-file]').dataset.file;
+      const p = site.overview.plugins.find(x => x.file === file);
+      return startJob({ type: 'update', sites: [site.id], items: [{ type: 'plugin', item: file, name: p.name }] });
+    }
+    case 'plugin-delete': {
+      const file = t.closest('[data-file]').dataset.file;
+      const p = site.overview.plugins.find(x => x.file === file);
+      return startJob({ type: 'plugin', sites: [site.id], action: 'delete', files: [file] }, `Delete ${p.name} from ${site.name}? This removes its files.`);
+    }
+    case 'plugins-bulk': {
+      const files = [...(S.pluginSel[site.id] || [])].filter(f => site.overview.plugins.some(p => p.file === f && !(p.self && ['deactivate', 'delete'].includes(t.dataset.v))));
+      if (!files.length) return toast('Claude Connector cannot be deactivated or deleted from here.');
+      const action = t.dataset.v;
+      if (action === 'update') {
+        const items = files.map(f => site.overview.plugins.find(p => p.file === f)).filter(p => p.update && p.update.package).map(p => ({ type: 'plugin', item: p.file, name: p.name }));
+        if (!items.length) return toast('None of the selected plugins has an update to install.');
+        S.pluginSel[site.id].clear();
+        return startJob({ type: 'update', sites: [site.id], items });
+      }
+      S.pluginSel[site.id].clear();
+      return startJob({ type: 'plugin', sites: [site.id], action, files }, action === 'delete' ? `Delete ${files.length} plugin(s) from ${site.name}? This removes their files.` : undefined);
+    }
+    case 'plugins-update-all': {
+      const items = site.overview.plugins.filter(p => p.update && p.update.package).map(p => ({ type: 'plugin', item: p.file, name: p.name }));
+      return startJob({ type: 'update', sites: [site.id], items });
+    }
+    case 'plugin-install':
+      return startJob({ type: 'plugin', sites: [site.id], action: 'install', slug: t.dataset.slug, activate: !!t.dataset.activate });
+    case 'plugin-rollback': {
+      rollbackCtx = { site: site.id, slug: t.dataset.slug, file: t.closest('[data-file]').dataset.file };
+      const f = $('#form-rollback');
+      $('[data-name]', f).textContent = t.dataset.name;
+      f.elements.version.innerHTML = '<option>Loading…</option>';
+      $('#dlg-rollback').showModal();
+      try {
+        const v = await api('GET', `/api/wporg/versions?slug=${encodeURIComponent(t.dataset.slug)}`);
+        const installed = site.overview.plugins.find(p => p.file === rollbackCtx.file)?.version;
+        f.elements.version.innerHTML = v.versions.map(x => `<option value="${h(x)}" ${x === installed ? 'disabled' : ''}>${h(x)}${x === installed ? ' (installed)' : ''}${x === v.current ? ' (latest)' : ''}</option>`).join('');
+        const firstOlder = v.versions.find(x => x !== installed && x !== v.current);
+        if (firstOlder) f.elements.version.value = firstOlder;
+      } catch (e) { f.elements.version.innerHTML = `<option>${h(e.message)}</option>`; }
+      return;
+    }
+    case 'run-rollback': {
+      ev.preventDefault();
+      const v = $('#form-rollback').elements.version.value;
+      $('#dlg-rollback').close();
+      return startJob({ type: 'plugin', sites: [rollbackCtx.site], action: 'install', slug: rollbackCtx.slug, version: v });
+    }
+    case 'theme-update': {
+      const st = t.closest('[data-theme]').dataset.theme;
+      const th = site.overview.themes.find(x => x.stylesheet === st);
+      return startJob({ type: 'update', sites: [site.id], items: [{ type: 'theme', item: st, name: th.name }] });
+    }
+    case 'themes-update-all': {
+      const items = site.overview.themes.filter(x => x.update && x.update.package).map(x => ({ type: 'theme', item: x.stylesheet, name: x.name }));
+      return startJob({ type: 'update', sites: [site.id], items });
+    }
+    case 'core-update': {
+      const major = !!t.dataset.major;
+      const v = major ? site.overview.core.major.version : site.overview.core.minor.version;
+      return startJob({ type: 'update', sites: [site.id], items: [{ type: 'core', name: `WordPress ${v}` }], allowMajorCore: major }, major ? `Update ${site.name} to WordPress ${v}? Major updates can break older plugins and themes - there is no automatic rollback for core.` : undefined);
+    }
+    case 'translations-update': return startJob({ type: 'update', sites: [site.id], items: [{ type: 'translations', name: 'Translations' }] });
+
+    // Settings
+    case 'settings': return openSettings();
+    case 'pick-agency': readAgencyForm(); draftAgency = t.dataset.v; renderAgencyEditor(); return;
+    case 'add-agency': {
+      readAgencyForm();
+      const base = draft.agencies.find(x => x.id === draft.defaultAgency);
+      const id = `agency-${Date.now().toString(36)}`;
+      const colors = ['#2459d6', '#c2410c', '#0f766e', '#7c3aed', '#be185d', '#4d7c0f'];
+      draft.agencies.push({ ...base, id, label: `Agency ${draft.agencies.length + 1}`, color: colors[draft.agencies.length % colors.length], rules: [] });
+      draftAgency = id;
+      renderAgencyEditor();
+      return;
+    }
+    case 'default-agency': readAgencyForm(); draft.defaultAgency = draftAgency; renderAgencyEditor(); return;
+    case 'delete-agency': {
+      draft.agencies = draft.agencies.filter(x => x.id !== draftAgency);
+      if (draft.defaultAgency === draftAgency) draft.defaultAgency = draft.agencies[0].id;
+      draftAgency = draft.defaultAgency;
+      renderAgencyEditor();
+      return;
+    }
+    case 'add-rule': {
+      readAgencyForm();
+      draft.agencies.find(x => x.id === draftAgency).rules.push({ match: '', value: '' });
+      renderAgencyEditor();
+      $('#rules [data-rule]:last-child [data-r=match]')?.focus();
+      return;
+    }
+    case 'del-rule': {
+      readAgencyForm();
+      const i = Number(t.closest('[data-rule]').dataset.rule);
+      draft.agencies.find(x => x.id === draftAgency).rules.splice(i, 1);
+      renderAgencyEditor();
+      return;
+    }
+    case 'unhide': await api('POST', '/api/sites/unhide', {}); await load(); openSettings(); return;
+    case 'save-settings': {
+      ev.preventDefault();
+      readAgencyForm();
+      const f = $('#form-settings');
+      for (const k of ['allowMajorCore', 'mailTestWhenNoForm', 'showBrowser']) draft[k] = f.elements[k].checked;
+      draft.concurrency = Number(f.elements.concurrency.value);
+      draft.formTestMode = f.elements.formTestMode.value;
+      draft.schedule = {
+        enabled: f.elements.scheduleEnabled.checked,
+        time: f.elements.scheduleTime.value || '08:30',
+        what: f.elements.scheduleWhat.value,
+        days: [...document.querySelectorAll('#sched-days [data-day]')].filter(x => x.checked).map(x => Number(x.dataset.day)),
+      };
+      try {
+        S.settings = await api('POST', '/api/settings', draft);
+        $('#dlg-settings').close();
+        await load();
+        toast('Settings saved');
+      } catch (e) { toast(e.message); }
+      return;
+    }
+    case 'add-site': {
+      const f = $('#form-add');
+      f.reset();
+      agencyOptions(f.elements.agencyId, S.agency !== 'all' ? S.agency : S.settings.defaultAgency);
+      $('#dlg-add').showModal();
+      return;
+    }
+    case 'save-site': {
+      const f = $('#form-add');
+      if (!f.reportValidity()) { ev.preventDefault(); return; }
+      ev.preventDefault();
+      const body = Object.fromEntries(new FormData(f));
+      try {
+        await api('POST', '/api/sites', body);
+        await load();
+        const added = S.sites.find(s => s.url.replace(/\/+$/, '') === body.url.replace(/\/+$/, '') || s.url === `https://${body.url}`);
+        if (added) {
+          await api('POST', '/api/sites/meta', { sites: [added.id], agencyId: body.agencyId });
+          startJob({ type: 'refresh', sites: [added.id] });
+        }
+        $('#dlg-add').close();
+      } catch (e) { toast(e.message); }
+      return;
+    }
+  }
+});
+
+document.addEventListener('change', async (ev) => {
+  const t = ev.target;
+  const a = t.dataset.action;
+  const site = siteOf(t);
+  if (a === 'agency-filter') { S.agency = t.value; renderToolbar(); renderSites(); }
+  if (a === 'site-agency') { await api('POST', '/api/sites/meta', { sites: [site.id], agencyId: t.value }).catch(e => toast(e.message)); if (agencies().length > 1) { await load(); } }
+  if (a === 'form-url') await api('POST', '/api/sites/meta', { sites: [site.id], formUrl: t.value }).catch(e => toast(e.message));
+  if (t.form?.id === 'form-plugin' && t.name === 'action') $('[data-install-only]', t.form).hidden = t.value !== 'install';
+  if (t.dataset.k === 'label' || t.dataset.k === 'color') { readAgencyForm(); const keep = document.activeElement; renderAgencyEditor(); keep?.focus?.(); }
+});
+
+document.addEventListener('input', (ev) => {
+  const t = ev.target;
+  if (t.dataset.action === 'search-sites') { S.q = t.value; renderSites(); renderToolbar(); return; }
+  if (t.dataset.action === 'wporg-search') {
+    const site = siteOf(t);
+    const q = t.value;
+    S.search[site.id] = { q, results: S.search[site.id]?.results };
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(async () => {
+      const results = q.trim().length >= 2 ? await wporgSearch(q).catch(() => []) : null;
+      if (S.search[site.id]?.q !== q) return;
+      S.search[site.id].results = results;
+      const el = document.querySelector(`[data-site="${CSS.escape(site.id)}"]`);
+      el.outerHTML = siteRow(site);
+      const input = document.querySelector(`[data-site="${CSS.escape(site.id)}"] [data-action=wporg-search]`);
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }, 350);
+    return;
+  }
+  if (t.form?.id === 'form-plugin' && t.name === 'slug') {
+    const box = $('[data-results]', t.form);
+    const q = t.value;
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(async () => {
+      const results = await wporgSearch(q).catch(() => []);
+      if (t.value !== q) return;
+      box.hidden = !results.length;
+      box.innerHTML = results.map(r => `<div class="r"><div class="t"><b>${h(r.name)}</b><span>${h(r.slug)} · ${Number(r.installs || 0).toLocaleString()}+ installs</span></div><button type="button" class="btn sm" data-action="pick-slug" data-slug="${h(r.slug)}">Use</button></div>`).join('');
+    }, 350);
+  }
+});
+
+// Refresh relative times once a minute.
+setInterval(() => { renderStats(); renderSites(); }, 60_000);
+
+load().then(connect).catch(e => { $('#sites').innerHTML = `<div class="empty"><h2>Could not load</h2><p>${h(e.message)}</p></div>`; });

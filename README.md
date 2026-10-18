@@ -8,6 +8,8 @@ Install it once on any WordPress site. Then tell Claude:
 
 Claude can then manage ACF field groups, flush caches, read and write theme files, query the database, create posts, and more - all through a secure REST API.
 
+It also ships a **local maintenance dashboard** for looking after many sites at once: bulk core/plugin/theme updates with automatic rollback, plugin management, and a real contact-form test on every site, grouped by agency and scheduled for the morning. See [Maintenance dashboard](#maintenance-dashboard-many-sites).
+
 It can also **design and build pages in Divi 4/5 and Elementor** with native modules, to the standard of a hand-built site, and look at the result in a real browser while it works. See [BUILDING.md](BUILDING.md) for the method and the safety rules for working on a client's live site, and [DESIGN-STYLES.md](DESIGN-STYLES.md) for the award-site style archetypes to choose from.
 
 ---
@@ -77,6 +79,71 @@ not a WordPress REST endpoint, so it works the same regardless of which site you
 
 No GitHub token is stored anywhere - `gh` handles its own authentication, and a duplicate check against
 existing entries runs before every write to avoid spamming the repo with near-identical findings.
+
+---
+
+## Maintenance dashboard (many sites)
+
+A local web app for routine maintenance across all your sites, in [`dashboard/`](dashboard/). It runs on your own computer, talks to each site through the connector, and keeps API keys on your machine.
+
+```bash
+cd dashboard
+npm install
+npm start            # → http://127.0.0.1:4590
+```
+
+Needs Node.js 18+ and Google Chrome or Microsoft Edge (for the form test). Every site must run Claude Connector **1.8.0 or newer**. The plugin's auto-updater gets them there.
+
+### Where the sites come from
+
+Nothing to configure for sites set up with the [one-click installer](#connecting-claude-code-one-click-setup): the dashboard reads every `~/claude-sites/<site>/.mcp.json` (URL, key and connection mode) each time it loads, so a newly installed site shows up on refresh. It also reads `mcp-server/sites.json`, and you can **Add site** by hand. **Hide** removes a site from the dashboard without touching its folder. Nothing is sent to a site until you press a button.
+
+### What it does
+
+- **One row per site**: WordPress version (and pending core update), **PHP version** (red when no longer supported, amber when security support ends within six months), pending updates, health, last form test, last run. Click a row to open it.
+- **Plugins tab**: every plugin with version → new version (flagged when an update needs a licence key or a newer PHP), an active/inactive switch, Update, Delete, and **Versions** to install another version from wordpress.org (a rollback). Tick several for bulk update / activate / deactivate / delete. Search wordpress.org and install (optionally activate) from the same tab.
+- **Themes, WordPress & server, Form test, History** tabs for the rest.
+- **Bulk across sites**: tick sites (or a whole agency) and run **Update everything**, **Check for updates**, **Form test now**, **Queue form test**, or a **Plugin…** action (install / update / activate / deactivate / delete one plugin on every selected site).
+
+**Update everything** on a site: health check → each plugin, one at a time (Claude Connector last) → themes → WordPress minor update (major only if allowed in Settings) → translations → health check from inside and from outside → form test (now, queued for the morning, or skipped - your choice in Settings). Up to four sites run in parallel; a site always runs one step at a time, so when something breaks it is clear what did it.
+
+Every plugin and theme update is **backed up, health-checked and rolled back automatically** if the site then fatals - see [`/maintenance/update`](#maintenance). Updates without a download (expired licence) and updates needing a newer PHP are skipped with a warning rather than attempted.
+
+### Agencies
+
+If you maintain sites for more than one agency, add each under **Settings → Agencies** and assign sites to them (per site in its Form test tab, or several at once with **Agency…**). The list is then grouped by agency, with a filter and a select-all / "Update everything for …" per group.
+
+Each agency has its own **form-test details**: the name, email, phone, company, subject and message typed into contact forms. `{ref}` becomes a short reference code (also shown in the result) to search the inbox for. Sites without an agency use the default one's.
+
+### The form test
+
+The dashboard opens the site's contact page in a real (headless) browser, fills the form in and presses submit, then reads the form plugin's own success or error message. That tests the form, its validation, spam protection and mail step together - not just `wp_mail()`.
+
+- **Which form**: the site lists pages with a form (Divi 4/5, Contact Form 7, Gravity Forms, WPForms, Elementor Pro, Fluent Forms, Forminator, Ninja Forms, Divi Theme Builder footers); contact pages first. Pick another page or enter any URL in the Form test tab.
+- **Which value goes where**: field names differ per plugin (`et_pb_contact_name_0`, `your-name`, `name-1-first-name`), so each visible field is matched on what a person reads - its type (`email`, `tel`, `url`, `textarea`...) first, then its label, placeholder, aria-label and name - to the agency's name / first / last name, email, phone, company, subject or message. Dropdowns get a real option (not "Please select"), radio groups one choice, required and consent checkboxes are ticked. Hidden fields (honeypots) are left alone. **Divi's math captcha** and other "3 + 4 =" questions are solved.
+- **Field rules** (per agency) cover the rest: "if a field's label/placeholder/name contains *X*, use *Y*", e.g. `hear about` → `Google`, `ABN` → `12 345 678 901`. For a dropdown or radio group the value picks the option with that text; **`{random}`** picks a random option, **`{first}`** the first, **`{skip}`** leaves the field alone, and `yes` ticks a single checkbox. Each agency can also make dropdowns without a rule pick a random option.
+- **Result**: Sent / Failed (with the plugin's message, e.g. CF7's "One or more fields have an error") / Captcha (reCAPTCHA v2, hCaptcha or Turnstile - these block automation, test by hand) / No reply, plus exactly what was typed into each field and a screenshot.
+- With no form on the site, a plain `wp_mail()` test is sent instead (optional), reporting the SMTP plugin in use or warning when mail goes out through PHP `mail()`.
+
+A form test sends a real enquiry to the form's recipients - the message says it is an automated maintenance test.
+
+### Morning form tests
+
+Do the updates whenever suits you and let the form tests go out in the morning: with **After "Update everything", the form test… → Waits for the morning run** (the default), updated sites are queued, and **Settings → Morning form test** sends them at the time and on the days you choose (or every site, not just queued ones). **Queue form test** adds any selected sites by hand; **Run queue now** sends them straight away.
+
+The schedule runs while the dashboard is running. On macOS, keep it running in the background - started at login, restarted if it stops:
+
+```bash
+npm run service:install     # launchd agent; dashboard stays at http://127.0.0.1:4590
+npm run service:status
+npm run service:uninstall
+```
+
+If the Mac is asleep at the set time, the run happens when it wakes (until midday). To wake it for the run: `sudo pmset repeat wake MTWRF 08:25:00`.
+
+### Data and security
+
+Everything lives in `dashboard/data/` (git-ignored): `settings.json`, `sites.json` (hand-added sites, **including their API keys**), `state.json`, `history.json`, and form-test screenshots. The server listens on `127.0.0.1` only, answers only to `127.0.0.1`/`localhost` host names (blocking DNS-rebinding pages), requires a custom header on every change (blocking cross-site form posts), and never sends API keys to the browser. `PORT`, `CC_SITES_DIR`, `CC_MCP_SITES` and `CC_DASHBOARD_DATA` override the port and file locations.
 
 ---
 
@@ -312,14 +379,31 @@ POST /plugins
 ```
 
 ```json
-// Activate a plugin:
+// Activate a plugin (the site is loaded with it first; a plugin that fatals is
+// refused with activation_blocked and left inactive):
 POST /plugins
 { "plugin": "advanced-custom-fields/acf.php", "action": "activate" }
 
 // Deactivate a plugin:
 POST /plugins
 { "plugin": "wordfence/wordfence.php", "action": "deactivate" }
+
+// Install from wordpress.org (or "url": a plugin zip), optionally activating:
+POST /plugins
+{ "action": "install", "slug": "wp-mail-smtp", "activate": true }
+
+// Roll back / pin a wordpress.org plugin to a version:
+POST /plugins
+{ "action": "install", "slug": "contact-form-7", "version": "6.0.6", "overwrite": true }
+
+// Update (same as /maintenance/update with type plugin) or delete:
+POST /plugins
+{ "plugin": "contact-form-7/wp-contact-form-7.php", "action": "update" }
+POST /plugins
+{ "plugin": "hello.php", "action": "delete" }
 ```
+
+Claude Connector refuses to deactivate or delete itself - that would cut off access to the site. An install that overwrites an active plugin is health-checked and rolled back like an update.
 
 ---
 
@@ -335,6 +419,40 @@ POST /themes
 POST /themes
 { "stylesheet": "eightball-genesis-child" }
 ```
+
+---
+
+### Maintenance
+
+```
+GET  /maintenance/overview?refresh=1
+POST /maintenance/update
+GET  /maintenance/health
+GET  /maintenance/forms
+POST /maintenance/test-email
+```
+
+**`/maintenance/overview`** - everything needed to plan maintenance in one call: WordPress version with the newest minor (same branch) and major update offers, PHP version, every plugin and theme with version, available update (`package: false` = licence missing), PHP requirement, active state, pending translations, the active SMTP plugin, the filesystem method, and `stuck_maintenance` (a `.maintenance` file left by an interrupted update). `refresh=1` asks wordpress.org again first.
+
+**`/maintenance/update`** - updates **one** item per request:
+
+```json
+{ "type": "plugin", "item": "contact-form-7/wp-contact-form-7.php" }
+{ "type": "theme",  "item": "twentytwentyfive" }
+{ "type": "core" }                       // minor update on the current branch
+{ "type": "core", "allow_major": true }  // or the newest release
+{ "type": "translations" }
+```
+
+For a plugin or theme the installed copy is first copied to `wp-content/claude-rollback/` (protected, removed afterwards), the update runs, and - if the plugin is active or the theme in use - the dashboard and homepage are loaded with WordPress's own fatal-error check. On a fatal the copy is put back and the request returns **422 `update_rolled_back`** with the error. The rollback runs inside the same request, which still has the old code loaded, so it works even when the new version would kill every later request. Active plugins stay active (core's upgrader would otherwise deactivate them silently over REST). Responses include `from`, `to`, the upgrader's messages and `health` (`ok`, or `unverified` when the site cannot be loaded from itself). Core updates are health-checked but not rolled back.
+
+**`/maintenance/health`** - the same fatal-error check on its own, plus `stuck_maintenance`.
+
+**`/maintenance/forms`** - published pages carrying a contact form, with the plugin(s) behind each, contact pages first.
+
+**`/maintenance/test-email`** - `{ "to": "...", "ref": "..." }` sends a plain `wp_mail()` test (to the admin email by default) and returns whether WordPress accepted it, any mailer error and the SMTP plugin in use.
+
+All of these refuse with `file_mods_disabled` when `DISALLOW_FILE_MODS` is set, and with `filesystem_unavailable` when WordPress cannot write files directly and no FTP credentials are configured.
 
 ---
 
@@ -523,6 +641,25 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 ---
 
 ## Changelog
+
+### 1.8.0 — Maintenance dashboard for many sites
+
+**Added**
+
+- **Maintenance dashboard** ([`dashboard/`](dashboard/)): a local web app for routine maintenance across all your sites - see [Maintenance dashboard](#maintenance-dashboard-many-sites). Finds the one-click installer's sites in `~/claude-sites` by itself; shows WordPress and PHP versions, pending updates and health per site; bulk updates across sites; plugin install / update / activate / deactivate / delete / version rollback, per site or across sites; sites grouped by agency.
+- **Real contact-form test**: fills in and submits the site's form in a browser (Divi 4/5, Contact Form 7, Gravity Forms, WPForms, Elementor Pro, Fluent Forms, Forminator), solves Divi's math captcha, and reports the form plugin's own success or error message with what was typed where and a screenshot. Per-agency details and field rules (`{random}`, `{first}`, `{skip}` for dropdowns and radios).
+- **Morning form tests**: updated sites are queued and tested at a set time and days; `npm run service:install` keeps the dashboard running in the background on macOS, and a run missed while the Mac slept happens on wake.
+- **`/maintenance/*` routes**: `overview`, `update` (one plugin/theme/core/translations, backed up and **rolled back automatically on a fatal**), `health`, `forms`, `test-email`.
+- **`POST /plugins` actions** `install` (wordpress.org slug, version or zip URL), `update` and `delete`.
+- **MCP tools** `wp_maintenance_overview`, `wp_maintenance_update`, `wp_maintenance_health`, `wp_forms_list`, `wp_test_email`; `wp_plugins_manage` gains install / update / delete.
+
+**Changed**
+
+- **Activating a plugin is checked first**: the site is loaded with the plugin listed as active before `activate_plugin()` runs it in the API request. A plugin that fatals is refused (`activation_blocked`) with the error instead of the request dying with an empty response.
+- **Claude Connector refuses to deactivate or delete itself** through its own API.
+- The MCP server's relay transport waits up to 6 minutes for updates and installs (was 30 s for everything).
+
+**Verified** on a local WordPress 7.1.3 (PHP 8.5): plugin, theme, core (minor, with the major offer left alone) and translation updates; a plugin update that fatals rolled back with the plugin left active; a fatal plugin refused on activation; install from wordpress.org, from a zip URL and at an older version; delete, including the refusal for the connector itself. Form tests submitted Contact Form 7 and Divi-markup forms (captcha solved, consent ticked, honeypot untouched, rules applied) and reported a CF7 validation failure as failed. The dashboard was driven in Chrome at desktop and phone width, light and dark, and all new MCP tools were called over stdio.
 
 ### 1.7.2 — PHP file writes fixed, automatic rollback on fatal errors
 

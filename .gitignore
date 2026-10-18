@@ -5,3 +5,5 @@ mcp-server/node_modules/
 mcp-server/sites.json
 mcp-server/knowledge-buffer.json
 sites/*/.mcp.json
+dashboard/node_modules/
+dashboard/data/
