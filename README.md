@@ -117,7 +117,7 @@ A small **Claude Connector** extension (in [`dashboard/extension`](dashboard/ext
 1. Open `chrome://extensions` (or `edge://extensions`) in a new tab.
 2. Turn on **Developer mode** (top-right toggle).
 3. Click **Load unpacked** and choose the `dashboard/extension` folder. (In the dashboard, **Settings → Log in → Open the folder** jumps straight to it.)
-4. The **Claude Connector** icon (an orange link) appears in the toolbar. Pin it, then click it any time to open the dashboard.
+4. The **Claude Connector** icon (an orange plug) appears in the toolbar. Pin it, then click it any time to open the dashboard.
 
 Clicking the icon when the dashboard is **not** running asks the Site Maintenance app (macOS) to start it - a one-time "Open Site Maintenance?" prompt, then the dashboard opens itself; on Windows, start it once with `npm start`. 
 
