@@ -3,7 +3,7 @@
  * Plugin Name:  Claude Connector
  * Plugin URI:   https://github.com/wisnuub/claude-connector
  * Description:  Secure REST API bridge for Claude AI - ACF sync, cache purge, file management, database queries, post CRUD, plugin/theme control, maintenance updates with rollback, and more.
- * Version:      1.8.6
+ * Version:      1.8.7
  * Author:       Wisnuub
  * Author URI:   https://wisnuub.github.io
  * License:      GPL-2.0-or-later
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'CLAUDE_CONNECTOR_VERSION', '1.8.6' );
+define( 'CLAUDE_CONNECTOR_VERSION', '1.8.7' );
 define( 'CLAUDE_CONNECTOR_NS',      'claude/v1' );
 define( 'CLAUDE_CONNECTOR_GH_REPO', 'wisnuub/claude-connector' );
 
@@ -4180,7 +4180,12 @@ function claude_security_scan() {
     $find_injection = function ( $text ) use ( $home_host ) {
         if ( $text === '' || $text === null ) return null;
         $decoded = html_entity_decode( str_replace( array( '||et_pb_line_break_holder||', '%22', '%91', '%93' ), array( "\n", '"', '[', ']' ), $text ), ENT_QUOTES, 'UTF-8' );
-        $ok = array( 'www.googletagmanager.com', 'www.google-analytics.com', 'www.google.com', 'www.gstatic.com', 'connect.facebook.net', 'platform.twitter.com', 'www.youtube.com', 'youtube.com', 'player.vimeo.com', 'js.stripe.com', 'maps.googleapis.com', 'cdn.jsdelivr.net', 'cdnjs.cloudflare.com', 'code.jquery.com', 'unpkg.com', 'www.recaptcha.net', 'cdn.shopify.com', 'static.hotjar.com', 'embed.tawk.to', 'www.clarity.ms' );
+        $ok = array(
+            // analytics / tags / scripts
+            'www.googletagmanager.com', 'www.google-analytics.com', 'www.gstatic.com', 'connect.facebook.net', 'platform.twitter.com', 'js.stripe.com', 'maps.googleapis.com', 'cdn.jsdelivr.net', 'cdnjs.cloudflare.com', 'code.jquery.com', 'unpkg.com', 'www.recaptcha.net', 'www.google.com/recaptcha', 'cdn.shopify.com', 'static.hotjar.com', 'embed.tawk.to', 'www.clarity.ms', 'maps.google.com', 'www.googleadservices.com', 'googleads.g.doubleclick.net',
+            // embed iframes: maps, video, docs/forms, social, booking, audio
+            'www.google.com', 'www.youtube.com', 'youtube.com', 'www.youtube-nocookie.com', 'youtube-nocookie.com', 'player.vimeo.com', 'vimeo.com', 'www.openstreetmap.org', 'www.bing.com', 'docs.google.com', 'calendar.google.com', 'drive.google.com', 'www.facebook.com', 'web.facebook.com', 'www.instagram.com', 'open.spotify.com', 'w.soundcloud.com', 'bandcamp.com', 'airtable.com', 'calendly.com', 'www.jotform.com', 'form.jotform.com', 'app.acuityscheduling.com', 'link.gmnp.io', 'www.tripadvisor.com', 'widget.trustpilot.com'
+        );
         foreach ( array( (string) $text, (string) $decoded ) as $hay ) {
             if ( preg_match( '#<script\b[^>]*\bsrc\s*=\s*["\']?(?:https?:)?//([^"\'\s>/]+)#i', $hay, $m ) ) {
                 $host = strtolower( $m[1] );
@@ -4189,8 +4194,11 @@ function claude_security_scan() {
             if ( preg_match( '#(eval\s*\(\s*(?:atob|function|String\.fromCharCode)|String\.fromCharCode\s*\(|document\.write\s*\(\s*unescape|\batob\s*\(\s*["\']|(?:\\\\x[0-9a-f]{2}){8,}|base64_decode\s*\()#i', $hay, $m, PREG_OFFSET_CAPTURE ) ) {
                 return array( 'why' => 'obfuscated or self-decoding script', 'snippet' => trim( substr( $hay, max( 0, $m[0][1] - 20 ), 180 ) ) );
             }
-            if ( preg_match( '#<iframe\b[^>]*\bsrc\s*=\s*["\']?(?:https?:)?//([^"\'\s>/]+)#i', $hay, $m ) && strtolower( $m[1] ) !== $home_host && strpos( strtolower( $m[1] ), $home_host ) === false ) {
-                return array( 'why' => "iframe from {$m[1]}", 'snippet' => trim( substr( $m[0], 0, 180 ) ) );
+            if ( preg_match( '#<iframe\b[^>]*\bsrc\s*=\s*["\']?(?:https?:)?//([^"\'\s>/]+)#i', $hay, $m ) ) {
+                $fhost = strtolower( $m[1] );
+                if ( $fhost !== $home_host && strpos( $fhost, $home_host ) === false && ! in_array( $fhost, $ok, true ) && ! preg_match( '/(^|\.)(google|youtube|vimeo|facebook|instagram|spotify|soundcloud|openstreetmap|bing|tripadvisor|trustpilot)\.[a-z.]+$/', $fhost ) ) {
+                    return array( 'why' => "iframe from {$fhost}", 'snippet' => trim( substr( $m[0], 0, 180 ) ) );
+                }
             }
             if ( preg_match( '#<meta[^>]+http-equiv=["\']?refresh["\']?[^>]+url=([^"\'>]+)#i', $hay, $m ) ) {
                 return array( 'why' => 'meta-refresh redirect', 'snippet' => trim( substr( $m[0], 0, 180 ) ) );

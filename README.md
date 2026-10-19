@@ -693,6 +693,14 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 
 ## Changelog
 
+### 1.8.7 — Security scan: allow embed iframes
+
+**Fixed (the security check)**
+
+- **Legitimate embed iframes are no longer flagged as injections.** The content scan now allowlists iframes from known embed providers - Google Maps (any regional domain, e.g. `www.google.com/maps`, `maps.google.com.au`), YouTube, Vimeo, Facebook/Instagram, Spotify/SoundCloud, OpenStreetMap, Bing, Google Docs/Forms/Calendar, Calendly, Airtable, JotForm, Acuity, TripAdvisor and Trustpilot - so a Maps or video embed in a Divi Code module or Elementor widget reads as normal. An iframe from an unknown domain, or obfuscated code, is still flagged.
+
+**Verified** on a local WordPress: Google Maps embeds (`www.google.com` and `maps.google.com.au`) and a YouTube embed in Divi Code modules were not flagged, while an iframe from an unknown domain still was.
+
 ### 1.8.6 — Deeper security scan: builder content and accounts
 
 **Changed (the security check)**
