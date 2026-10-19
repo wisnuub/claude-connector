@@ -1,4 +1,13 @@
-# Claude Connector
+<p align="center">
+  <img src=".github/assets/logo.png" alt="Claude Connector" width="128" height="128">
+</p>
+
+<h1 align="center">Claude Connector</h1>
+
+<p align="center">
+  Give Claude full, secure control of many WordPress sites - update, test, secure and clean them from one dashboard.
+</p>
+
 
 A WordPress plugin that gives [Claude Code](https://claude.ai/code) (or any Claude AI agent) full programmatic access to a WordPress site - without needing cPanel, SSH, or hosting credentials.
 
