@@ -7,3 +7,4 @@ mcp-server/knowledge-buffer.json
 sites/*/.mcp.json
 dashboard/node_modules/
 dashboard/data/
+dashboard/.upgrade.mjs
