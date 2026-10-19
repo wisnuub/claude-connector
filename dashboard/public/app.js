@@ -729,6 +729,7 @@ async function fetchLogins(gid) {
   try { const r = await api('GET', `/api/asana/logins?task=${encodeURIComponent(gid)}`); S.logins[gid] = { logins: r.logins, task: r.task, siteUrl: r.siteUrl }; }
   catch (e) { S.logins[gid] = { error: e.message }; }
   rerenderLogins();
+  loadTasks(); // the login may have taught the dashboard this project's address
 }
 
 function rerenderLogins() {
@@ -783,7 +784,7 @@ function renderTasks() {
   el.innerHTML = `
     <div class="toolbar">
       <span class="count">${list.length} task${list.length === 1 ? '' : 's'}</span>
-      <div class="seg" role="group" aria-label="Show">${[['all', 'All'], ['site', 'On the dashboard'], ['nosite', 'Not on the dashboard']].map(([k, l]) => `<button data-action="tasks-show" data-v="${k}" class="${S.tasksShow === k ? 'on' : ''}">${l}</button>`).join('')}</div>
+      <div class="seg" role="group" aria-label="Show">${[['all', 'All'], ['site', 'Connected'], ['nosite', 'Not connected']].map(([k, l]) => `<button data-action="tasks-show" data-v="${k}" class="${S.tasksShow === k ? 'on' : ''}">${l}</button>`).join('')}</div>
       <input type="search" id="tq" placeholder="Search tasks" value="${h(S.tasksQ)}" data-action="search-tasks">
       <span class="grow"></span>
       <span class="muted" style="font-size:13px">${h(S.asana.user.name)} · ${h(ws?.name || '')}${S.tasks.at ? ` · ${h(ago(S.tasks.at))}` : ''}</span>
@@ -796,7 +797,8 @@ function renderTasks() {
         <tbody>${list.map(t => `<tr data-gid="${h(t.gid)}">
           <td><a href="${h(t.url)}" target="_blank" rel="noopener">${h(t.name)}</a></td>
           <td>${h(t.project?.name || '')}</td>
-          <td>${t.siteId ? `<a href="#" data-action="goto-site" data-site="${h(t.siteId)}">${h(t.siteName)}</a>` : '<span class="faint">not on the dashboard</span>'}</td>
+          <td>${t.siteId ? `<a href="#" data-action="goto-site" data-site="${h(t.siteId)}">${h(t.siteName)}</a>`
+            : `<span class="tag" title="Log in works on any site. Updates, form tests and the security check need Claude Connector installed and connected: install it from wp-admin, then click Connect on this Mac on its settings page.">Not connected</span>${t.siteUrl ? ` <a href="${h(t.siteUrl)}" target="_blank" rel="noopener" class="faint">${h(t.siteUrl.replace(/^https?:\/\//, '').replace(/\/wp-(admin|login\.php).*$/, ''))}</a>` : ''}`}</td>
           <td class="hide-sm">${t.due ? `<span class="${t.due < new Date().toISOString().slice(0, 10) ? 'ver-arrow' : ''}">${h(new Date(t.due + 'T00:00').toLocaleDateString())}</span>` : ''}</td>
           <td class="hide-sm">${h(minutes(t.minutes))}</td>
           <td class="acts"><button class="btn sm" data-action="asana-logins" data-gid="${h(t.gid)}">${S.logins[t.gid] ? 'Hide login' : 'Login'}</button></td>
@@ -1183,6 +1185,7 @@ document.addEventListener('click', async (ev) => {
         if (!/^https?:\/\//.test(url)) url = `https://${url.trim()}`;
         await api('POST', '/api/asana/site-url', { project: proj?.projectGid, url }).catch(() => {});
         S.logins[gid].siteUrl = url;
+        loadTasks();
       }
       t.disabled = true;
       t.textContent = 'Opening…';

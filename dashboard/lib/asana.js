@@ -116,13 +116,22 @@ export async function myTasks({ refresh = false } = {}) {
   return withSites(cache.tasks);
 }
 
-/** Adds the matching site to each task, and links unlinked sites to their maintenance task. */
+const hostOf = u => { try { return new URL(u).host.replace(/^www\./, '').toLowerCase(); } catch { return null; } };
+
+/**
+ * Adds the matching site to each task - by the site address known for its
+ * project (from its login, or typed in for Log in), else by project name - and
+ * links unlinked sites to their maintenance task.
+ */
 function withSites(tasks) {
   const sites = listSites();
+  const urls = getMeta().asanaSiteUrls || {};
   const out = tasks.map(t => {
     const linked = sites.find(s => siteState(s.id).asana?.taskGid === t.gid);
-    const site = linked || (t.project ? matchSite(t.project.name, sites) : null);
-    return { ...t, siteId: site?.id || null, siteName: site?.name || null, linked: !!linked };
+    const known = t.project ? urls[t.project.gid] || null : null;
+    const byHost = known ? sites.find(s => hostOf(s.url) === hostOf(known)) : null;
+    const site = linked || byHost || (t.project ? matchSite(t.project.name, sites) : null);
+    return { ...t, siteId: site?.id || null, siteName: site?.name || null, linked: !!linked, siteUrl: site?.url || known };
   });
   for (const s of sites) {
     if (siteState(s.id).asana?.taskGid) continue;
@@ -308,6 +317,9 @@ export async function loginsFor(taskGid) {
   const seen = new Set();
   const unique = logins.filter(l => { const k = `${l.user}|${l.pass}`; if (seen.has(k)) return false; seen.add(k); return true; });
   const project = task.projects?.[0] || null;
+  // The address the login is for identifies the site: remember it for matching tasks to sites.
+  const addr = unique.find(l => l.url)?.url;
+  if (project && addr && (getMeta().asanaSiteUrls || {})[project.gid] !== addr) rememberSiteUrl(project.gid, addr);
   return {
     task: { gid: task.gid, name: task.name, url: task.permalink_url, project: project?.name || null, projectGid: project?.gid || null },
     logins: unique,
