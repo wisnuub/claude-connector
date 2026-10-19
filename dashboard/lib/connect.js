@@ -99,10 +99,40 @@ async function ensureMcpServer() {
   await run('npm', ['install', '--silent', '--no-audit', '--no-fund'], { cwd: MCP_DIR, env: { ...process.env, PATH: PATH_PLUS } });
 }
 
-async function openInVSCode(dir) {
-  try { await run('code', [dir], { env: { ...process.env, PATH: PATH_PLUS } }); return true; } catch {}
-  try { await run('open', ['-a', 'Visual Studio Code', dir]); return true; } catch {}
+/** Opens a folder (and optionally a file in it) in VS Code. */
+export async function openInVSCode(dir, file = null) {
+  const args = file ? [dir, file] : [dir];
+  try { await run('code', args, { env: { ...process.env, PATH: PATH_PLUS } }); return true; } catch {}
+  try { await run('open', ['-a', 'Visual Studio Code', ...args]); return true; } catch {}
   return false;
+}
+
+/** Writes a site's workspace: .mcp.json (same shape as the setup script) and, if missing, CLAUDE.md. */
+async function writeWorkspace(dir, { url, key, mode, relayUrl, relayKey }, claudeMd) {
+  await ensureMcpServer();
+  fs.mkdirSync(dir, { recursive: true });
+  const env = { WP_URL: url, WP_KEY: key, WP_MODE: mode || 'ajax' };
+  if (relayUrl && relayKey) Object.assign(env, { WP_RELAY_URL: relayUrl, WP_RELAY_KEY: relayKey });
+  const mcp = { mcpServers: { 'claude-connector': { command: 'node', args: [path.join(MCP_DIR, 'index.js')], env } } };
+  fs.writeFileSync(path.join(dir, '.mcp.json'), JSON.stringify(mcp, null, 4));
+  const md = path.join(dir, 'CLAUDE.md');
+  if (!fs.existsSync(md) && claudeMd) fs.writeFileSync(md, claudeMd); // keep a customised one
+}
+
+/**
+ * The Claude Code workspace for a dashboard site: its ~/claude-sites folder, or a
+ * new one for sites added by hand or from sites.json.
+ */
+export async function ensureWorkspace(site) {
+  if (site.source === 'claude-sites') {
+    const dir = path.join(SITES_DIR, site.name);
+    if (fs.existsSync(path.join(dir, '.mcp.json'))) return dir;
+  }
+  const dir = path.join(SITES_DIR, freeSlug(slugify(site.name), site.url));
+  if (!fs.existsSync(path.join(dir, '.mcp.json'))) {
+    await writeWorkspace(dir, site, `# ${site.name}\n\nWordPress site ${site.url}, connected through the Claude Connector MCP tools.\n`);
+  }
+  return dir;
 }
 
 /** Step 2: the user confirmed - write the workspace and open it. */
@@ -112,14 +142,8 @@ export async function confirmConnect(id, { openEditor = true } = {}) {
   pending.delete(id);
   const d = p.details;
 
-  await ensureMcpServer();
   const dir = path.join(SITES_DIR, d.slug);
-  fs.mkdirSync(dir, { recursive: true });
-  // Same shape as the setup script writes.
-  const mcp = { mcpServers: { 'claude-connector': { command: 'node', args: [path.join(MCP_DIR, 'index.js')], env: { WP_URL: d.url, WP_KEY: d.key, WP_MODE: d.mode || 'ajax' } } } };
-  fs.writeFileSync(path.join(dir, '.mcp.json'), JSON.stringify(mcp, null, 4));
-  const md = path.join(dir, 'CLAUDE.md');
-  if (!fs.existsSync(md) && d.claude_md) fs.writeFileSync(md, d.claude_md); // keep a customised one
+  await writeWorkspace(dir, { url: d.url, key: d.key, mode: d.mode }, d.claude_md);
 
   const opened = openEditor ? await openInVSCode(dir) : false;
   return { slug: d.slug, name: d.name, url: d.url, folder: dir, opened };

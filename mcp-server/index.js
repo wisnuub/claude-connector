@@ -152,7 +152,7 @@ async function safeCall(fn) {
 // Kept in step with CLAUDE_CONNECTOR_VERSION in claude-connector.php. The two
 // halves ship together, and a stale copy of this file silently hides whole
 // tools - which is much harder to notice than an outright error.
-const MCP_VERSION = '1.8.1';
+const MCP_VERSION = '1.8.2';
 
 const server = new McpServer({ name: 'claude-connector', version: MCP_VERSION });
 
@@ -392,6 +392,16 @@ server.tool('wp_forms_list',
   + 'Divi Theme Builder footers), contact pages first, plus the mailer in use.',
   { site: S },
   ({ site }) => safeCall(async () => ok(await api('GET', '/maintenance/forms', null, null, site)))
+);
+
+server.tool('wp_security_scan',
+  'Read-only security check of the site. Compares WordPress core and wordpress.org plugin files with their published '
+  + 'checksums, lists PHP files that do not belong (in wp-admin/wp-includes, uploads, the site root), scans themes, plugins, '
+  + 'mu-plugins and drop-ins for known malware patterns, active plugins whose files are missing, recently changed PHP files, '
+  + 'administrators (new ones flagged), .htaccess redirects, suspicious lines in wp-config.php and scripts in posts/options. '
+  + 'Findings are leads, not proof: open each file (wp_files_read) before concluding, and change nothing without the user agreeing.',
+  { site: S },
+  ({ site }) => safeCall(async () => ok(await api('GET', '/security/scan', null, null, site, 180_000)))
 );
 
 server.tool('wp_test_email',

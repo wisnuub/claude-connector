@@ -161,6 +161,7 @@ function openReview(ids, title) {
 
 function issue(site) {
   if (site.overviewError) return 'bad';
+  if (site.security?.summary?.high) return 'bad';
   if (site.health?.status === 'fatal' || site.lastRun?.status === 'failed' || ['failed', 'error', 'mail_failed'].includes(site.formTest?.status)) return 'bad';
   if (site.health?.status === 'warning' || site.lastRun?.status === 'warning' || site.overview?.stuck_maintenance) return 'warn';
   return null;
@@ -222,6 +223,7 @@ function renderToolbar() {
     <button class="btn sm" data-action="bulk-queue" ${dis} title="Add to the morning form-test run">Queue form test</button>
     <button class="btn sm" data-action="bulk-plugin" ${dis}>Plugin…</button>
     <button class="btn sm" data-action="bulk-agency" ${dis}>Agency…</button>
+    <button class="btn sm" data-action="bulk-security" ${dis}>Security check</button>
     <span class="grow"></span>
     ${scheduleChip()}
     ${agencies().length > 1 ? `<select data-action="agency-filter" aria-label="Agency">
@@ -301,7 +303,7 @@ function siteRow(site) {
         <div class="cell"><small>WordPress</small>${wp}</div>
         <div class="cell"><small>PHP</small>${php ? `<span class="pill ${php.cls}" title="${h(php.title)}">${h(ov.php_version)}</span>` : '<span class="faint">-</span>'}</div>
         <div class="cell"><small>Updates</small>${upd}</div>
-        <div class="cell"><small>Health</small>${healthPill(site)}</div>
+        <div class="cell"><small>Health</small>${healthPill(site)}${site.security?.summary?.high ? ` <span class="tag bad" title="Last security check: ${h(site.security.summary.high)} high">security</span>` : ''}</div>
         <div class="cell"><small>Form test</small>${formPill(site)}</div>
         <div class="cell"><small>Last run</small>${lastRunCell(site)}</div>
       </div>
@@ -334,10 +336,11 @@ function panel(site) {
     ['wordpress', 'WordPress & server', null, c.core + c.translations],
     ['forms', 'Form test', null, 0],
     ['asana', 'Asana & login', null, 0],
+    ['security', 'Security', null, site.security?.summary?.high || 0],
     ['history', 'History', null, 0],
   ];
   const body = !ov && ['plugins', 'themes', 'wordpress'].includes(tab) ? '' :
-    tab === 'plugins' ? pluginsTab(site) : tab === 'themes' ? themesTab(site) : tab === 'wordpress' ? wordpressTab(site) : tab === 'forms' ? formsTab(site) : tab === 'asana' ? asanaTab(site) : historyTab(site);
+    tab === 'plugins' ? pluginsTab(site) : tab === 'themes' ? themesTab(site) : tab === 'wordpress' ? wordpressTab(site) : tab === 'forms' ? formsTab(site) : tab === 'asana' ? asanaTab(site) : tab === 'security' ? securityTab(site) : historyTab(site);
   return `${notice}
     <div class="tabs">${tabs.map(([k, l, n, u]) => `<button data-action="tab" data-v="${k}" class="${tab === k ? 'on' : ''}">${l}${u ? `<span class="n warn">${u}</span>` : n != null ? `<span class="n">${n}</span>` : ''}</button>`).join('')}
       <span style="flex:1"></span>
@@ -472,6 +475,33 @@ function formsTab(site) {
     ${fields}
     ${f.screenshot ? `<a href="/screens/${encodeURIComponent(f.screenshot)}" target="_blank" rel="noopener"><img class="shot" style="margin-top:10px" src="/screens/${encodeURIComponent(f.screenshot)}" alt="Page after submitting"></a>` : ''}
   </div>` : ''}`;
+}
+
+const SEV_CLS = { high: 'bad', medium: 'warn', low: '', info: '' };
+
+function securityTab(site) {
+  const sc = site.security;
+  const run = running(site.id);
+  const head = `<div class="bar">
+      <button class="btn sm primary" data-action="site-security" ${run ? 'disabled' : ''}>${sc ? 'Run the security check again' : 'Run security check'}</button>
+      <button class="btn sm" data-action="claude-review" ${sc ? '' : 'disabled'} title="Writes SECURITY-REPORT.md into the site's workspace and opens it in VS Code for Claude">Open in VS Code with Claude</button>
+      <span class="grow"></span>
+      ${sc ? `<span class="muted" style="font-size:12.5px">Checked ${h(ago(sc.at))} · ${h(sc.stats?.php_files_pattern_scanned ?? '?')} files scanned · ${h(sc.stats?.wporg_plugins_verified ?? 0)} plugins verified against wordpress.org</span>` : ''}
+    </div>`;
+  if (!sc) return `${head}<p class="hint">Read-only: compares WordPress core and wordpress.org plugins with their published checksums, looks for PHP in uploads, known malware patterns, active plugins whose files are missing, new administrators, .htaccess redirects and scripts injected into posts and settings. Nothing on the site is changed.</p>`;
+  const s = sc.summary || {};
+  const findings = (sc.findings || []).map(f => `
+    <details class="card sec ${SEV_CLS[f.severity] || ''}" ${f.severity === 'high' ? 'open' : ''} style="margin-top:8px">
+      <summary><span class="pill ${SEV_CLS[f.severity] || ''}">${h(f.severity)}</span> <b>${h(f.title)}</b> <span class="muted">(${h(f.count)})</span></summary>
+      ${f.note ? `<p class="hint" style="margin:6px 0">${h(f.note)}</p>` : ''}
+      <ul class="sec-items">${(f.items || []).map(i => `<li><code>${h(i.path)}</code>${i.detail ? ` <span class="muted">${h(i.detail)}</span>` : ''}${(i.hits || []).map(x => `<div class="sec-hit">${h(x.label)}, line ${h(x.line)}: <code>${h(x.snippet)}</code></div>`).join('')}</li>`).join('')}
+      ${f.count > (f.items || []).length ? `<li class="muted">… and ${f.count - f.items.length} more</li>` : ''}</ul>
+    </details>`).join('');
+  return `${head}
+    <div class="notice ${s.high ? 'bad' : s.medium ? 'warn' : ''}" style="margin-top:8px">${s.high || s.medium
+      ? `<b>${s.high} high · ${s.medium} medium</b> warning sign${s.high + s.medium === 1 ? '' : 's'}. These are leads, not proof - open the site in VS Code and let Claude look into each one before anything is changed.`
+      : 'No warning signs found. The items below are for review.'}</div>
+    ${findings}`;
 }
 
 function stepLi(s) {
@@ -1288,6 +1318,17 @@ document.addEventListener('click', async (ev) => {
     case 'site-refresh': return startJob({ type: 'refresh', sites: [site.id] });
     case 'site-form': return startJob({ type: 'formtest', sites: [site.id], url: site.formUrl || undefined }, `Submit the contact form on ${site.name}? It sends a real enquiry to the form's recipients.`);
     case 'site-mail': return startJob({ type: 'mailtest', sites: [site.id] });
+    case 'site-security': S.tab[site.id] = 'security'; return startJob({ type: 'security', sites: [site.id] });
+    case 'bulk-security': return startJob({ type: 'security', sites: selectedIds() });
+    case 'claude-review': {
+      t.disabled = true;
+      try {
+        const r = await api('POST', `/api/sites/${encodeURIComponent(site.id)}/claude-review`, {});
+        toast(r.opened ? 'Opened in VS Code - ask Claude to "investigate SECURITY-REPORT.md"' : `Report written to ${r.file} - VS Code did not open`);
+      } catch (e) { toast(e.message); }
+      t.disabled = false;
+      return;
+    }
     case 'find-forms': {
       t.disabled = true;
       try { await api('POST', `/api/sites/${encodeURIComponent(site.id)}/forms`, {}); } catch (e) { toast(e.message); }

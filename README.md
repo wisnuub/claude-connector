@@ -138,6 +138,18 @@ Connect Asana under **Settings → Asana** with a personal access token (Asana: 
   - **In a separate browser window** otherwise (its own profile, remembered between uses). Chrome does not let other programs fill in forms in your everyday browser, which is why the extension is needed for the tab.
   - When a security check comes before the login form, it waits and fills the form in once it appears. A captcha on the form is left to you: the username and password are filled in, you complete the captcha and press **Log In**. Two-factor codes are yours too.
 
+### Security check
+
+**Security check** (per site in its **Security** tab, or for every selected site from the toolbar) runs a read-only scan on the site - nothing is changed - and lists warning signs by severity:
+
+- WordPress core files that differ from wordpress.org's checksums, files in `wp-admin` / `wp-includes` that are not part of WordPress, and extra PHP files in the site root.
+- wordpress.org plugins whose files differ from the published version, or carry PHP files the published version does not have.
+- Active plugins whose files are missing (the "Plugin file does not exist" deactivation) and recently deactivated plugins.
+- PHP files in uploads, and code matching known malware patterns (decoded `eval`, web shells, commands run from request data, obfuscation) in themes, plugins, mu-plugins and drop-ins.
+- Administrators created in the last 30 days, `.htaccess` redirects to other domains, suspicious lines in `wp-config.php` (only the matching line is shown, never the credentials), scripts in posts and settings, and a site address pointing elsewhere.
+
+Findings are leads, not proof. **Open in VS Code with Claude** writes them to `SECURITY-REPORT.md` in the site's workspace and opens it, with instructions for Claude to investigate each finding with the connector's MCP tools (including `wp_security_scan` to re-run the check), explain what it finds and propose a cleanup plan - and to change nothing until you agree to it.
+
 ### Agencies
 
 If you maintain sites for more than one agency, add each under **Settings → Agencies** and assign sites to them (per site in its Form test tab, or several at once with **Agency…**). The list is then grouped by agency, with a filter and a select-all / "Update everything for …" per group.
@@ -670,6 +682,15 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 ---
 
 ## Changelog
+
+### 1.8.2 — Security check
+
+**Added**
+
+- **`GET /security/scan`** - a read-only security check: WordPress core and wordpress.org plugin files against their published checksums, PHP files that do not belong (in `wp-admin` / `wp-includes`, uploads, the site root), known malware patterns in themes, plugins, mu-plugins and drop-ins, active plugins whose files are missing, recently changed PHP files, administrators (new ones flagged), `.htaccess` redirects, suspicious lines in `wp-config.php`, scripts in posts and settings, and a changed site address. MCP tool `wp_security_scan`.
+- **Dashboard - Security**: a Security check button per site and for selected sites, findings in a Security tab, a "security" tag on sites with high findings, and **Open in VS Code with Claude**, which writes `SECURITY-REPORT.md` into the site's workspace (creating the workspace if needed) with instructions to investigate read-only and change nothing without your agreement.
+
+**Verified** on a local WordPress 7.1.3 with planted, inert stand-ins for each warning sign: a missing active plugin, a modified core file, an extra file in `wp-includes`, a modified wordpress.org plugin file, PHP in uploads, malware patterns in a theme, a spam redirect in `.htaccess`, a new administrator and a script injected into a post were all reported; the connector's own file (which names the patterns) is not.
 
 ### 1.8.1 — One-click Mac setup, Asana, Log in
 

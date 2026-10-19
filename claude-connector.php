@@ -3,7 +3,7 @@
  * Plugin Name:  Claude Connector
  * Plugin URI:   https://github.com/wisnuub/claude-connector
  * Description:  Secure REST API bridge for Claude AI - ACF sync, cache purge, file management, database queries, post CRUD, plugin/theme control, maintenance updates with rollback, and more.
- * Version:      1.8.1
+ * Version:      1.8.2
  * Author:       Wisnuub
  * Author URI:   https://wisnuub.github.io
  * License:      GPL-2.0-or-later
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'CLAUDE_CONNECTOR_VERSION', '1.8.1' );
+define( 'CLAUDE_CONNECTOR_VERSION', '1.8.2' );
 define( 'CLAUDE_CONNECTOR_NS',      'claude/v1' );
 define( 'CLAUDE_CONNECTOR_GH_REPO', 'wisnuub/claude-connector' );
 
@@ -526,6 +526,7 @@ function claude_settings_page() {
         array( 'GET',    '/maintenance/health',       'Load the dashboard and homepage and report any fatal error' ),
         array( 'GET',    '/maintenance/forms',        'Pages with a contact form (Divi, CF7, Gravity, WPForms, Elementor...)' ),
         array( 'POST',   '/maintenance/test-email',   'Send a wp_mail() test and report the mailer in use' ),
+        array( 'GET',    '/security/scan',            'Read-only security check: core/plugin checksums, PHP in uploads, malware patterns, new admins, redirects' ),
         array( 'GET',    '/themes',                   'List installed themes' ),
         array( 'POST',   '/themes',                   'Switch active theme' ),
         array( 'GET',    '/files?path=',              'List files in a wp-content subdirectory' ),
@@ -908,6 +909,7 @@ add_action( 'rest_api_init', function () {
     register_rest_route( $ns, '/maintenance/health',     array( 'methods' => 'GET',  'callback' => 'claude_maint_health',     'permission_callback' => $a ) );
     register_rest_route( $ns, '/maintenance/forms',      array( 'methods' => 'GET',  'callback' => 'claude_maint_forms',      'permission_callback' => $a ) );
     register_rest_route( $ns, '/maintenance/test-email', array( 'methods' => 'POST', 'callback' => 'claude_maint_test_email', 'permission_callback' => $a ) );
+    register_rest_route( $ns, '/security/scan',          array( 'methods' => 'GET',  'callback' => 'claude_security_scan',    'permission_callback' => $a ) );
 } );
 
 // Log every request to our namespace after dispatch (only when logging is enabled).
@@ -3606,6 +3608,297 @@ function claude_maint_test_email( $req ) {
     remove_action( 'wp_mail_failed', $catch );
 
     return new WP_REST_Response( array( 'sent' => (bool) $sent, 'to' => $to, 'ref' => $ref, 'error' => $error, 'mailer' => claude_maint_mailer() ) );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+//  Security check  (read-only - reports, never changes anything)
+//
+//  Looks for the usual signs of a compromised site: WordPress core and
+//  wordpress.org plugin files that differ from their published checksums,
+//  files that do not belong in core, PHP in uploads, known malware patterns,
+//  active plugins whose files have gone, new administrators, redirects in
+//  .htaccess and scripts injected into content. Findings are leads for a
+//  person (or Claude) to look into - not proof, and nothing is cleaned here.
+// ──────────────────────────────────────────────────────────────────────────────
+
+/** Patterns that are rare in honest code and common in malware. */
+function claude_security_patterns() {
+    return array(
+        'eval_decode'   => array( 'eval() of decoded data', '/\beval\s*\(\s*(?:base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13|strrev|rawurldecode|hex2bin)\s*\(/i' ),
+        'decode_blob'   => array( 'large encoded blob decoded at runtime', '/(?:base64_decode|gzinflate|gzuncompress|str_rot13)\s*\(\s*[\'"][A-Za-z0-9+\/=\\\\]{300,}/' ),
+        'request_exec'  => array( 'runs code or commands from the request', '/\b(?:eval|assert|system|shell_exec|passthru|exec|popen|proc_open)\s*\(\s*(?:@?\$_(?:POST|GET|REQUEST|COOKIE|SERVER)|stripslashes\s*\(\s*\$_)/i' ),
+        'hex_obfusc'    => array( 'heavily hex-escaped code', '/(?:\\\\x[0-9a-f]{2}){40,}/i' ),
+        'preg_e'        => array( 'preg_replace with the /e modifier', '/preg_replace\s*\(\s*[\'"][^\'"]*\/[a-z]*e[a-z]*[\'"]\s*,/i' ),
+        'create_func'   => array( 'create_function() (common in old backdoors)', '/\bcreate_function\s*\(/i' ),
+        'shell_names'   => array( 'known web-shell names', '/\b(?:FilesMan|WSOsetcookie|b374k|r57shell|c99shell|Shell_Wso|IndoXploit|alfa-shell|wp_vcd)\b/i' ),
+        'include_image' => array( 'includes an image file as PHP', '/\b(?:include|require)(?:_once)?\s*\(?\s*[\'"][^\'"]+\.(?:ico|png|jpe?g|gif|svg)[\'"]/i' ),
+        'upload_shell'  => array( 'saves uploaded files without checks', '/move_uploaded_file\s*\(\s*\$_FILES/i' ),
+        'var_func'      => array( 'calls a function named by request data', '/\$_(?:POST|GET|REQUEST|COOKIE)\s*\[[^\]]+\]\s*\(/i' ),
+    );
+}
+
+/**
+ * Scans one file's content against the patterns. Returns the first few hits
+ * with their line numbers and a short snippet.
+ */
+function claude_security_scan_file( $path, $patterns ) {
+    $size = @filesize( $path ); // phpcs:ignore
+    if ( ! $size || $size > 2 * MB_IN_BYTES ) return array();
+    $code = @file_get_contents( $path ); // phpcs:ignore
+    if ( $code === false ) return array();
+    $hits = array();
+    foreach ( $patterns as $id => list( $label, $re ) ) {
+        if ( preg_match( $re, $code, $m, PREG_OFFSET_CAPTURE ) ) {
+            $line    = substr_count( substr( $code, 0, $m[0][1] ), "\n" ) + 1;
+            $snippet = substr( $code, max( 0, $m[0][1] - 40 ), 160 );
+            $hits[]  = array( 'pattern' => $id, 'label' => $label, 'line' => $line, 'snippet' => preg_replace( '/\s+/', ' ', $snippet ) );
+        }
+        if ( count( $hits ) >= 3 ) break;
+    }
+    return $hits;
+}
+
+/** PHP-ish files under a folder, skipping dependency folders. Bounded. */
+function claude_security_php_files( $dir, $limit, $deadline ) {
+    $out = array();
+    if ( ! is_dir( $dir ) ) return $out;
+    try {
+        $it = new RecursiveIteratorIterator(
+            new RecursiveCallbackFilterIterator(
+                new RecursiveDirectoryIterator( $dir, FilesystemIterator::SKIP_DOTS ),
+                function ( $f ) {
+                    return ! ( $f->isDir() && in_array( $f->getFilename(), array( 'node_modules', '.git', 'cache', 'claude-rollback', 'upgrade-temp-backup' ), true ) );
+                }
+            )
+        );
+        foreach ( $it as $f ) {
+            if ( count( $out ) >= $limit || microtime( true ) > $deadline ) break;
+            if ( $f->isFile() && preg_match( '/\.(?:php\d?|phtml|phar|inc)$/i', $f->getFilename() ) ) $out[] = $f->getPathname();
+        }
+    } catch ( \Throwable $e ) {}
+    return $out;
+}
+
+function claude_security_rel( $path ) {
+    return ltrim( str_replace( wp_normalize_path( ABSPATH ), '', wp_normalize_path( $path ) ), '/' );
+}
+
+function claude_security_scan() {
+    require_once ABSPATH . 'wp-admin/includes/admin.php';
+    @set_time_limit( 180 ); // phpcs:ignore
+    $started  = microtime( true );
+    $deadline = $started + 90;
+    $findings = array();
+    $add      = function ( $severity, $category, $title, $items = array(), $note = null ) use ( &$findings ) {
+        $findings[] = array( 'severity' => $severity, 'category' => $category, 'title' => $title, 'note' => $note, 'count' => count( $items ), 'items' => array_slice( $items, 0, 40 ) );
+    };
+    $patterns   = claude_security_patterns();
+    $clean      = array(); // files that match published checksums: not pattern-scanned
+    $wp_version = get_bloginfo( 'version' );
+
+    // 1. Active plugins whose files are gone - WordPress then deactivates them with
+    //    "Plugin file does not exist". Also what was recently deactivated.
+    $missing = array();
+    foreach ( (array) get_option( 'active_plugins', array() ) as $p ) {
+        if ( ! file_exists( WP_PLUGIN_DIR . '/' . $p ) ) $missing[] = array( 'path' => "wp-content/plugins/{$p}" );
+    }
+    if ( $missing ) $add( 'high', 'plugins', 'Active plugins whose files are missing', $missing, 'Deleted outside WordPress - by malware, a malware cleaner, or a failed update.' );
+    $recent = array();
+    foreach ( (array) get_option( 'recently_activated', array() ) as $p => $when ) {
+        $recent[] = array( 'path' => "wp-content/plugins/{$p}", 'detail' => 'deactivated ' . wp_date( 'Y-m-d H:i', (int) $when ) . ( file_exists( WP_PLUGIN_DIR . '/' . $p ) ? '' : ' - files missing' ) );
+    }
+    if ( $recent ) $add( 'info', 'plugins', 'Recently deactivated plugins', $recent );
+
+    // 2. WordPress core against wordpress.org's checksums.
+    $sums = get_core_checksums( $wp_version, get_locale() ) ?: get_core_checksums( $wp_version, 'en_US' );
+    if ( is_array( $sums ) && $sums ) {
+        $modified = $missing_core = array();
+        foreach ( $sums as $file => $md5 ) {
+            if ( strpos( $file, 'wp-content/' ) === 0 ) continue; // bundled themes/plugins may be removed
+            $abs = ABSPATH . $file;
+            if ( ! file_exists( $abs ) ) { $missing_core[] = array( 'path' => $file ); continue; }
+            if ( md5_file( $abs ) !== $md5 ) $modified[] = array( 'path' => $file );
+            elseif ( preg_match( '/\.php$/', $file ) ) $clean[ wp_normalize_path( $abs ) ] = true;
+        }
+        if ( $modified ) $add( 'high', 'core', 'WordPress core files that differ from wordpress.org', $modified, 'Core files are never edited by plugins - a changed one usually means an injection. Restore them by reinstalling the same WordPress version.' );
+        if ( $missing_core ) $add( 'medium', 'core', 'WordPress core files that are missing', $missing_core );
+        // Files in wp-admin / wp-includes that are not part of WordPress.
+        $known = array_flip( array_map( 'wp_normalize_path', array_keys( $sums ) ) );
+        $extra = array();
+        foreach ( array( 'wp-admin', 'wp-includes' ) as $dir ) {
+            foreach ( claude_security_php_files( ABSPATH . $dir, 20000, $deadline ) as $f ) {
+                $rel = claude_security_rel( $f );
+                if ( ! isset( $known[ $rel ] ) ) $extra[] = array( 'path' => $rel, 'detail' => 'modified ' . wp_date( 'Y-m-d H:i', filemtime( $f ) ) );
+            }
+        }
+        if ( $extra ) $add( 'high', 'core', 'PHP files in wp-admin / wp-includes that are not part of WordPress', $extra, 'A favourite hiding place for backdoors.' );
+        // Unexpected PHP files next to wp-config.php.
+        $root = array();
+        foreach ( (array) glob( ABSPATH . '*.php' ) as $f ) {
+            $rel = claude_security_rel( $f );
+            if ( ! isset( $known[ $rel ] ) && ! in_array( $rel, array( 'wp-config.php', 'wp-config-sample.php' ), true ) ) $root[] = array( 'path' => $rel, 'detail' => 'modified ' . wp_date( 'Y-m-d H:i', filemtime( $f ) ) );
+        }
+        if ( $root ) $add( 'medium', 'core', 'Extra PHP files in the site root', $root, 'Some are legitimate (host or cache tools); unknown ones are worth opening.' );
+    } else {
+        $add( 'info', 'core', 'Could not fetch WordPress checksums - core files were not compared', array(), "WordPress {$wp_version} / " . get_locale() );
+    }
+
+    // 3. wordpress.org plugins against their published checksums.
+    $updates  = get_site_transient( 'update_plugins' );
+    $modified = $unknown = array();
+    $checked  = $asked = 0;
+    foreach ( get_plugins() as $file => $data ) {
+        if ( microtime( true ) > $deadline - 30 ) break;
+        if ( dirname( $file ) === '.' ) continue;
+        $info = $updates->response[ $file ] ?? $updates->no_update[ $file ] ?? null;
+        // Known not to be from wordpress.org (premium, custom): skip. Unknown (empty
+        // update cache): ask - the checksum service answers 404 for anything else.
+        if ( $info && ! empty( $info->id ) && strpos( (string) $info->id, 'w.org/plugins/' ) !== 0 ) continue;
+        if ( ++$asked > 60 ) break;
+        $slug = dirname( $file );
+        $r    = wp_remote_get( "https://downloads.wordpress.org/plugin-checksums/{$slug}/{$data['Version']}.json", array( 'timeout' => 8 ) );
+        if ( is_wp_error( $r ) || wp_remote_retrieve_response_code( $r ) !== 200 ) continue;
+        $files = json_decode( wp_remote_retrieve_body( $r ), true )['files'] ?? null;
+        if ( ! is_array( $files ) ) continue;
+        $checked++;
+        $base = WP_PLUGIN_DIR . '/' . $slug . '/';
+        foreach ( $files as $rel => $h ) {
+            $abs = $base . $rel;
+            if ( ! file_exists( $abs ) ) continue;
+            $md5s = (array) ( $h['md5'] ?? array() );
+            if ( ! in_array( md5_file( $abs ), $md5s, true ) ) { if ( preg_match( '/\.php$/i', $rel ) ) $modified[] = array( 'path' => "wp-content/plugins/{$slug}/{$rel}" ); }
+            else $clean[ wp_normalize_path( $abs ) ] = true;
+        }
+        foreach ( claude_security_php_files( $base, 5000, $deadline ) as $f ) {
+            $rel = substr( wp_normalize_path( $f ), strlen( wp_normalize_path( $base ) ) );
+            if ( ! isset( $files[ $rel ] ) ) $unknown[] = array( 'path' => "wp-content/plugins/{$slug}/{$rel}" );
+        }
+    }
+    if ( $modified ) $add( 'high', 'plugins', 'wordpress.org plugin files that differ from the published version', $modified );
+    if ( $unknown ) $add( 'medium', 'plugins', 'PHP files inside wordpress.org plugins that the published version does not have', $unknown, 'Some plugins write cache or config PHP files; anything else is suspicious.' );
+
+    // 4. PHP in uploads - never needed there.
+    $uploads = wp_upload_dir()['basedir'];
+    $in_up   = array();
+    foreach ( claude_security_php_files( $uploads, 500, $deadline ) as $f ) {
+        if ( basename( $f ) === 'index.php' && filesize( $f ) < 100 ) continue; // "silence is golden"
+        $in_up[] = array( 'path' => claude_security_rel( $f ), 'detail' => 'modified ' . wp_date( 'Y-m-d H:i', filemtime( $f ) ), 'hits' => claude_security_scan_file( $f, $patterns ) );
+    }
+    if ( $in_up ) $add( 'high', 'files', 'PHP files in the uploads folder', $in_up, 'Uploads should only hold media; PHP there is a classic backdoor.' );
+
+    // 5. Known malware patterns in themes, plugins, mu-plugins and drop-ins.
+    $hits    = array();
+    $scanned = 0;
+    $self    = realpath( __FILE__ );
+    $roots   = array( get_theme_root(), WP_PLUGIN_DIR, defined( 'WPMU_PLUGIN_DIR' ) ? WPMU_PLUGIN_DIR : WP_CONTENT_DIR . '/mu-plugins' );
+    foreach ( $roots as $dir ) {
+        foreach ( claude_security_php_files( $dir, 40000, $deadline ) as $f ) {
+            if ( isset( $clean[ wp_normalize_path( $f ) ] ) ) continue;
+            if ( realpath( $f ) === $self ) continue; // this file names the patterns
+            $scanned++;
+            $h = claude_security_scan_file( $f, $patterns );
+            if ( $h ) $hits[] = array( 'path' => claude_security_rel( $f ), 'detail' => 'modified ' . wp_date( 'Y-m-d H:i', filemtime( $f ) ), 'hits' => $h );
+        }
+    }
+    foreach ( (array) glob( WP_CONTENT_DIR . '/*.php' ) as $f ) {
+        $scanned++;
+        $h = claude_security_scan_file( $f, $patterns );
+        if ( $h ) $hits[] = array( 'path' => claude_security_rel( $f ), 'hits' => $h );
+    }
+    if ( $hits ) $add( 'high', 'code', 'Code matching known malware patterns', $hits, 'Some premium plugins obfuscate their code legitimately - check each file before acting.' );
+
+    // 6. What runs before everything else: mu-plugins and drop-ins.
+    $early = array();
+    foreach ( (array) glob( ( defined( 'WPMU_PLUGIN_DIR' ) ? WPMU_PLUGIN_DIR : WP_CONTENT_DIR . '/mu-plugins' ) . '/*.php' ) as $f ) {
+        $early[] = array( 'path' => claude_security_rel( $f ), 'detail' => 'must-use plugin, modified ' . wp_date( 'Y-m-d H:i', filemtime( $f ) ) );
+    }
+    $dropins = array_keys( _get_dropins() );
+    foreach ( (array) glob( WP_CONTENT_DIR . '/*.php' ) as $f ) {
+        $name = basename( $f );
+        if ( $name === 'index.php' ) continue;
+        $early[] = array( 'path' => claude_security_rel( $f ), 'detail' => in_array( $name, $dropins, true ) ? 'WordPress drop-in' : 'not a known WordPress drop-in' );
+    }
+    if ( $early ) $add( 'info', 'files', 'Code that loads before plugins (mu-plugins and drop-ins)', $early, 'Usually from hosts and cache plugins; anything you do not recognise deserves a look.' );
+
+    // 7. PHP files changed in the last 7 days outside core.
+    $week   = time() - 7 * DAY_IN_SECONDS;
+    $recent = array();
+    foreach ( array_merge( $roots, array( $uploads ) ) as $dir ) {
+        foreach ( claude_security_php_files( $dir, 40000, $deadline ) as $f ) {
+            $t = @filemtime( $f ); // phpcs:ignore
+            if ( $t && $t > $week ) $recent[] = array( 'path' => claude_security_rel( $f ), 'detail' => wp_date( 'Y-m-d H:i', $t ), 't' => $t );
+        }
+    }
+    usort( $recent, function ( $a, $b ) { return $b['t'] - $a['t']; } );
+    if ( $recent ) $add( 'low', 'files', 'PHP files changed in the last 7 days', array_map( function ( $r ) { unset( $r['t'] ); return $r; }, $recent ), 'Updates change files too - compare against what was updated.' );
+
+    // 8. Administrators, newest first.
+    $admins = array();
+    foreach ( get_users( array( 'role' => 'administrator', 'orderby' => 'registered', 'order' => 'DESC', 'number' => 50 ) ) as $u ) {
+        $admins[] = array( 'path' => $u->user_login, 'detail' => $u->user_email . ' · registered ' . wp_date( 'Y-m-d', strtotime( $u->user_registered ) ), 'new' => strtotime( $u->user_registered ) > time() - 30 * DAY_IN_SECONDS );
+    }
+    $new_admins = array_values( array_filter( $admins, function ( $a ) { return $a['new']; } ) );
+    if ( $new_admins ) $add( 'medium', 'users', 'Administrators created in the last 30 days', $new_admins, 'Attackers often add an admin account to get back in.' );
+    $add( 'info', 'users', 'All administrator accounts', $admins );
+
+    // 9. .htaccess redirects and PHP settings that pull in other files.
+    $ht = array();
+    foreach ( array( ABSPATH . '.htaccess', $uploads . '/.htaccess', WP_CONTENT_DIR . '/.htaccess' ) as $f ) {
+        if ( ! is_readable( $f ) ) continue;
+        foreach ( preg_split( '/\R/', (string) file_get_contents( $f ) ) as $i => $line ) {
+            $host = preg_quote( (string) parse_url( home_url(), PHP_URL_HOST ), '/' );
+            if ( preg_match( '/auto_(?:prepend|append)_file|php_value\s+(?:auto|include)/i', $line )
+                || ( preg_match( '/Rewrite(?:Rule|Cond).*https?:\/\//i', $line ) && ! preg_match( "/{$host}/i", $line ) ) ) {
+                $ht[] = array( 'path' => claude_security_rel( $f ), 'detail' => 'line ' . ( $i + 1 ) . ': ' . trim( substr( $line, 0, 200 ) ) );
+            }
+        }
+    }
+    if ( $ht ) $add( 'high', 'config', '.htaccess rules that redirect elsewhere or load extra PHP', $ht, 'Spam redirects (often only for search engines or mobile visitors) live here.' );
+
+    // 10. wp-config.php: code that does not belong in a config file. Only matching
+    //     lines are reported - never the database password or keys.
+    $cfg = file_exists( ABSPATH . 'wp-config.php' ) ? ABSPATH . 'wp-config.php' : dirname( ABSPATH ) . '/wp-config.php';
+    if ( is_readable( $cfg ) ) {
+        $cfg_hits = array();
+        foreach ( preg_split( '/\R/', (string) file_get_contents( $cfg ) ) as $i => $line ) {
+            if ( preg_match( '/\b(?:eval|base64_decode|gzinflate|str_rot13)\s*\(|@include|include\s*\(?\s*[\'"][^\'"]+\.(?:ico|png|jpe?g|txt)/i', $line ) ) {
+                $cfg_hits[] = array( 'path' => 'wp-config.php', 'detail' => 'line ' . ( $i + 1 ) . ': ' . trim( substr( $line, 0, 160 ) ) );
+            }
+        }
+        if ( $cfg_hits ) $add( 'high', 'config', 'Suspicious code in wp-config.php', $cfg_hits );
+    }
+
+    // 11. Scripts injected into content and settings.
+    global $wpdb;
+    $home_host = (string) parse_url( home_url(), PHP_URL_HOST );
+    $posts     = $wpdb->get_results( "SELECT ID, post_title, post_type FROM {$wpdb->posts} WHERE post_status IN ('publish','draft','private') AND (post_content LIKE '%<script%src=%' OR post_content LIKE '%eval(%' OR post_content LIKE '%String.fromCharCode%' OR post_content LIKE '%document.write(unescape%') LIMIT 40" ); // phpcs:ignore
+    $p_items   = array();
+    foreach ( (array) $posts as $p ) $p_items[] = array( 'path' => "{$p->post_type} #{$p->ID}", 'detail' => $p->post_title );
+    if ( $p_items ) $add( 'medium', 'content', 'Posts and pages containing scripts', $p_items, "Embeds (forms, maps, analytics) are normal; scripts from unknown domains or obfuscated ones are not. Site host: {$home_host}." );
+    $opts   = $wpdb->get_results( "SELECT option_name FROM {$wpdb->options} WHERE option_name NOT LIKE '\\_transient%' AND option_name NOT LIKE '\\_site\\_transient%' AND (option_value LIKE '%<script%' OR option_value LIKE '%eval(%' OR option_value LIKE '%base64_decode(%') LIMIT 40" ); // phpcs:ignore
+    $o_items = array();
+    foreach ( (array) $opts as $o ) $o_items[] = array( 'path' => $o->option_name );
+    if ( $o_items ) $add( 'medium', 'content', 'Settings (wp_options) containing scripts or code', $o_items, 'Header/footer script and analytics plugins store scripts here legitimately.' );
+
+    // 12. Site address, in case it was changed to send visitors elsewhere.
+    $siteurl = get_option( 'siteurl' );
+    $home    = get_option( 'home' );
+    if ( parse_url( $siteurl, PHP_URL_HOST ) !== parse_url( $home, PHP_URL_HOST ) ) {
+        $add( 'high', 'config', 'Site address and WordPress address point to different domains', array( array( 'path' => 'siteurl', 'detail' => $siteurl ), array( 'path' => 'home', 'detail' => $home ) ) );
+    }
+
+    $order = array( 'high' => 0, 'medium' => 1, 'low' => 2, 'info' => 3 );
+    usort( $findings, function ( $a, $b ) use ( $order ) { return $order[ $a['severity'] ] - $order[ $b['severity'] ]; } );
+    $count = function ( $sev ) use ( $findings ) { return count( array_filter( $findings, function ( $f ) use ( $sev ) { return $f['severity'] === $sev; } ) ); };
+
+    return new WP_REST_Response( array(
+        'scanned_at' => gmdate( 'c' ),
+        'site'       => home_url( '/' ),
+        'wp_version' => $wp_version,
+        'summary'    => array( 'high' => $count( 'high' ), 'medium' => $count( 'medium' ), 'low' => $count( 'low' ) ),
+        'stats'      => array( 'php_files_pattern_scanned' => $scanned, 'wporg_plugins_verified' => $checked, 'seconds' => round( microtime( true ) - $started, 1 ), 'stopped_early' => microtime( true ) > $deadline ),
+        'findings'   => $findings,
+    ) );
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

@@ -310,3 +310,11 @@ table.tasks td { vertical-align: top; }
 table.tasks tr.logins-row td { background: var(--panel-2); }
 table.logins code { font-size: 12.5px; }
 table.logins td .btn.sm { height: 22px; padding: 0 6px; margin-left: 2px; }
+
+/* ── Security ─────────────────────────────────────────────────────── */
+details.sec summary { cursor: pointer; }
+details.sec.bad { border-color: color-mix(in srgb, var(--bad) 35%, var(--line)); }
+.sec-items { margin: 6px 0 0; padding-left: 18px; font-size: 13px; }
+.sec-items li { margin: 3px 0; overflow-wrap: anywhere; }
+.sec-hit { color: var(--muted); font-size: 12px; margin: 2px 0 0 8px; }
+.sec-hit code { color: var(--bad); }

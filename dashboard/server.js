@@ -19,6 +19,7 @@ import { summarize, LOG_DIR } from './lib/log.js';
 import { previewConnect, confirmConnect } from './lib/connect.js';
 import * as asana from './lib/asana.js';
 import { logIn, closeLoginBrowser } from './lib/login.js';
+import { openForClaude } from './lib/security.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, 'public');
@@ -61,6 +62,7 @@ function publicSite(s) {
     health: st.health || null, lastRun: st.lastRun || null, formTest: st.formTest || null,
     forms: st.forms || null, formUrl: st.formUrl || null, mailer: st.mailer || st.overview?.mailer || null,
     agencyId: st.agencyId || null,
+    security: st.security || null,
     formTestQueued: st.formTestQueued || null,
     held: st.held || [],
     asana: st.asana || null,
@@ -252,6 +254,14 @@ async function api(req, res, url) {
     store.removeSite(mm[1]);
     return send(res, 200, { ok: true });
   }
+  if ((mm = p.match(/^\/api\/sites\/([\w-]+)\/claude-review$/))) {
+    // Last security check → SECURITY-REPORT.md in the site's workspace, opened in VS Code.
+    const site = store.getSite(mm[1]);
+    if (!site) return send(res, 404, { message: 'Unknown site' });
+    const scan = store.siteState(site.id).security;
+    if (!scan) return send(res, 400, { message: 'Run the security check first.' });
+    return send(res, 200, await openForClaude(site, scan));
+  }
   if ((mm = p.match(/^\/api\/sites\/([\w-]+)\/forms$/))) {
     const site = store.getSite(mm[1]);
     if (!site) return send(res, 404, { message: 'Unknown site' });
@@ -271,6 +281,7 @@ async function api(req, res, url) {
       case 'formtest': return send(res, 200, jobs.startFormTest({ sites, url: body.url }));
       case 'queue-form': jobs.queueFormTest({ sites, queued: body.queued !== false }); return send(res, 200, { ok: true });
       case 'mailtest': return send(res, 200, jobs.startMailTest({ sites }));
+      case 'security': return send(res, 200, jobs.startSecurityScan({ sites }));
       default: return send(res, 400, { message: `Unknown job type ${body.type}` });
     }
   }

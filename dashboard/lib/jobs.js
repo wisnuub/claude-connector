@@ -476,6 +476,28 @@ export function startFormTest({ sites, url, title }) {
   });
 }
 
+/** Read-only security check; results go to the site's Security tab. */
+export function startSecurityScan({ sites }) {
+  return startJob({ type: 'security', title: `Security check${sites.length > 1 ? ` on ${sites.length} sites` : ''}`, sites }, async (ctx) => {
+    const st = ctx.step('Running the security check (core and plugin checksums, malware patterns, uploads, admins)…');
+    let scan;
+    try {
+      scan = await ctx.api('GET', '/security/scan', { timeout: 240_000 });
+    } catch (e) {
+      const i = errInfo(e);
+      st.set('failed', i.code === 'rest_no_route' ? 'Security check needs Claude Connector 1.8.2 or newer on this site' : `Security check: ${i.message}`, null, { kind: 'security', result: 'failed' });
+      return null;
+    }
+    patchSiteState(ctx.site.id, { security: { ...scan, at: new Date().toISOString() } });
+    const s = scan.summary || {};
+    const top = (scan.findings || []).filter(f => f.severity === 'high').map(f => `${f.title} (${f.count})`);
+    st.set(s.high ? 'failed' : s.medium ? 'warning' : 'ok',
+      s.high || s.medium ? `Security check: ${s.high} high, ${s.medium} medium` : 'Security check: no warning signs found',
+      top.join(' · ') || null, { kind: 'security', result: s.high ? 'failed' : 'ok' });
+    return s.high || s.medium ? `${s.high} high · ${s.medium} medium` : 'clean';
+  });
+}
+
 export function startMailTest({ sites }) {
   return startJob({ type: 'mailtest', title: 'Mail test', sites }, async (ctx) => {
     const ref = newRef();
