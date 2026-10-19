@@ -103,7 +103,7 @@ Needs Node.js 18+ and Google Chrome or Microsoft Edge (for the form test). Every
 
 ### Where the sites come from
 
-Nothing to configure for sites set up with the [one-click installer](#connecting-claude-code-one-click-setup): the dashboard reads every `~/claude-sites/<site>/.mcp.json` (URL, key and connection mode) and watches the folder, so a newly installed site appears within seconds - no reload - marked **New**. It also reads `mcp-server/sites.json`, and you can **Add site** by hand. **Hide** removes a site from the dashboard without touching its folder. Nothing is sent to a site until you press a button.
+Nothing to configure for sites set up with the [one-click installer](#connecting-claude-code-one-click-setup): the dashboard reads every `~/claude-sites/<site>/.mcp.json` (URL, key and connection mode) and watches the folder, so a newly installed site appears within seconds - no reload - marked **New**. It also reads `mcp-server/sites.json`, and you can **Add site** by hand. Each site's **WordPress & server** tab has **Change URL…** (e.g. when a site moves off a `/newsite` staging path to its live address - it rewrites the address in the site's `~/claude-sites` workspace, keeping its history), **Hide from dashboard** (leaves the folder in place; show it again from Settings) and **Delete site** (removes the workspace folder too). **Hide** removes a site from the dashboard without touching its folder. Nothing is sent to a site until you press a button.
 
 ### What it does
 

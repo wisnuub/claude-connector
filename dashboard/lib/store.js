@@ -202,12 +202,25 @@ export function addSite({ name, url, key, mode = 'rest', relayUrl = '', relayKey
 }
 
 /** Hand-added sites are removed; discovered ones are hidden (their config lives elsewhere). */
-export function removeSite(id) {
+/**
+ * Remove a site from the dashboard. By default a discovered site is only hidden
+ * (its ~/claude-sites folder or sites.json entry is left alone); hard:true also
+ * deletes that workspace folder / entry, so the site is gone for good.
+ */
+export function removeSite(id, { hard = false } = {}) {
   const site = getSite(id);
   if (!site) return;
   const m = manualFile();
-  if (site.source === 'manual') m.manual = m.manual.filter(s => urlKey(s.url) !== urlKey(site.url));
-  else if (!m.hidden.includes(urlKey(site.url))) m.hidden.push(urlKey(site.url));
+  if (site.source === 'manual') {
+    m.manual = m.manual.filter(s => urlKey(s.url) !== urlKey(site.url));
+  } else if (hard && site.source === 'claude-sites') {
+    try { fs.rmSync(path.join(SITES_DIR, site.name), { recursive: true, force: true }); } catch {}
+  } else if (hard && site.source === 'sites.json') {
+    const list = readJson(MCP_SITES_FILE, []);
+    writeJson(MCP_SITES_FILE, (Array.isArray(list) ? list : []).filter(x => urlKey(x.url) !== urlKey(site.url)));
+  } else if (!m.hidden.includes(urlKey(site.url))) {
+    m.hidden.push(urlKey(site.url));
+  }
   writeJson(F.sites, m);
 }
 
@@ -215,6 +228,43 @@ export function unhideAll() {
   const m = manualFile();
   m.hidden = [];
   writeJson(F.sites, m);
+}
+
+/**
+ * Changes a site's address, in whichever source defines it (a ~/claude-sites
+ * workspace, mcp-server/sites.json, or a hand-added site). The site keeps its id
+ * (and so its history and settings), since ids come from the name/folder.
+ */
+export function setSiteUrl(id, url) {
+  const site = getSite(id);
+  if (!site) throw new Error('Unknown site.');
+  url = normUrl(url);
+  if (!/^https?:\/\//.test(url)) url = `https://${url}`;
+  try { new URL(url); } catch { throw new Error('That is not a valid address.'); }
+  const clash = listSites({ includeHidden: true }).find(s => s.id !== id && urlKey(s.url) === urlKey(url));
+  if (clash) throw new Error(`Another site (${clash.name}) already uses ${url}.`);
+
+  if (site.source === 'claude-sites') {
+    const cfg = path.join(SITES_DIR, site.name, '.mcp.json');
+    const data = readJson(cfg, null);
+    const env = data?.mcpServers?.['claude-connector']?.env;
+    if (!env) throw new Error(`Could not read ${cfg}.`);
+    env.WP_URL = url;
+    writeJson(cfg, data);
+  } else if (site.source === 'sites.json') {
+    const list = readJson(MCP_SITES_FILE, []);
+    const entry = (Array.isArray(list) ? list : []).find(x => urlKey(x.url) === urlKey(site.url));
+    if (!entry) throw new Error('Could not find the site in sites.json.');
+    entry.url = url;
+    writeJson(MCP_SITES_FILE, list);
+  } else {
+    const m = manualFile();
+    const entry = m.manual.find(x => urlKey(x.url) === urlKey(site.url));
+    if (!entry) throw new Error('Could not find the site to edit.');
+    entry.url = url;
+    writeJson(F.sites, m);
+  }
+  return getSite(id);
 }
 
 // ── Cached state per site ────────────────────────────────────────────────────

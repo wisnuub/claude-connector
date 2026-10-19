@@ -207,6 +207,16 @@ async function api(req, res, url) {
     return send(res, 200, { ok: true });
   }
   if (p === '/api/sites/unhide') { store.unhideAll(); return send(res, 200, { ok: true }); }
+  let um;
+  if ((um = p.match(/^\/api\/sites\/([\w-]+)\/url$/)) && m === 'POST') {
+    try {
+      const site = store.setSiteUrl(um[1], String(body.url || ''));
+      // The address changed, so the cached overview/health no longer apply - re-check next.
+      store.patchSiteState(site.id, { overview: null, overviewError: null, health: null });
+      broadcast('site', publicSite(store.getSite(site.id)));
+      return send(res, 200, { ok: true, url: site.url });
+    } catch (e) { return send(res, 400, { message: e.message }); }
+  }
   if (p === '/api/failures/dismiss') {
     store.patchMeta({ failuresAckAt: new Date().toISOString() });
     broadcast('failures', failuresInfo());
@@ -274,7 +284,7 @@ async function api(req, res, url) {
   }
   let mm;
   if ((mm = p.match(/^\/api\/sites\/([\w-]+)$/)) && m === 'DELETE') {
-    store.removeSite(mm[1]);
+    store.removeSite(mm[1], { hard: url.searchParams.get('hard') === '1' });
     return send(res, 200, { ok: true });
   }
   if ((mm = p.match(/^\/api\/sites\/([\w-]+)\/divi-pattern$/))) {

@@ -441,7 +441,11 @@ function wordpressTab(site) {
       <dl class="kv"><dt>File writes</dt><dd>${h(ov.filesystem.method)}${ov.filesystem.file_mods ? '' : ' (blocked)'}</dd>
         <dt>Connector</dt><dd>${h(ov.plugin_version)}</dd><dt>Connection</dt><dd>${h(site.mode)}</dd>
         <dt>Last check</dt><dd>${h(ago(ov.last_checked))}</dd><dt>Found in</dt><dd>${h(site.source)}</dd></dl>
-      <div class="bar" style="margin:10px 0 0"><button class="btn sm ghost danger" data-action="site-hide">${site.source === 'manual' ? 'Remove site' : 'Hide from dashboard'}</button></div></div>
+      <div class="bar" style="margin:10px 0 0">
+        <button class="btn sm" data-action="site-url">Change URL…</button>
+        ${site.source !== 'manual' ? '<button class="btn sm ghost" data-action="site-hide">Hide from dashboard</button>' : ''}
+        <button class="btn sm ghost danger" data-action="site-delete">${site.source === 'manual' ? 'Remove site' : 'Delete site'}</button>
+      </div></div>
   </div>`;
 }
 
@@ -1498,9 +1502,30 @@ document.addEventListener('click', async (ev) => {
       return;
     }
     case 'site-hide': {
-      if (!confirm(site.source === 'manual' ? `Remove ${site.name} from the dashboard?` : `Hide ${site.name}? Its ~/claude-sites folder is not touched; show it again from Settings.`)) return;
+      if (!confirm(`Hide ${site.name}? Its ~/claude-sites folder is not touched; show it again from Settings.`)) return;
       await api('DELETE', `/api/sites/${encodeURIComponent(site.id)}`).catch(e => toast(e.message));
       await load();
+      return;
+    }
+    case 'site-delete': {
+      const hard = site.source !== 'manual';
+      const msg = hard
+        ? `Delete ${site.name} from the dashboard AND delete its workspace folder (~/claude-sites/${site.name})?\n\nThis removes the connection to the site for good. The WordPress site itself is not touched. You'd set it up again with "Connect on this Mac".`
+        : `Remove ${site.name} from the dashboard?`;
+      if (!confirm(msg)) return;
+      await api('DELETE', `/api/sites/${encodeURIComponent(site.id)}${hard ? '?hard=1' : ''}`).catch(e => toast(e.message));
+      await load();
+      toast(`${site.name} removed`);
+      return;
+    }
+    case 'site-url': {
+      const url = prompt(`New address for ${site.name} (e.g. https://redsquaretraffic.com.au)`, site.url);
+      if (!url || url.trim() === site.url) return;
+      try {
+        await api('POST', `/api/sites/${encodeURIComponent(site.id)}/url`, { url: url.trim() });
+        toast('Address changed - press Check to re-scan the site');
+        await load();
+      } catch (e) { toast(e.message); }
       return;
     }
 
