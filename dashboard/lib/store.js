@@ -61,6 +61,7 @@ export const DEFAULT_SETTINGS = {
   mailTestWhenNoForm: true,
   showBrowser: false,
   notifyOnFailure: true,
+  sitesDir: '',  // master folder to scan for site workspaces; empty = default (~/claude-sites)
   // Log in: 'tab' = a new tab in your own browser through the Site Maintenance Login
   // extension (dashboard/extension), falling back to 'window' = a separate browser window.
   loginMode: 'tab',
@@ -135,12 +136,23 @@ export function slugify(s) {
 function normUrl(u) { return String(u || '').trim().replace(/\/+$/, ''); }
 function urlKey(u) { return normUrl(u).replace(/^https?:\/\//, '').replace(/^www\./, '').toLowerCase(); }
 
-export const SITES_DIR = process.env.CC_SITES_DIR || path.join(os.homedir(), 'claude-sites');
+export const DEFAULT_SITES_DIR = process.env.CC_SITES_DIR || path.join(os.homedir(), 'claude-sites');
+
+/** The master folder scanned for site workspaces; a Settings value overrides the default. */
+export function sitesDir() {
+  let d = '';
+  try { d = (readJson(F.settings, {}).sitesDir || '').trim(); } catch {}
+  if (!d) return DEFAULT_SITES_DIR;
+  if (d === '~' || d.startsWith('~/')) d = path.join(os.homedir(), d.slice(1));
+  return d;
+}
+// Back-compat name used in a few places.
+export const SITES_DIR = DEFAULT_SITES_DIR;
 export const MCP_SITES_FILE = process.env.CC_MCP_SITES || path.join(ROOT, '..', 'mcp-server', 'sites.json');
 
 // One-click installer workspaces: ~/claude-sites/<slug>/.mcp.json with WP_URL/WP_KEY env.
 function fromClaudeSites() {
-  const dir = SITES_DIR;
+  const dir = sitesDir();
   let entries = [];
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return []; }
   const out = [];
@@ -214,7 +226,7 @@ export function removeSite(id, { hard = false } = {}) {
   if (site.source === 'manual') {
     m.manual = m.manual.filter(s => urlKey(s.url) !== urlKey(site.url));
   } else if (hard && site.source === 'claude-sites') {
-    try { fs.rmSync(path.join(SITES_DIR, site.name), { recursive: true, force: true }); } catch {}
+    try { fs.rmSync(path.join(sitesDir(), site.name), { recursive: true, force: true }); } catch {}
   } else if (hard && site.source === 'sites.json') {
     const list = readJson(MCP_SITES_FILE, []);
     writeJson(MCP_SITES_FILE, (Array.isArray(list) ? list : []).filter(x => urlKey(x.url) !== urlKey(site.url)));
@@ -245,7 +257,7 @@ export function setSiteUrl(id, url) {
   if (clash) throw new Error(`Another site (${clash.name}) already uses ${url}.`);
 
   if (site.source === 'claude-sites') {
-    const cfg = path.join(SITES_DIR, site.name, '.mcp.json');
+    const cfg = path.join(sitesDir(), site.name, '.mcp.json');
     const data = readJson(cfg, null);
     const env = data?.mcpServers?.['claude-connector']?.env;
     if (!env) throw new Error(`Could not read ${cfg}.`);

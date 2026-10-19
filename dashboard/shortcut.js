@@ -54,10 +54,10 @@ if ! up; then
   exit 1
 fi
 case "$1" in
-  claude-connector://*)
-    # The dashboard picks the link up from the address and asks before connecting.
+  claude-connector://connect*)
+    # A Connect-on-this-Mac link: the dashboard asks before connecting.
     open "$URL/#connect=$(${sh(process.execPath)} -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$1")" ;;
-  *) open "$URL" ;;
+  *) open "$URL" ;;   # claude-connector://open (from the extension) or no argument: just open it
 esac
 `;
 

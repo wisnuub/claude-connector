@@ -12,10 +12,10 @@ import path from 'path';
 import crypto from 'crypto';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
-import { SITES_DIR, slugify } from './store.js';
+import { sitesDir, slugify } from './store.js';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const MCP_DIR = path.join(SITES_DIR, '.mcp-server');
+const mcpDir = () => path.join(sitesDir(), '.mcp-server');
 const REPO_RAW = 'https://raw.githubusercontent.com/wisnuub/claude-connector/main/mcp-server';
 const MCP_FILES = ['index.js', 'knowledge.js', 'screenshot.js', 'package.json'];
 const PENDING_TTL = 15 * 60_000;
@@ -52,8 +52,8 @@ export async function previewConnect(link) {
   for (const [k, v] of pending) if (v.expires < Date.now()) pending.delete(k);
   return {
     id, name: d.name, url: d.url, slug, pluginVersion: d.plugin_version || null,
-    folder: path.join(SITES_DIR, slug),
-    exists: fs.existsSync(path.join(SITES_DIR, slug, '.mcp.json')),
+    folder: path.join(sitesDir(), slug),
+    exists: fs.existsSync(path.join(sitesDir(), slug, '.mcp.json')),
   };
 }
 
@@ -61,7 +61,7 @@ export async function previewConnect(link) {
 function freeSlug(slug, url) {
   for (let i = 1; ; i++) {
     const s = i === 1 ? slug : `${slug}-${i}`;
-    const cfg = path.join(SITES_DIR, s, '.mcp.json');
+    const cfg = path.join(sitesDir(), s, '.mcp.json');
     if (!fs.existsSync(cfg)) return s;
     try {
       const env = JSON.parse(fs.readFileSync(cfg, 'utf8'))?.mcpServers?.['claude-connector']?.env;
@@ -85,18 +85,18 @@ const PATH_PLUS = [path.dirname(process.execPath), '/opt/homebrew/bin', '/usr/lo
 
 /** Refreshes the shared MCP server, as the setup script does on every run. */
 async function ensureMcpServer() {
-  fs.mkdirSync(MCP_DIR, { recursive: true });
+  fs.mkdirSync(mcpDir(), { recursive: true });
   for (const f of MCP_FILES) {
     try {
       const r = await fetch(`${REPO_RAW}/${f}`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      fs.writeFileSync(path.join(MCP_DIR, f), Buffer.from(await r.arrayBuffer()));
+      fs.writeFileSync(path.join(mcpDir(), f), Buffer.from(await r.arrayBuffer()));
     } catch {
       // Offline or rate-limited: use this checkout's copy.
-      fs.copyFileSync(path.join(ROOT, '..', 'mcp-server', f), path.join(MCP_DIR, f));
+      fs.copyFileSync(path.join(ROOT, '..', 'mcp-server', f), path.join(mcpDir(), f));
     }
   }
-  await run('npm', ['install', '--silent', '--no-audit', '--no-fund'], { cwd: MCP_DIR, env: { ...process.env, PATH: PATH_PLUS } });
+  await run('npm', ['install', '--silent', '--no-audit', '--no-fund'], { cwd: mcpDir(), env: { ...process.env, PATH: PATH_PLUS } });
 }
 
 /** Opens a folder (and optionally a file in it) in VS Code. */
@@ -113,7 +113,7 @@ async function writeWorkspace(dir, { url, key, mode, relayUrl, relayKey }, claud
   fs.mkdirSync(dir, { recursive: true });
   const env = { WP_URL: url, WP_KEY: key, WP_MODE: mode || 'ajax' };
   if (relayUrl && relayKey) Object.assign(env, { WP_RELAY_URL: relayUrl, WP_RELAY_KEY: relayKey });
-  const mcp = { mcpServers: { 'claude-connector': { command: 'node', args: [path.join(MCP_DIR, 'index.js')], env } } };
+  const mcp = { mcpServers: { 'claude-connector': { command: 'node', args: [path.join(mcpDir(), 'index.js')], env } } };
   fs.writeFileSync(path.join(dir, '.mcp.json'), JSON.stringify(mcp, null, 4));
   const md = path.join(dir, 'CLAUDE.md');
   if (!fs.existsSync(md) && claudeMd) fs.writeFileSync(md, claudeMd); // keep a customised one
@@ -125,10 +125,10 @@ async function writeWorkspace(dir, { url, key, mode, relayUrl, relayKey }, claud
  */
 export async function ensureWorkspace(site) {
   if (site.source === 'claude-sites') {
-    const dir = path.join(SITES_DIR, site.name);
+    const dir = path.join(sitesDir(), site.name);
     if (fs.existsSync(path.join(dir, '.mcp.json'))) return dir;
   }
-  const dir = path.join(SITES_DIR, freeSlug(slugify(site.name), site.url));
+  const dir = path.join(sitesDir(), freeSlug(slugify(site.name), site.url));
   if (!fs.existsSync(path.join(dir, '.mcp.json'))) {
     await writeWorkspace(dir, site, `# ${site.name}\n\nWordPress site ${site.url}, connected through the Claude Connector MCP tools.\n`);
   }
@@ -142,7 +142,7 @@ export async function confirmConnect(id, { openEditor = true } = {}) {
   pending.delete(id);
   const d = p.details;
 
-  const dir = path.join(SITES_DIR, d.slug);
+  const dir = path.join(sitesDir(), d.slug);
   await writeWorkspace(dir, { url: d.url, key: d.key, mode: d.mode }, d.claude_md);
 
   const opened = openEditor ? await openInVSCode(dir) : false;

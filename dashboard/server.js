@@ -126,9 +126,13 @@ function rescanSites() {
     if (added.length) console.log(`New site${added.length === 1 ? '' : 's'} found: ${added.map(s => s.name).join(', ')}`);
   }, 600);
 }
-for (const target of [store.SITES_DIR, path.dirname(store.MCP_SITES_FILE)]) {
-  try { fs.watch(target, { recursive: process.platform !== 'linux' }, rescanSites); } catch {}
+let sitesWatcher = null;
+function watchSitesFolder() {
+  try { sitesWatcher?.close(); } catch {}
+  try { sitesWatcher = fs.watch(store.sitesDir(), { recursive: process.platform !== 'linux' }, rescanSites); } catch { sitesWatcher = null; }
 }
+watchSitesFolder();
+try { fs.watch(path.dirname(store.MCP_SITES_FILE), { recursive: process.platform !== 'linux' }, rescanSites); } catch {}
 setInterval(rescanSites, 15_000);
 
 async function api(req, res, url) {
@@ -136,7 +140,7 @@ async function api(req, res, url) {
   const m = req.method;
 
   if (m === 'GET' && p === '/api/state') {
-    return send(res, 200, { version: VERSION, sites: store.listSites({ includeHidden: true }).map(publicSite), settings: store.getSettings(), jobs: jobs.listJobs(), schedule: scheduleInfo(), failures: failuresInfo(), newSites: [...newSites], logDir: LOG_DIR, extensionDir: EXTENSION_DIR });
+    return send(res, 200, { version: VERSION, sites: store.listSites({ includeHidden: true }).map(publicSite), settings: store.getSettings(), jobs: jobs.listJobs(), schedule: scheduleInfo(), failures: failuresInfo(), newSites: [...newSites], logDir: LOG_DIR, extensionDir: EXTENSION_DIR, sitesDir: store.sitesDir() });
   }
   if (m === 'GET' && p === '/api/events') {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
@@ -197,10 +201,17 @@ async function api(req, res, url) {
   const body = m === 'POST' ? await readBody(req) : {};
 
   if (p === '/api/settings') {
+    const before = store.sitesDir();
     const saved = store.saveSettings(body);
     jobs.bus.emit('settings');
     broadcast('schedule', scheduleInfo());
+    if (store.sitesDir() !== before) { watchSitesFolder(); rescanSites(); }
     return send(res, 200, saved);
+  }
+  if (p === '/api/sites/scan') {
+    // Re-scan the master folder now and report what is there.
+    rescanSites();
+    return send(res, 200, { dir: store.sitesDir(), sites: store.listSites({ includeHidden: true }).length });
   }
   if (p === '/api/sites' && m === 'POST') {
     store.addSite(body);

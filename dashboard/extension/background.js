@@ -160,9 +160,22 @@ chrome.action.onClicked.addListener(async () => {
       if (r.ok) { url = `http://127.0.0.1:${port}/`; break; }
     } catch {}
   }
-  if (!url) url = `http://127.0.0.1:${DASHBOARD_PORTS[0]}/`;
-  const tabs = await chrome.tabs.query({ url: 'http://127.0.0.1/*' });
-  const open = tabs.find(t => t.url && t.url.startsWith(url));
-  if (open) chrome.tabs.update(open.id, { active: true });
-  else chrome.tabs.create({ url });
+  if (url) {
+    // Dashboard is running - focus its tab, or open one.
+    const tabs = await chrome.tabs.query({ url: 'http://127.0.0.1/*' });
+    const open = tabs.find(t => t.url && t.url.startsWith(url));
+    if (open) chrome.tabs.update(open.id, { active: true });
+    else chrome.tabs.create({ url });
+    return;
+  }
+  // Not running - ask the Site Maintenance app (macOS) to start it. The browser
+  // shows a one-time "Open Site Maintenance?" prompt; the app starts the server
+  // and the dashboard opens itself. On Windows, start it with `npm start`.
+  const dash = `http://127.0.0.1:${DASHBOARD_PORTS[0]}/`;
+  try { await chrome.tabs.create({ url: 'claude-connector://open' }); } catch {}
+  for (let i = 0; i < 40; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    try { const r = await fetch(`${dash}api/state`, { signal: AbortSignal.timeout(1500) }); if (r.ok) { chrome.tabs.create({ url: dash }); return; } } catch {}
+  }
+  chrome.tabs.create({ url: dash }); // give up waiting; open anyway
 });

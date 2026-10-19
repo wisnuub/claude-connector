@@ -119,13 +119,15 @@ A small **Claude Connector** extension (in [`dashboard/extension`](dashboard/ext
 3. Click **Load unpacked** and choose the `dashboard/extension` folder. (In the dashboard, **Settings → Log in → Open the folder** jumps straight to it.)
 4. The **Claude Connector** icon (an orange link) appears in the toolbar. Pin it, then click it any time to open the dashboard.
 
+Clicking the icon when the dashboard is **not** running asks the Site Maintenance app (macOS) to start it - a one-time "Open Site Maintenance?" prompt, then the dashboard opens itself; on Windows, start it once with `npm start`. 
+
 The extension only talks to the dashboard on `127.0.0.1`; it holds a login in the browser's memory for the one tab it opens and drops it once you are signed in, when the tab closes, or after 10 minutes. Since it is loaded unpacked (not from the Chrome Web Store), the browser may occasionally remind you that a developer-mode extension is installed - that is normal.
 
 **Running the dashboard on Windows:** there is no app bundle as on macOS, but nothing to distrust either - in the `dashboard` folder run `npm install` once, then `npm start`, and open `http://127.0.0.1:4590` (or just click the extension icon). To keep it running in the background across restarts, add that `npm start` as a Task Scheduler task at logon, or use a process manager such as `pm2`.
 
 ### Where the sites come from
 
-Nothing to configure for sites set up with the [one-click installer](#connecting-claude-code-one-click-setup): the dashboard reads every `~/claude-sites/<site>/.mcp.json` (URL, key and connection mode) and watches the folder, so a newly installed site appears within seconds - no reload - marked **New**. It also reads `mcp-server/sites.json`, and you can **Add site** by hand. Each site's **WordPress & server** tab has **Change URL…** (e.g. when a site moves off a `/newsite` staging path to its live address - it rewrites the address in the site's `~/claude-sites` workspace, keeping its history), **Hide from dashboard** (leaves the folder in place; show it again from Settings) and **Delete site** (removes the workspace folder too). **Hide** removes a site from the dashboard without touching its folder. Nothing is sent to a site until you press a button.
+**Sites folder:** by default the dashboard scans `~/claude-sites`. To use a different master folder, set it in **Settings → Sites folder** and press **Save & scan** - every subfolder with a `.mcp.json` becomes a site. Nothing to configure for sites set up with the [one-click installer](#connecting-claude-code-one-click-setup): the dashboard reads every `~/claude-sites/<site>/.mcp.json` (URL, key and connection mode) and watches the folder, so a newly installed site appears within seconds - no reload - marked **New**. It also reads `mcp-server/sites.json`, and you can **Add site** by hand. Each site's **WordPress & server** tab has **Change URL…** (e.g. when a site moves off a `/newsite` staging path to its live address - it rewrites the address in the site's `~/claude-sites` workspace, keeping its history), **Hide from dashboard** (leaves the folder in place; show it again from Settings) and **Delete site** (removes the workspace folder too). **Hide** removes a site from the dashboard without touching its folder. Nothing is sent to a site until you press a button.
 
 ### What it does
 

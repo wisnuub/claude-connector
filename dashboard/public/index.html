@@ -36,6 +36,14 @@
     <form method="dialog" id="form-settings">
       <div class="dh"><h3>Settings</h3><button class="btn ghost sm" value="cancel">Close</button></div>
       <div class="db">
+        <h5>Sites folder</h5>
+        <p class="hint" style="margin:0 0 6px">The master folder scanned for site workspaces (each site is a subfolder with a <code>.mcp.json</code>, created by "Connect on this Mac"). Leave blank for the default <code>~/claude-sites</code>.</p>
+        <div class="bar" style="margin:0">
+          <input type="text" name="sitesDir" placeholder="~/claude-sites" style="flex:1">
+          <button type="button" class="btn sm" data-action="scan-sites">Save &amp; scan</button>
+        </div>
+        <div id="sites-dir-note" class="hint" style="margin-top:4px"></div>
+
         <h5>Asana</h5>
         <div id="asana-settings"><p class="muted">Checking…</p></div>
 

@@ -1066,6 +1066,7 @@ async function load() {
   S.newSites = new Set(d.newSites || []);
   S.logDir = d.logDir || '';
   S.extensionDir = d.extensionDir || '';
+  S.sitesDir = d.sitesDir || '';
   for (const j of d.jobs) S.jobs.set(j.id, j);
   renderAll();
 }
@@ -1197,6 +1198,8 @@ function openSettings() {
   renderAgencyEditor();
   renderAsanaSettings();
   f.elements.loginMode.value = draft.loginMode || 'tab';
+  if (f.elements.sitesDir) f.elements.sitesDir.value = draft.sitesDir || '';
+  const sdn = document.getElementById('sites-dir-note'); if (sdn) sdn.textContent = S.sitesDir ? `Currently scanning: ${S.sitesDir}` : '';
   renderExtStatus();
   $('#dlg-settings').showModal();
 }
@@ -1256,6 +1259,19 @@ document.addEventListener('click', async (ev) => {
       return openReview(ids, `Update everything for ${ag.label} (${ids.length} site${ids.length === 1 ? '' : 's'})`);
     }
     case 'filter': S.filter = t.dataset.v; renderToolbar(); renderSites(); return;
+    case 'scan-sites': {
+      const dir = $('#form-settings').elements.sitesDir.value.trim();
+      t.disabled = true;
+      try {
+        S.settings = await api('POST', '/api/settings', { sitesDir: dir });
+        const r = await api('POST', '/api/sites/scan', {});
+        S.sitesDir = r.dir;
+        document.getElementById('sites-dir-note').textContent = `Scanned ${r.dir} - ${r.sites} site${r.sites === 1 ? '' : 's'} found.`;
+        await load();
+      } catch (e) { toast(e.message); }
+      t.disabled = false;
+      return;
+    }
     case 'reveal-extension': await api('POST', '/api/extension/reveal', {}).catch(e => toast(e.message)); return;
     case 'asana-connect': {
       const token = $('#asana-token').value;
@@ -1664,6 +1680,7 @@ document.addEventListener('click', async (ev) => {
       draft.concurrency = Number(f.elements.concurrency.value);
       draft.formTestMode = f.elements.formTestMode.value;
       draft.loginMode = f.elements.loginMode.value;
+      if (f.elements.sitesDir) draft.sitesDir = f.elements.sitesDir.value.trim();
       if (f.elements.asanaWorkspace) {
         draft.asana = { ...draft.asana, workspace: f.elements.asanaWorkspace.value, postResults: f.elements.asanaPost.checked, logTime: f.elements.asanaTime.checked, commentStyle: f.elements.asanaStyle.value };
         if (draft.asana.workspace !== S.settings.asana.workspace) S.tasks = null;
