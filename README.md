@@ -107,10 +107,10 @@ Nothing to configure for sites set up with the [one-click installer](#connecting
 
 ### What it does
 
-- **One row per site**: WordPress version (and pending core update), **PHP version** (red when no longer supported, amber when security support ends within six months), pending updates, health, last form test, last run. Click a row to open it.
+- **One row per site**: WordPress version (and pending core update), **PHP version** (red when no longer supported, amber when security support ends within six months), pending updates, health, last form test, last run. Click a row to open it. Each row has **Check** (read-only inspection) before **Update all**.
 - **Plugins tab**: every plugin with version → new version (flagged when an update needs a licence key or a newer PHP), an active/inactive switch, Update, Delete, and **Versions** to install another version from wordpress.org (a rollback). Tick several for bulk update / activate / deactivate / delete. Search wordpress.org and install (optionally activate) from the same tab.
 - **Themes, WordPress & server, Form test, History** tabs for the rest.
-- **Bulk across sites**: tick sites (or a whole agency) and run **Update everything**, **Check for updates**, **Form test now**, **Queue form test**, or a **Plugin…** action (install / update / activate / deactivate / delete one plugin on every selected site).
+- **Bulk across sites**: tick sites (or a whole agency) and run **Check everything** (read-only: updates, health, security and Divi forms - the counterpart to Update everything, changing nothing), **Update everything**, **Form test now**, **Queue form test**, or a **Plugin…** action (install / update / activate / deactivate / delete one plugin on every selected site).
 
 **Update everything** first shows a checklist of every pending update on the chosen sites, all ticked: untick what you don't want this time. **Hold** keeps an item (a plugin, theme, core or translations on one site) at its current version on every run until you release it - held items are tagged in the plugin table. Updates that cannot go in (licence missing, PHP too old) are shown greyed out with the reason.
 

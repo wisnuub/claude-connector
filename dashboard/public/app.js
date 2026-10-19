@@ -219,8 +219,9 @@ function renderToolbar() {
   $('#toolbar').innerHTML = `
     <input type="checkbox" data-action="select-all" ${allSel ? 'checked' : ''} aria-label="Select all shown sites">
     <span class="count">${n ? `${n} selected` : `${vis.length} shown`}</span>
+    <button class="btn sm" data-action="bulk-check" ${dis} title="Read-only: updates, health, security and Divi forms - changes nothing">Check everything</button>
     <button class="btn primary sm" data-action="bulk-maintain" ${dis}>Update everything</button>
-    <button class="btn sm" data-action="bulk-refresh" ${dis}>Check for updates</button>
+    <span class="sep"></span>
     <button class="btn sm" data-action="bulk-form" ${dis}>Form test now</button>
     <button class="btn sm" data-action="bulk-queue" ${dis} title="Add to the morning form-test run">Queue form test</button>
     <button class="btn sm" data-action="bulk-plugin" ${dis}>Plugin…</button>
@@ -311,6 +312,7 @@ function siteRow(site) {
         <div class="cell"><small>Last run</small>${lastRunCell(site)}</div>
       </div>
       <div class="row-actions">
+        <button class="btn sm" data-action="site-check" data-stop ${run ? 'disabled' : ''} title="Read-only check: updates, health, security, Divi forms">Check</button>
         <button class="btn sm ${c.total ? 'primary' : ''}" data-action="site-maintain" data-stop ${run ? 'disabled' : ''}>Update all</button>
         <a class="btn sm ghost" href="${h(site.url)}/wp-admin/" target="_blank" rel="noopener" data-stop title="Open wp-admin">WP</a>
       </div>
@@ -1327,8 +1329,9 @@ document.addEventListener('click', async (ev) => {
       return;
     }
 
-    case 'check-all': return startJob({ type: 'refresh', sites: S.sites.filter(s => !s.hidden).map(s => s.id) });
+    case 'check-all': return startJob({ type: 'check', sites: S.sites.filter(s => !s.hidden).map(s => s.id) });
     case 'bulk-refresh': return startJob({ type: 'refresh', sites: selectedIds() });
+    case 'bulk-check': return startJob({ type: 'check', sites: selectedIds() });
     case 'bulk-maintain': {
       return openReview(selectedIds());
     }
@@ -1424,6 +1427,7 @@ document.addEventListener('click', async (ev) => {
       return openReview([site.id], `Update everything on ${site.name}`);
     }
     case 'site-refresh': return startJob({ type: 'refresh', sites: [site.id] });
+    case 'site-check': ev.stopPropagation(); return startJob({ type: 'check', sites: [site.id] });
     case 'site-form': return startJob({ type: 'formtest', sites: [site.id], url: site.formUrl || undefined }, `Submit the contact form on ${site.name}? It sends a real enquiry to the form's recipients.`);
     case 'site-mail': return startJob({ type: 'mailtest', sites: [site.id] });
     case 'check-divi': return startJob({ type: 'diviforms', sites: [site.id] });

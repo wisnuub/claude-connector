@@ -313,6 +313,7 @@ async function api(req, res, url) {
     const sites = sitesOrThrow(body.sites);
     switch (body.type) {
       case 'refresh': return send(res, 200, jobs.startRefresh({ sites }));
+      case 'check': return send(res, 200, jobs.startCheck({ sites }));
       case 'maintain': return send(res, 200, jobs.startMaintain({ sites, allowMajorCore: body.allowMajorCore, formTest: body.formTest, exclude: body.exclude || {} }));
       case 'update': return send(res, 200, jobs.startUpdate({ sites, items: body.items || [], allowMajorCore: body.allowMajorCore }));
       case 'plugin': return send(res, 200, jobs.startPluginAction({ sites, action: body.action, files: body.files, slug: body.slug, version: body.version, activate: body.activate }));

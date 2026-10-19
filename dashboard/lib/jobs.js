@@ -497,6 +497,42 @@ export function startRefresh({ sites }) {
   });
 }
 
+/**
+ * Read-only check before updating: pending updates, health, the security scan
+ * and Divi email patterns. Changes nothing - the counterpart to Update everything.
+ */
+export function startCheck({ sites }) {
+  return startJob({ type: 'check', title: `Check everything${sites.length > 1 ? ` on ${sites.length} sites` : ''}`, sites }, async (ctx) => {
+    const st = ctx.step('Checking for updates…');
+    const o = await refreshOverview(ctx.site.id);
+    const n = o.plugins.filter(p => p.update).length + o.themes.filter(t => t.update).length + (o.core.minor || o.core.major ? 1 : 0);
+    st.set('ok', `${n} update${n === 1 ? '' : 's'} available · WordPress ${o.core.version} · PHP ${o.php_version}`);
+    const health = await healthStep(ctx);
+    if (health.status !== 'fatal') { await securityStep(ctx); await diviFormsStep(ctx); }
+    const sec = siteState(ctx.site.id).security?.summary;
+    const parts = [`${n} update${n === 1 ? '' : 's'}`];
+    if (health.status !== 'ok') parts.push(`health: ${health.status}`);
+    if (sec?.high) parts.push(`${sec.high} security`);
+    return parts.join(' · ');
+  });
+}
+
+/** The Divi form check as a step (shared by Check and the standalone job). */
+async function diviFormsStep(ctx) {
+  const st = ctx.step('Checking Divi contact form email patterns…');
+  try {
+    const r = await ctx.api('GET', '/divi/forms', { timeout: 60_000 });
+    patchSiteState(ctx.site.id, { diviForms: { ...r, at: new Date().toISOString() } });
+    const forms = (r.forms || []).filter(f => f.fields.length);
+    const bad = forms.filter(f => !f.ok);
+    if (!forms.length) { st.set('ok', 'No Divi 4 contact forms'); return; }
+    st.set(bad.length ? 'warning' : 'ok', bad.length ? `${bad.length} of ${forms.length} Divi form${forms.length === 1 ? '' : 's'} drop fields from the email` : `All ${forms.length} Divi form${forms.length === 1 ? '' : 's'} send every field`);
+  } catch (e) {
+    const i = errInfo(e);
+    st.set('ok', i.code === 'rest_no_route' ? 'Divi form check skipped - needs Claude Connector 1.8.3 or newer' : `Divi form check skipped: ${i.message}`);
+  }
+}
+
 export function queueFormTest({ sites, queued = true }) {
   for (const id of sites) {
     patchSiteState(id, { formTestQueued: queued ? new Date().toISOString() : null });
@@ -536,20 +572,8 @@ export function startSecurityScan({ sites }) {
 /** Read-only: Divi contact forms whose email Message Pattern drops fields. */
 export function startDiviFormsCheck({ sites }) {
   return startJob({ type: 'diviforms', title: `Check Divi forms${sites.length > 1 ? ` on ${sites.length} sites` : ''}`, sites }, async (ctx) => {
-    const st = ctx.step('Checking Divi contact form email patterns…');
-    let r;
-    try { r = await ctx.api('GET', '/divi/forms', { timeout: 60_000 }); }
-    catch (e) {
-      const i = errInfo(e);
-      st.set('failed', i.code === 'rest_no_route' ? 'Divi form check needs Claude Connector 1.8.3 or newer on this site' : `Divi form check: ${i.message}`);
-      return null;
-    }
-    patchSiteState(ctx.site.id, { diviForms: { ...r, at: new Date().toISOString() } });
-    const forms = (r.forms || []).filter(f => f.fields.length);
-    const bad = forms.filter(f => !f.ok);
-    if (!forms.length) { st.set('ok', 'No Divi 4 contact forms on this site'); return 'no Divi forms'; }
-    st.set(bad.length ? 'warning' : 'ok', bad.length ? `${bad.length} of ${forms.length} Divi form${forms.length === 1 ? '' : 's'} drop fields from the email` : `All ${forms.length} Divi form${forms.length === 1 ? '' : 's'} send every field`,
-      bad.map(f => `${f.post}${f.title ? ` (${f.title})` : ''}: ${!f.pattern ? 'no pattern' : [f.missing.length && `missing ${f.missing.join(', ')}`, f.unknown.length && `no field for %%${f.unknown.join('%%, %%')}%%`].filter(Boolean).join('; ')}`).join(' · ') || null);
+    await diviFormsStep(ctx);
+    const bad = (siteState(ctx.site.id).diviForms?.forms || []).filter(f => f.fields.length && !f.ok);
     return bad.length ? `${bad.length} form(s) to fix` : 'all good';
   });
 }
