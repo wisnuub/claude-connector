@@ -693,6 +693,14 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 
 ## Changelog
 
+### 1.8.5 — Restore WordPress core files
+
+**Added**
+
+- **`POST /security/reinstall-core`** - restores every WordPress core file to the official copy for the **same version already installed** (like Dashboard → Updates → Re-install), fixing modified core files and putting missing ones back - in the site root, `wp-admin` and `wp-includes`, which the file tools cannot reach. Uses WordPress's own core upgrader and the no-content package, so `wp-content` (plugins, themes, uploads) is not touched and the version never changes. Reports how many core files were fixed and the site health. MCP tool `wp_reinstall_core`; the security report points Claude to it for "core files that differ / missing" findings.
+
+**Verified** on a local WordPress 7.1.3: a tampered core file and a deleted core file were both restored (1 modified + 49 missing → 0 and 0), `wp-content` (an uploads file and an active plugin) was untouched, and the homepage stayed at 200.
+
 ### 1.8.4 — Remove malware outside wp-content (quarantine)
 
 **Added**

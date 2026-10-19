@@ -152,7 +152,7 @@ async function safeCall(fn) {
 // Kept in step with CLAUDE_CONNECTOR_VERSION in claude-connector.php. The two
 // halves ship together, and a stale copy of this file silently hides whole
 // tools - which is much harder to notice than an outright error.
-const MCP_VERSION = '1.8.4';
+const MCP_VERSION = '1.8.5';
 
 const server = new McpServer({ name: 'claude-connector', version: MCP_VERSION });
 
@@ -413,6 +413,17 @@ server.tool('wp_core_file_diff',
   + '- only after the user agrees.',
   { site: S, path: z.string().describe('e.g. wp-includes/version.php'), content: z.boolean().optional() },
   ({ site, path, content }) => safeCall(async () => ok(await api('GET', '/security/core-file', { path, ...(content ? { content: '1' } : {}) }, null, site)))
+);
+
+server.tool('wp_reinstall_core',
+  'Restore all WordPress core files to the official copy for the SAME version already installed (like Dashboard > Updates > '
+  + 'Re-install). Fixes modified core files and puts missing ones back - including in the site root, wp-admin and '
+  + 'wp-includes, which the file tools cannot reach. Does NOT change the WordPress version and does NOT touch wp-content '
+  + '(plugins, themes, uploads). It does not remove ADDED/planted files that are not part of core - use wp_quarantine_file '
+  + 'for those. Use for the "core files that differ" findings, after the user agrees; it then re-checks and reports how many '
+  + 'core files were fixed and the site health.',
+  { site: S },
+  ({ site }) => safeCall(async () => ok(await api('POST', '/security/reinstall-core', null, {}, site, 300_000)))
 );
 
 server.tool('wp_quarantine_file',

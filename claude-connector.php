@@ -3,7 +3,7 @@
  * Plugin Name:  Claude Connector
  * Plugin URI:   https://github.com/wisnuub/claude-connector
  * Description:  Secure REST API bridge for Claude AI - ACF sync, cache purge, file management, database queries, post CRUD, plugin/theme control, maintenance updates with rollback, and more.
- * Version:      1.8.4
+ * Version:      1.8.5
  * Author:       Wisnuub
  * Author URI:   https://wisnuub.github.io
  * License:      GPL-2.0-or-later
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'CLAUDE_CONNECTOR_VERSION', '1.8.4' );
+define( 'CLAUDE_CONNECTOR_VERSION', '1.8.5' );
 define( 'CLAUDE_CONNECTOR_NS',      'claude/v1' );
 define( 'CLAUDE_CONNECTOR_GH_REPO', 'wisnuub/claude-connector' );
 
@@ -528,6 +528,7 @@ function claude_settings_page() {
         array( 'POST',   '/maintenance/test-email',   'Send a wp_mail() test and report the mailer in use' ),
         array( 'GET',    '/security/scan',            'Read-only security check: core/plugin checksums, PHP in uploads, malware patterns, new admins, redirects' ),
         array( 'GET',    '/security/core-file?path=', 'A WordPress core file and its diff against the official copy (core files only, read-only)' ),
+        array( 'POST',   '/security/reinstall-core',  'Restore all core files to the official same-version copy (fixes modified/missing core; wp-content untouched)' ),
         array( 'POST',   '/security/quarantine',      'Move one added (non-core) file out of the live site into quarantine - incl. outside wp-content; reversible' ),
         array( 'GET',    '/security/quarantine',      'List quarantined files' ),
         array( 'POST',   '/security/restore',         'Put a quarantined file back' ),
@@ -917,6 +918,7 @@ add_action( 'rest_api_init', function () {
     register_rest_route( $ns, '/maintenance/test-email', array( 'methods' => 'POST', 'callback' => 'claude_maint_test_email', 'permission_callback' => $a ) );
     register_rest_route( $ns, '/security/scan',          array( 'methods' => 'GET',  'callback' => 'claude_security_scan',    'permission_callback' => $a ) );
     register_rest_route( $ns, '/security/core-file',     array( 'methods' => 'GET',  'callback' => 'claude_security_core_file', 'permission_callback' => $a ) );
+    register_rest_route( $ns, '/security/reinstall-core', array( 'methods' => 'POST', 'callback' => 'claude_security_reinstall_core', 'permission_callback' => $a ) );
     register_rest_route( $ns, '/security/quarantine',    array(
         array( 'methods' => 'GET',  'callback' => 'claude_security_quarantine_list', 'permission_callback' => $a ),
         array( 'methods' => 'POST', 'callback' => 'claude_security_quarantine',      'permission_callback' => $a ),
@@ -3775,6 +3777,84 @@ function claude_security_restore( $req ) {
     $manifest[ $id ]['restored'] = gmdate( 'c' );
     @file_put_contents( $mf_file, wp_json_encode( $manifest, JSON_PRETTY_PRINT ) ); // phpcs:ignore
     return new WP_REST_Response( array( 'restored' => $manifest[ $id ]['original'] ) );
+}
+
+/**
+ * POST /security/reinstall-core - restore every WordPress core file to the
+ * official copy for the SAME version already installed, using WordPress's own
+ * core upgrader (the "Re-install" button on Dashboard > Updates). This replaces
+ * modified core files and puts missing ones back - including in the site root,
+ * wp-admin and wp-includes, which the file tools cannot reach - and does not
+ * touch wp-content. Same version only: it never changes the WordPress version.
+ */
+function claude_security_reinstall_core() {
+    require_once ABSPATH . 'wp-admin/includes/admin.php';
+    require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
+    @set_time_limit( 300 ); // phpcs:ignore
+
+    $fs = claude_maint_filesystem();
+    if ( is_wp_error( $fs ) ) return $fs;
+
+    $ver  = get_bloginfo( 'version' );
+    $sums = get_core_checksums( $ver, get_locale() ) ?: get_core_checksums( $ver, 'en_US' );
+
+    // Count core files that differ or are missing, before and after, for the report.
+    $tally = function () use ( $sums ) {
+        $modified = $missing = 0;
+        if ( ! is_array( $sums ) ) return null;
+        foreach ( $sums as $file => $md5 ) {
+            if ( strpos( $file, 'wp-content/' ) === 0 ) continue;
+            $abs = ABSPATH . $file;
+            if ( ! file_exists( $abs ) ) { $missing++; continue; }
+            if ( md5_file( $abs ) !== $md5 ) $modified++;
+        }
+        return array( 'modified' => $modified, 'missing' => $missing );
+    };
+    $before = $tally();
+
+    // Core files are the same whatever the site's language (translations live in
+    // wp-content/languages), so the en_US no-content package is correct and skips wp-content.
+    $pkg_full = 'https://downloads.wordpress.org/release/wordpress-' . $ver . '.zip';
+    $pkg_nc   = 'https://downloads.wordpress.org/release/wordpress-' . $ver . '-no-content.zip';
+    $update   = (object) array(
+        'response' => 'reinstall',
+        'packages' => (object) array( 'full' => $pkg_full, 'no_content' => $pkg_nc, 'partial' => false, 'new_bundled' => false, 'rollback' => false ),
+        'current'  => $ver,
+        'version'  => $ver,
+        'download' => $pkg_full,
+        'locale'   => 'en_US',
+    );
+
+    $skin = new Automatic_Upgrader_Skin();
+    add_filter( 'update_feedback', '__return_false' );
+    ob_start();
+    $result = ( new Core_Upgrader( $skin ) )->upgrade( $update, array( 'pre_check_md5' => false, 'do_rollback' => false ) );
+    $stray  = trim( wp_strip_all_tags( (string) ob_get_clean() ) );
+    remove_filter( 'update_feedback', '__return_false' );
+
+    if ( is_wp_error( $result ) ) {
+        return new WP_Error( 'reinstall_failed', 'Core reinstall failed: ' . $result->get_error_message() . ( $stray ? " ({$stray})" : '' ), array( 'status' => 500 ) );
+    }
+
+    claude_cc_opcache_flush();
+    $after  = $tally();
+    $health = claude_loopback_health();
+    return new WP_REST_Response( array(
+        'version'  => $ver,
+        'before'   => $before,
+        'after'    => $after,
+        'restored' => ( $before && $after ) ? array( 'modified' => $before['modified'] - $after['modified'], 'missing' => $before['missing'] - $after['missing'] ) : null,
+        'health'   => $health,
+        'note'     => 'WordPress ' . $ver . ' core files were reinstalled from wordpress.org. wp-content (plugins, themes, uploads) was not touched. Planted files that are NOT part of core are not removed by this - use quarantine for those.',
+    ) );
+}
+
+/**
+ * Fallback for older WordPress without wp_opcache_flush_after_update().
+ */
+function claude_cc_opcache_flush() {
+    if ( function_exists( 'wp_opcache_flush_after_update' ) ) wp_opcache_flush_after_update( true );
+    elseif ( function_exists( 'opcache_reset' ) ) @opcache_reset(); // phpcs:ignore
 }
 
 /**
