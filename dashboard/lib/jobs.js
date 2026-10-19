@@ -9,7 +9,7 @@ import { call, externalCheck, LONG, WPError } from './wp.js';
 import { getSite, getSettings, siteState, patchSiteState, addHistory, agencyFor } from './store.js';
 import { runFormTest } from './formtest.js';
 import { appendTextLog, notify, summarize } from './log.js';
-import { postResults } from './asana.js';
+import { postResults, postAfterFormTest } from './asana.js';
 
 export const bus = new EventEmitter();
 bus.setMaxListeners(100);
@@ -102,10 +102,14 @@ function startJob(spec, worker) {
       entry.finishedAt = new Date().toISOString();
       const record = { jobId: job.id, type: job.type, title: job.title, site: id, siteName: entry.name, status: entry.status, summary: entry.summary, steps: entry.steps, at: entry.finishedAt };
       // Results go on the site's Asana task - recorded as one more step, after the comment is built.
-      if (['maintain', 'update'].includes(job.type)) {
+      if (['maintain', 'formtest'].includes(job.type)) {
         try {
-          const posted = await postResults(id, record, new Date(entry.finishedAt) - new Date(entry.startedAt));
-          if (posted) {
+          const posted = job.type === 'maintain'
+            ? await postResults(id, record, new Date(entry.finishedAt) - new Date(entry.startedAt))
+            : await postAfterFormTest(id, record);
+          if (posted?.deferred) {
+            entry.steps.push({ label: `Asana comment for ${posted.project ? `${posted.project} › ` : ''}${posted.task} will go out with the morning form test`, status: 'ok', detail: null, at: new Date().toISOString(), meta: { kind: 'asana', result: 'ok' } });
+          } else if (posted) {
             const time = typeof posted.time === 'number' ? ` · ${posted.time} min added to Actual time` : posted.time ? ` · time not logged: ${posted.time}` : '';
             entry.steps.push({ label: `Posted to Asana: ${posted.project ? `${posted.project} › ` : ''}${posted.task}${time}`, status: 'ok', detail: null, at: new Date().toISOString(), meta: { kind: 'asana', result: 'ok' } });
           }
@@ -242,6 +246,28 @@ async function healthStep(ctx, title = 'Site health') {
   return health;
 }
 
+/**
+ * The read-only security check as a step of a run. "Cleaned" means the
+ * previous check had warning signs and this one has none.
+ */
+async function securityStep(ctx) {
+  const prev = siteState(ctx.site.id).security?.summary?.high || 0;
+  const st = ctx.step('Security check…');
+  try {
+    const scan = await ctx.api('GET', '/security/scan', { timeout: 240_000 });
+    patchSiteState(ctx.site.id, { security: { ...scan, at: new Date().toISOString() } });
+    const high = scan.summary?.high || 0;
+    const cleaned = prev > 0 && high === 0;
+    st.set(high ? 'warning' : 'ok',
+      high ? `Security check: ${high} high-severity warning sign${high === 1 ? '' : 's'} - see the Security tab` : cleaned ? 'Security check: clean now (warning signs found before are gone)' : 'Security check: no warning signs',
+      null, { kind: 'security', high, medium: scan.summary?.medium || 0, cleaned });
+  } catch (e) {
+    const i = errInfo(e);
+    // Older connectors have no security check: not a failure of the run.
+    st.set('ok', i.code === 'rest_no_route' ? 'Security check skipped - needs Claude Connector 1.8.2 or newer' : `Security check could not run: ${i.message}`, null, { kind: 'security-skipped' });
+  }
+}
+
 /** Picks the form page, submits the form, falls back to a wp_mail() test. */
 async function formStep(ctx, { url } = {}) {
   const settings = getSettings();
@@ -256,19 +282,20 @@ async function formStep(ctx, { url } = {}) {
     mailer = r.mailer;
     patchSiteState(ctx.site.id, { forms, mailer });
   } catch (e) {
-    if (!target) { st.set('failed', `Form test: could not list forms - ${errInfo(e).message}`); return null; }
+    if (!target) { st.set('failed', `Form test: could not list forms - ${errInfo(e).message}`, null, { kind: 'form', form: 'error', result: 'failed' }); return null; }
   }
   if (!target && forms.length) target = forms[0].url;
 
   const ref = newRef();
   if (!target) {
-    if (!settings.mailTestWhenNoForm) { st.set('warning', 'Form test: no contact form found on the site'); return null; }
+    if (!settings.mailTestWhenNoForm) { st.set('warning', 'Form test: no contact form found on the site', null, { kind: 'form', form: 'no_form' }); return { status: 'no_form' }; }
     st.set('running', 'No contact form found - sending a wp_mail() test instead…');
     try {
       const m = await ctx.api('POST', '/maintenance/test-email', { body: { to: agency.email || undefined, ref }, timeout: 60_000 });
       const result = { status: m.sent ? 'mail_sent' : 'mail_failed', ref, to: m.to, message: m.error || (m.sent ? `wp_mail() accepted the message to ${m.to}` : 'wp_mail() returned false'), mailer: m.mailer, at: new Date().toISOString() };
       patchSiteState(ctx.site.id, { formTest: result, formTestQueued: null });
-      st.set(m.sent ? (m.mailer?.plugin ? 'ok' : 'warning') : 'failed', `Mail test ${m.sent ? 'sent' : 'failed'} (ref ${ref})${m.mailer?.plugin ? ` via ${m.mailer.plugin}` : ''}`, m.error || m.mailer?.warning || null);
+      st.set(m.sent ? (m.mailer?.plugin ? 'ok' : 'warning') : 'failed', `No contact form - mail test ${m.sent ? 'sent' : 'failed'} (ref ${ref})${m.mailer?.plugin ? ` via ${m.mailer.plugin}` : ''}`, m.error || m.mailer?.warning || null,
+        { kind: 'form', form: m.sent ? 'mail_sent' : 'mail_failed', result: m.sent ? 'ok' : 'failed', ref });
       return result;
     } catch (e) { st.set('failed', `Mail test: ${errInfo(e).message}`); return null; }
   }
@@ -366,12 +393,13 @@ export function startMaintain({ sites, allowMajorCore, formTest, exclude = {} })
 
     await refreshOverview(ctx.site.id).catch(() => {});
     const post = await healthStep(ctx, 'Health after updating');
+    if (post.status !== 'fatal' && getSettings().securityAfterUpdate !== false) await securityStep(ctx);
     let form = null;
     if (post.status !== 'fatal' && formTest === 'now') form = await formStep(ctx);
     if (post.status !== 'fatal' && formTest === 'queue') {
       patchSiteState(ctx.site.id, { formTestQueued: new Date().toISOString() });
       const sc = getSettings().schedule;
-      ctx.step(sc.enabled ? `Form test queued for the morning run (${sc.time})` : 'Form test queued - turn on the morning run in Settings, or run the queue by hand', sc.enabled ? 'ok' : 'warning');
+      ctx.step(sc.enabled ? `Form test queued for the morning run (${sc.time})` : 'Form test queued - turn on the morning run in Settings, or run the queue by hand', sc.enabled ? 'ok' : 'warning', null, { kind: 'form-queued' });
     }
 
     const parts = [`${done} updated`];

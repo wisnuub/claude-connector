@@ -30,6 +30,7 @@ const S = {
   tasksQ: '',
   tasksShow: 'all',
   logins: {},               // task gid -> { busy, error, logins, task }
+  drafts: {},               // site id -> { text, basedOn, pending } for the Asana comment
   reveal: new Set(),        // "gid|i" of shown passwords
 };
 
@@ -757,11 +758,33 @@ function asanaTab(site) {
       </label>
       ${link ? `<p class="hint" style="margin-top:8px">${link.auto ? 'Matched by project name. ' : ''}<a href="${h(link.url)}" target="_blank" rel="noopener">Open in Asana ↗</a>${S.settings.asana.postResults ? '' : ' · posting results is off in Settings'}</p>` : '<p class="hint" style="margin-top:8px">No task matched this site by project name - pick one.</p>'}
     </div>
+    <div class="card" style="grid-column:1/-1"><h4>Comment for Asana</h4>${commentCard(site)}</div>
     <div class="card"><h4>WordPress login</h4>
       ${link ? `<button class="btn sm" data-action="asana-logins" data-gid="${h(link.taskGid)}">${S.logins[link.taskGid] ? 'Read again' : 'Show login from Asana'}</button>${loginsBlock(link.taskGid, site.url)}`
         : '<p class="hint">Link the site\'s Asana task to read its login.</p>'}
     </div>
   </div>`;
+}
+
+function commentCard(site) {
+  if (!site.asana) return '<p class="hint">Link the site\'s Asana task above to post comments to it.</p>';
+  const d = S.drafts[site.id];
+  if (!d) { loadDraft(site.id); return '<p class="muted">Writing the comment from the last run…</p>'; }
+  if (d.error) return `<div class="notice bad">${h(d.error)}</div>`;
+  return `${d.pending ? '<div class="notice" style="margin-bottom:8px">This run\'s comment is waiting for the morning form test. Sending now posts it as written here.</div>' : ''}
+    <textarea id="draft-${h(site.id)}" data-draft="${h(site.id)}" rows="3" style="width:100%">${h(d.text)}</textarea>
+    <div class="bar" style="margin:8px 0 0">
+      <button class="btn sm primary" data-action="send-comment">Send to ${h(site.asana.project ? `${site.asana.project} › ` : '')}${h(site.asana.taskName)}</button>
+      <button class="btn sm ghost" data-action="rebuild-comment" title="Start again from the last run">Rewrite from last run</button>
+      <span class="grow"></span>
+      <span class="hint">${d.basedOn ? `From the run ${h(ago(d.basedOn))}` : 'No run yet'}${S.settings.asana.postResults ? ' · runs also post automatically' : ' · automatic posting is off'}</span>
+    </div>`;
+}
+
+async function loadDraft(id) {
+  try { S.drafts[id] = await api('POST', `/api/sites/${encodeURIComponent(id)}/asana-comment`, {}); }
+  catch (e) { S.drafts[id] = { error: e.message }; }
+  renderSite(id);
 }
 
 function renderTasks() {
@@ -789,6 +812,7 @@ function renderTasks() {
       <span class="grow"></span>
       <span class="muted" style="font-size:13px">${h(S.asana.user.name)} · ${h(ws?.name || '')}${S.tasks.at ? ` · ${h(ago(S.tasks.at))}` : ''}</span>
       <button class="btn sm" data-action="tasks-refresh">↻ Refresh</button>
+      ${(() => { const n = wpUpdateTasks().length; return `<button class="btn sm primary" data-action="do-wp-updates" ${n ? '' : 'disabled'} title="Every open WordPress update task whose site is connected">Do WordPress updates (${n})</button>`; })()}
     </div>
     ${S.tasks.error ? `<div class="notice bad">${h(S.tasks.error)}</div>` : ''}
     <div class="card" style="padding:0">
@@ -808,6 +832,12 @@ function renderTasks() {
   if (focused) { const i = $('#tq'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }
 }
 
+/** Open "WordPress update(s)" tasks whose site is on the dashboard - one per site. */
+function wpUpdateTasks() {
+  const seen = new Set();
+  return (S.tasks?.tasks || []).filter(t => /^\s*wordpress\s+updates?\s*$/i.test(t.name) && t.siteId && !seen.has(t.siteId) && seen.add(t.siteId));
+}
+
 function renderAsanaSettings() {
   const el = $('#asana-settings');
   const a = S.asana;
@@ -821,7 +851,13 @@ function renderAsanaSettings() {
   }
   el.innerHTML = `<div class="bar" style="margin:0"><span>Connected as <b>${h(a.user.name)}</b> (${h(a.user.email || '')})</span><span class="grow"></span><button type="button" class="btn sm ghost danger" data-action="asana-disconnect">Disconnect</button></div>
     <label class="field" style="max-width:360px">Workspace<select name="asanaWorkspace">${a.workspaces.map(w => `<option value="${h(w.gid)}" ${w.gid === (st.workspace || a.workspace) ? 'selected' : ''}>${h(w.name)}</option>`).join('')}</select></label>
-    <label class="check"><input type="checkbox" name="asanaPost" ${st.postResults ? 'checked' : ''}> After each run, post the results as a comment on the site's Asana task</label>
+    <label class="check"><input type="checkbox" name="asanaPost" ${st.postResults ? 'checked' : ''}> After each run, post the results as a comment on the site's Asana task automatically (you can always send one by hand from the site's Asana & login tab)</label>
+    <label class="field" style="max-width:520px">Comment
+      <select name="asanaStyle">
+        <option value="short" ${st.commentStyle !== 'detailed' ? 'selected' : ''}>Short - "WP core + plugin update done, test form sent"</option>
+        <option value="detailed" ${st.commentStyle === 'detailed' ? 'selected' : ''}>Detailed - every update, what was not done and what failed</option>
+      </select>
+    </label>
     <label class="check"><input type="checkbox" name="asanaTime" ${st.logTime ? 'checked' : ''}> Also add the run's time to the task's Actual time</label>`;
 }
 
@@ -965,6 +1001,7 @@ function connect() {
     const prev = S.jobs.get(j.id);
     S.jobs.set(j.id, j);
     if (!prev) { S.drawerMin = false; S.openJobs.add(j.id); }
+    if (j.status !== 'running') for (const id of Object.keys(j.sites)) delete S.drafts[id];
     for (const id of Object.keys(j.sites)) renderSite(id);
     clearTimeout(drawerTimer);
     drawerTimer = setTimeout(renderDrawer, 120);
@@ -1056,7 +1093,7 @@ function openSettings() {
   draft = JSON.parse(JSON.stringify(S.settings));
   draftAgency = draft.defaultAgency;
   const f = $('#form-settings');
-  for (const k of ['allowMajorCore', 'mailTestWhenNoForm', 'showBrowser', 'notifyOnFailure']) f.elements[k].checked = !!draft[k];
+  for (const k of ['allowMajorCore', 'mailTestWhenNoForm', 'showBrowser', 'notifyOnFailure', 'securityAfterUpdate']) f.elements[k].checked = draft[k] !== false && !!draft[k];
   f.elements.concurrency.value = draft.concurrency;
   f.elements.formTestMode.value = draft.formTestMode;
   f.elements.scheduleEnabled.checked = draft.schedule.enabled;
@@ -1144,6 +1181,27 @@ document.addEventListener('click', async (ev) => {
       return;
     }
     case 'tasks-refresh': S.tasks = null; renderTasks(); loadTasks(true); return;
+    case 'do-wp-updates': {
+      const list = wpUpdateTasks();
+      // Results go to these tasks: link each site to its WordPress update task first.
+      for (const t of list) {
+        const site = S.sites.find(s => s.id === t.siteId);
+        if (site?.asana?.taskGid !== t.gid) await api('POST', '/api/asana/link', { site: t.siteId, task: { gid: t.gid, name: t.name, url: t.url, project: t.project } }).catch(() => {});
+      }
+      return openReview(list.map(t => t.siteId), `WordPress update tasks - ${list.length} site${list.length === 1 ? '' : 's'}`);
+    }
+    case 'send-comment': {
+      const ta = $(`#draft-${CSS.escape(site.id)}`);
+      t.disabled = true;
+      try {
+        const r = await api('POST', `/api/sites/${encodeURIComponent(site.id)}/asana-comment`, { text: ta.value });
+        toast(`Posted to ${r.project ? `${r.project} › ` : ''}${r.task}`);
+        delete S.drafts[site.id];
+        renderSite(site.id);
+      } catch (e) { toast(e.message); t.disabled = false; }
+      return;
+    }
+    case 'rebuild-comment': delete S.drafts[site.id]; renderSite(site.id); return;
     case 'tasks-show': S.tasksShow = t.dataset.v; renderTasks(); return;
     case 'goto-site': {
       ev.preventDefault();
@@ -1471,12 +1529,12 @@ document.addEventListener('click', async (ev) => {
       ev.preventDefault();
       readAgencyForm();
       const f = $('#form-settings');
-      for (const k of ['allowMajorCore', 'mailTestWhenNoForm', 'showBrowser', 'notifyOnFailure']) draft[k] = f.elements[k].checked;
+      for (const k of ['allowMajorCore', 'mailTestWhenNoForm', 'showBrowser', 'notifyOnFailure', 'securityAfterUpdate']) draft[k] = f.elements[k].checked;
       draft.concurrency = Number(f.elements.concurrency.value);
       draft.formTestMode = f.elements.formTestMode.value;
       draft.loginMode = f.elements.loginMode.value;
       if (f.elements.asanaWorkspace) {
-        draft.asana = { ...draft.asana, workspace: f.elements.asanaWorkspace.value, postResults: f.elements.asanaPost.checked, logTime: f.elements.asanaTime.checked };
+        draft.asana = { ...draft.asana, workspace: f.elements.asanaWorkspace.value, postResults: f.elements.asanaPost.checked, logTime: f.elements.asanaTime.checked, commentStyle: f.elements.asanaStyle.value };
         if (draft.asana.workspace !== S.settings.asana.workspace) S.tasks = null;
       }
       draft.schedule = {
@@ -1540,6 +1598,7 @@ document.addEventListener('change', async (ev) => {
 
 document.addEventListener('input', (ev) => {
   const t = ev.target;
+  if (t.dataset.draft && S.drafts[t.dataset.draft]) { S.drafts[t.dataset.draft].text = t.value; return; }
   if (t.dataset.action === 'search-sites') { S.q = t.value; renderSites(); renderToolbar(); return; }
   if (t.dataset.action === 'search-tasks') { S.tasksQ = t.value; renderTasks(); return; }
   if (t.dataset.action === 'wporg-search') {

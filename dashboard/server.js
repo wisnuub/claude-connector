@@ -75,6 +75,19 @@ function sitesOrThrow(ids) {
   return ids;
 }
 
+/** The short Asana comment for a site's last run, updated with a later form test or security check. */
+function asanaDraft(id) {
+  const st = store.siteState(id);
+  const last = store.getHistory({ site: id, limit: 100 }).find(h => h.type === 'maintain');
+  const facts = st.asanaPending?.facts ? { ...st.asanaPending.facts } : last ? asana.runFacts(last) : { core: false, plugins: false, failed: [], form: null, security: null, at: null };
+  if (st.formTest && (!facts.form || !facts.at || st.formTest.at > facts.at)) facts.form = { status: st.formTest.status, message: st.formTest.message };
+  if (st.security?.at && (!facts.at || st.security.at > facts.at)) {
+    const high = st.security.summary?.high || 0;
+    facts.security = { high, cleaned: !!facts.security?.cleaned || (!!facts.security?.high && high === 0) };
+  }
+  return { text: asana.shortComment(facts), basedOn: last?.at || null, pending: !!st.asanaPending, task: st.asana || null };
+}
+
 function failuresInfo() {
   return store.openFailures().map(h => ({ site: h.site, siteName: h.siteName, title: h.title, at: h.at, summary: h.summary, first: summarize(h).failed[0]?.label || null }));
 }
@@ -253,6 +266,21 @@ async function api(req, res, url) {
   if ((mm = p.match(/^\/api\/sites\/([\w-]+)$/)) && m === 'DELETE') {
     store.removeSite(mm[1]);
     return send(res, 200, { ok: true });
+  }
+  if ((mm = p.match(/^\/api\/sites\/([\w-]+)\/asana-comment$/))) {
+    // POST { text } sends it to the site's Asana task; POST {} returns a draft.
+    const site = store.getSite(mm[1]);
+    if (!site) return send(res, 404, { message: 'Unknown site' });
+    if (typeof body.text === 'string') {
+      const text = body.text.trim();
+      if (!text) return send(res, 400, { message: 'The comment is empty.' });
+      try {
+        const r = await asana.postComment(site.id, { text });
+        store.patchSiteState(site.id, { asanaPending: null });
+        return send(res, 200, r);
+      } catch (e) { return send(res, e.status === 401 ? 401 : 400, { message: e.message }); }
+    }
+    return send(res, 200, asanaDraft(site.id));
   }
   if ((mm = p.match(/^\/api\/sites\/([\w-]+)\/claude-review$/))) {
     // Last security check → SECURITY-REPORT.md in the site's workspace, opened in VS Code.

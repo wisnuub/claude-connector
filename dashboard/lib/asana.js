@@ -354,22 +354,91 @@ export function commentHtml(record) {
 }
 
 /**
+ * What a run did, for the short comment: core / plugins updated, what failed,
+ * the form test and the security check.
+ */
+export function runFacts(record) {
+  const steps = record?.steps || [];
+  const updated = steps.filter(s => s.meta?.result === 'updated');
+  const form = [...steps].reverse().find(s => s.meta?.kind === 'form');
+  const sec = [...steps].reverse().find(s => s.meta?.kind === 'security' && s.meta.high != null);
+  return {
+    at: record?.at || null,
+    core: updated.some(s => s.meta.kind === 'core'),
+    plugins: updated.some(s => ['plugin', 'theme', 'translations'].includes(s.meta.kind)),
+    failed: steps.filter(s => s.meta?.result === 'failed' && ['plugin', 'theme', 'core'].includes(s.meta.kind)).map(s => s.meta.name || s.label),
+    form: form ? { status: form.meta.form || (form.status === 'ok' ? 'sent' : 'failed'), message: form.detail || null } : null,
+    formQueued: steps.some(s => s.meta?.kind === 'form-queued'),
+    security: sec ? { high: sec.meta.high, cleaned: !!sec.meta.cleaned } : null,
+  };
+}
+
+/**
+ * The short comment, in the team's usual words:
+ * "WP core + plugin update done, test form sent, site cleaned from malicious code".
+ */
+export function shortComment(f) {
+  const parts = [];
+  const what = [f.core && 'WP core', f.plugins && 'plugin'].filter(Boolean);
+  parts.push(what.length ? `${what.join(' + ')} update done` : 'no updates needed');
+  if (f.failed?.length) parts.push(`${f.failed.join(', ')} update failed and was rolled back`);
+  const fs = f.form?.status;
+  if (fs === 'sent') parts.push('test form sent');
+  else if (fs === 'no_form' || fs === 'mail_sent' || fs === 'mail_failed') parts.push('no test form sent/no contact form available on the site');
+  else if (fs === 'blocked') parts.push('test form not sent - the form has a captcha, test it by hand');
+  else if (fs === 'unknown') parts.push('test form submitted but no confirmation shown - check the inbox');
+  else if (fs) parts.push(`test form failed${f.form.message ? ` (${String(f.form.message).split(' · ')[0].slice(0, 120)})` : ''}`);
+  if (f.security?.cleaned) parts.push('site cleaned from malicious code');
+  else if (f.security?.high) parts.push(`security check found ${f.security.high} warning sign${f.security.high === 1 ? '' : 's'} - to review`);
+  const text = parts.join(', ');
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** Posts a comment (plain text, or the detailed HTML log) on a site's linked task. */
+export async function postComment(siteId, { text, html }) {
+  const link = siteState(siteId).asana;
+  if (!link?.taskGid) throw new AsanaError(400, 'This site has no Asana task linked - pick one in its Asana & login tab.');
+  await api('POST', `/tasks/${link.taskGid}/stories`, { body: html ? { html_text: html } : { text } });
+  return { task: link.taskName, project: link.project, url: link.url };
+}
+
+/**
  * After a run on a site: comment on its linked task, and optionally add the
- * time to Actual time. Returns what happened, for the run's log.
+ * time to Actual time. When the form test waits for the morning run, the
+ * comment waits too and goes out with the form result (see postAfterFormTest).
+ * Returns what happened, for the run's log.
  */
 export async function postResults(siteId, record, durationMs) {
   const s = getSettings().asana;
   const link = siteState(siteId).asana;
   if (!s.postResults || !link?.taskGid || !(await getSecret(TOKEN))) return null;
-  await api('POST', `/tasks/${link.taskGid}/stories`, { body: { html_text: commentHtml(record) } });
-  let time = null;
-  if (s.logTime && durationMs > 0) {
-    try {
-      await api('POST', `/tasks/${link.taskGid}/time_tracking_entries`, { body: { duration_minutes: Math.max(1, Math.round(durationMs / 60000)) } });
-      time = Math.max(1, Math.round(durationMs / 60000));
-    } catch (e) {
-      time = e.status === 402 ? 'not available on this Asana plan' : e.message;
-    }
+  const facts = runFacts(record);
+  if (s.commentStyle !== 'detailed' && facts.formQueued) {
+    patchSiteState(siteId, { asanaPending: { facts, durationMs } });
+    return { deferred: true, task: link.taskName, project: link.project };
   }
-  return { task: link.taskName, project: link.project, url: link.url, time };
+  const posted = await postComment(siteId, s.commentStyle === 'detailed' ? { html: commentHtml(record) } : { text: shortComment(facts) });
+  patchSiteState(siteId, { asanaPending: null });
+  return { ...posted, time: await logTime(link.taskGid, durationMs) };
+}
+
+/** After a (morning) form test: post the comment a run left waiting, now with the form result. */
+export async function postAfterFormTest(siteId, record) {
+  const pending = siteState(siteId).asanaPending;
+  if (!pending || !getSettings().asana.postResults || !(await getSecret(TOKEN))) return null;
+  const form = runFacts(record).form;
+  const posted = await postComment(siteId, { text: shortComment({ ...pending.facts, form }) });
+  patchSiteState(siteId, { asanaPending: null });
+  return { ...posted, time: await logTime(siteState(siteId).asana?.taskGid, pending.durationMs) };
+}
+
+async function logTime(taskGid, durationMs) {
+  if (!getSettings().asana.logTime || !taskGid || !(durationMs > 0)) return null;
+  const minutes = Math.max(1, Math.round(durationMs / 60000));
+  try {
+    await api('POST', `/tasks/${taskGid}/time_tracking_entries`, { body: { duration_minutes: minutes } });
+    return minutes;
+  } catch (e) {
+    return e.status === 402 ? 'not available on this Asana plan' : e.message;
+  }
 }

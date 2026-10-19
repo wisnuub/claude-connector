@@ -65,7 +65,9 @@ export const DEFAULT_SETTINGS = {
   // extension (dashboard/extension), falling back to 'window' = a separate browser window.
   loginMode: 'tab',
   // workspace: Asana workspace gid. The token itself lives in the Keychain (secrets.js).
-  asana: { workspace: null, postResults: true, logTime: false },
+  // commentStyle: 'short' = one line in the team's words, 'detailed' = the full log.
+  asana: { workspace: null, postResults: true, logTime: false, commentStyle: 'short' },
+  securityAfterUpdate: true,
   schedule: { enabled: false, time: '08:30', days: [1, 2, 3, 4, 5], what: 'queued' },
 };
 
