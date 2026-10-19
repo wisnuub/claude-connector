@@ -3,7 +3,7 @@
  * Plugin Name:  Claude Connector
  * Plugin URI:   https://github.com/wisnuub/claude-connector
  * Description:  Secure REST API bridge for Claude AI - ACF sync, cache purge, file management, database queries, post CRUD, plugin/theme control, maintenance updates with rollback, and more.
- * Version:      1.8.5
+ * Version:      1.8.6
  * Author:       Wisnuub
  * Author URI:   https://wisnuub.github.io
  * License:      GPL-2.0-or-later
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'CLAUDE_CONNECTOR_VERSION', '1.8.5' );
+define( 'CLAUDE_CONNECTOR_VERSION', '1.8.6' );
 define( 'CLAUDE_CONNECTOR_NS',      'claude/v1' );
 define( 'CLAUDE_CONNECTOR_GH_REPO', 'wisnuub/claude-connector' );
 
@@ -4121,14 +4121,27 @@ function claude_security_scan() {
     usort( $recent, function ( $a, $b ) { return $b['t'] - $a['t']; } );
     if ( $recent ) $add( 'low', 'files', 'PHP files changed in the last 7 days', array_map( function ( $r ) { unset( $r['t'] ); return $r; }, $recent ), 'Updates change files too - compare against what was updated.' );
 
-    // 8. Administrators, newest first.
-    $admins = array();
-    foreach ( get_users( array( 'role' => 'administrator', 'orderby' => 'registered', 'order' => 'DESC', 'number' => 50 ) ) as $u ) {
-        $admins[] = array( 'path' => $u->user_login, 'detail' => $u->user_email . ' · registered ' . wp_date( 'Y-m-d', strtotime( $u->user_registered ) ), 'new' => strtotime( $u->user_registered ) > time() - 30 * DAY_IN_SECONDS );
+    // 8. Administrator accounts, with reasons any look out of place.
+    $site_domain = preg_replace( '/^www\./', '', strtolower( (string) parse_url( home_url(), PHP_URL_HOST ) ) );
+    $admins = $suspicious = array();
+    foreach ( get_users( array( 'role' => 'administrator', 'orderby' => 'registered', 'order' => 'DESC', 'number' => 100 ) ) as $u ) {
+        $reasons = array();
+        $reg     = strtotime( $u->user_registered );
+        if ( $reg > time() - 30 * DAY_IN_SECONDS ) $reasons[] = 'created in the last 30 days';
+        if ( preg_match( '/^[a-f0-9]{10,}$/i', $u->user_login ) || preg_match( '/^[a-z]{2,}\d{3,}$/i', $u->user_login ) ) $reasons[] = 'username looks machine-generated';
+        if ( preg_match( '/^(?:admin|administrator|wpadmin|support|root|test|user|backup|seo|manager)\d+$/i', $u->user_login ) ) $reasons[] = 'username is a common attacker pattern';
+        $email_domain = strtolower( (string) substr( strrchr( (string) $u->user_email, '@' ), 1 ) );
+        if ( $email_domain && $site_domain && $email_domain !== $site_domain && strpos( $site_domain, $email_domain ) === false && ! in_array( $email_domain, array( 'gmail.com', 'outlook.com', 'hotmail.com', 'yahoo.com', 'yahoo.com.au', 'icloud.com', 'bigpond.com' ), true ) ) $reasons[] = "email on another domain ({$email_domain})";
+        $entry = array(
+            'path'       => $u->user_login,
+            'detail'     => $u->user_email . ' · registered ' . wp_date( 'Y-m-d', $reg ) . ' · ' . count_user_posts( $u->ID ) . ' posts · display "' . $u->display_name . '"' . ( $reasons ? ' · ' . implode( '; ', $reasons ) : '' ),
+            'suspicious' => ! empty( $reasons ),
+        );
+        $admins[] = $entry;
+        if ( $reasons ) $suspicious[] = $entry;
     }
-    $new_admins = array_values( array_filter( $admins, function ( $a ) { return $a['new']; } ) );
-    if ( $new_admins ) $add( 'medium', 'users', 'Administrators created in the last 30 days', $new_admins, 'Attackers often add an admin account to get back in.' );
-    $add( 'info', 'users', 'All administrator accounts', $admins );
+    if ( $suspicious ) $add( 'medium', 'users', 'Administrator accounts that look out of place', $suspicious, 'Attackers add or rename an admin account to keep access. Check each with whoever manages the site; remove any not meant to be there.' );
+    $add( 'info', 'users', 'All administrator accounts', $admins, 'Review the full list - an attacker account can also look ordinary.' );
 
     // 9. .htaccess redirects and PHP settings that pull in other files.
     $ht = array();
@@ -4157,17 +4170,62 @@ function claude_security_scan() {
         if ( $cfg_hits ) $add( 'high', 'config', 'Suspicious code in wp-config.php', $cfg_hits );
     }
 
-    // 11. Scripts injected into content and settings.
+    // 11. Injected code in content - including inside page-builder modules (Divi
+    //     Code modules, Elementor widgets), where it hides from a file scan. Reports
+    //     the snippet and any outside domain, so a planted script in a Divi Code
+    //     module is visible even though it lives in the database, not a file.
     global $wpdb;
-    $home_host = (string) parse_url( home_url(), PHP_URL_HOST );
-    $posts     = $wpdb->get_results( "SELECT ID, post_title, post_type FROM {$wpdb->posts} WHERE post_status IN ('publish','draft','private') AND (post_content LIKE '%<script%src=%' OR post_content LIKE '%eval(%' OR post_content LIKE '%String.fromCharCode%' OR post_content LIKE '%document.write(unescape%') LIMIT 40" ); // phpcs:ignore
-    $p_items   = array();
-    foreach ( (array) $posts as $p ) $p_items[] = array( 'path' => "{$p->post_type} #{$p->ID}", 'detail' => $p->post_title );
-    if ( $p_items ) $add( 'medium', 'content', 'Posts and pages containing scripts', $p_items, "Embeds (forms, maps, analytics) are normal; scripts from unknown domains or obfuscated ones are not. Site host: {$home_host}." );
-    $opts   = $wpdb->get_results( "SELECT option_name FROM {$wpdb->options} WHERE option_name NOT LIKE '\\_transient%' AND option_name NOT LIKE '\\_site\\_transient%' AND (option_value LIKE '%<script%' OR option_value LIKE '%eval(%' OR option_value LIKE '%base64_decode(%') LIMIT 40" ); // phpcs:ignore
+    $home_host = strtolower( (string) parse_url( home_url(), PHP_URL_HOST ) );
+
+    $find_injection = function ( $text ) use ( $home_host ) {
+        if ( $text === '' || $text === null ) return null;
+        $decoded = html_entity_decode( str_replace( array( '||et_pb_line_break_holder||', '%22', '%91', '%93' ), array( "\n", '"', '[', ']' ), $text ), ENT_QUOTES, 'UTF-8' );
+        $ok = array( 'www.googletagmanager.com', 'www.google-analytics.com', 'www.google.com', 'www.gstatic.com', 'connect.facebook.net', 'platform.twitter.com', 'www.youtube.com', 'youtube.com', 'player.vimeo.com', 'js.stripe.com', 'maps.googleapis.com', 'cdn.jsdelivr.net', 'cdnjs.cloudflare.com', 'code.jquery.com', 'unpkg.com', 'www.recaptcha.net', 'cdn.shopify.com', 'static.hotjar.com', 'embed.tawk.to', 'www.clarity.ms' );
+        foreach ( array( (string) $text, (string) $decoded ) as $hay ) {
+            if ( preg_match( '#<script\b[^>]*\bsrc\s*=\s*["\']?(?:https?:)?//([^"\'\s>/]+)#i', $hay, $m ) ) {
+                $host = strtolower( $m[1] );
+                if ( $host !== $home_host && strpos( $host, $home_host ) === false && ! in_array( $host, $ok, true ) ) return array( 'why' => "external script from {$host}", 'snippet' => trim( substr( $m[0], 0, 180 ) ) );
+            }
+            if ( preg_match( '#(eval\s*\(\s*(?:atob|function|String\.fromCharCode)|String\.fromCharCode\s*\(|document\.write\s*\(\s*unescape|\batob\s*\(\s*["\']|(?:\\\\x[0-9a-f]{2}){8,}|base64_decode\s*\()#i', $hay, $m, PREG_OFFSET_CAPTURE ) ) {
+                return array( 'why' => 'obfuscated or self-decoding script', 'snippet' => trim( substr( $hay, max( 0, $m[0][1] - 20 ), 180 ) ) );
+            }
+            if ( preg_match( '#<iframe\b[^>]*\bsrc\s*=\s*["\']?(?:https?:)?//([^"\'\s>/]+)#i', $hay, $m ) && strtolower( $m[1] ) !== $home_host && strpos( strtolower( $m[1] ), $home_host ) === false ) {
+                return array( 'why' => "iframe from {$m[1]}", 'snippet' => trim( substr( $m[0], 0, 180 ) ) );
+            }
+            if ( preg_match( '#<meta[^>]+http-equiv=["\']?refresh["\']?[^>]+url=([^"\'>]+)#i', $hay, $m ) ) {
+                return array( 'why' => 'meta-refresh redirect', 'snippet' => trim( substr( $m[0], 0, 180 ) ) );
+            }
+        }
+        return null;
+    };
+
+    $types = array_unique( array_merge( array_values( get_post_types( array( 'public' => true ) ) ), array( 'et_header_layout', 'et_body_layout', 'et_footer_layout', 'wp_block', 'wp_template', 'wp_template_part' ) ) );
+    $in    = implode( ',', array_map( function ( $t ) use ( $wpdb ) { return $wpdb->prepare( '%s', $t ); }, $types ) );
+    $rows  = $wpdb->get_results( "SELECT ID, post_title, post_type, post_content FROM {$wpdb->posts} WHERE post_status IN ('publish','draft','private','pending','future') AND post_type IN ({$in}) AND (post_content LIKE '%<script%' OR post_content LIKE '%<iframe%' OR post_content LIKE '%eval%' OR post_content LIKE '%fromCharCode%' OR post_content LIKE '%et_pb_code%' OR post_content LIKE '%base64%' OR post_content LIKE '%unescape%' OR post_content LIKE '%http-equiv%') LIMIT 300" ); // phpcs:ignore
+    $hits = array();
+    foreach ( (array) $rows as $r ) {
+        $inj = $find_injection( (string) $r->post_content );
+        if ( ! $inj ) continue;
+        $builder = strpos( $r->post_content, 'et_pb_code' ) !== false ? ' (in a Divi Code module)' : ( strpos( $r->post_content, 'et_pb_' ) !== false ? ' (in Divi builder content)' : '' );
+        $hits[] = array( 'path' => "{$r->post_type} #{$r->ID}: " . ( $r->post_title ?: '(no title)' ), 'detail' => $inj['why'] . $builder, 'hits' => array( array( 'label' => $inj['why'], 'line' => 0, 'snippet' => preg_replace( '/\s+/', ' ', $inj['snippet'] ) ) ) );
+        if ( count( $hits ) >= 50 ) break;
+    }
+    $meta = $wpdb->get_results( "SELECT post_id, meta_value FROM {$wpdb->postmeta} WHERE meta_key = '_elementor_data' AND (meta_value LIKE '%<script%' OR meta_value LIKE '%fromCharCode%' OR meta_value LIKE '%eval(%' OR meta_value LIKE '%<iframe%' OR meta_value LIKE '%base64%') LIMIT 200" ); // phpcs:ignore
+    foreach ( (array) $meta as $mm ) {
+        $inj = $find_injection( (string) $mm->meta_value );
+        if ( ! $inj ) continue;
+        $hits[] = array( 'path' => 'post #' . $mm->post_id . ' (Elementor)', 'detail' => $inj['why'] . ' (in an Elementor widget)', 'hits' => array( array( 'label' => $inj['why'], 'line' => 0, 'snippet' => preg_replace( '/\s+/', ' ', $inj['snippet'] ) ) ) );
+        if ( count( $hits ) >= 70 ) break;
+    }
+    if ( $hits ) $add( 'high', 'content', 'Injected code in posts, pages or builder content', $hits, "Legitimate embeds (analytics, maps, forms, chat) come from known providers; a script or iframe from an unknown domain, or obfuscated code, is an injection - often hidden inside a Divi Code module or Elementor widget. Site host: {$home_host}." );
+
+    $opts = $wpdb->get_results( "SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name NOT LIKE '\_transient%' AND option_name NOT LIKE '\_site\_transient%' AND (option_value LIKE '%<script%' OR option_value LIKE '%fromCharCode%' OR option_value LIKE '%eval(%' OR option_value LIKE '%<iframe%') LIMIT 100" ); // phpcs:ignore
     $o_items = array();
-    foreach ( (array) $opts as $o ) $o_items[] = array( 'path' => $o->option_name );
-    if ( $o_items ) $add( 'medium', 'content', 'Settings (wp_options) containing scripts or code', $o_items, 'Header/footer script and analytics plugins store scripts here legitimately.' );
+    foreach ( (array) $opts as $o ) {
+        $inj = $find_injection( (string) $o->option_value );
+        if ( $inj ) $o_items[] = array( 'path' => $o->option_name, 'detail' => $inj['why'], 'hits' => array( array( 'label' => $inj['why'], 'line' => 0, 'snippet' => preg_replace( '/\s+/', ' ', $inj['snippet'] ) ) ) );
+    }
+    if ( $o_items ) $add( 'high', 'content', 'Injected code in settings (wp_options)', $o_items, 'Header/footer-script and theme-option plugins store scripts here legitimately; an unknown external or obfuscated one is not.' );
 
     // 12. Site address, in case it was changed to send visitors elsewhere.
     $siteurl = get_option( 'siteurl' );

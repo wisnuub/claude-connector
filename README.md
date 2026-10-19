@@ -693,6 +693,15 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 
 ## Changelog
 
+### 1.8.6 — Deeper security scan: builder content and accounts
+
+**Changed (the security check)**
+
+- **Injected code in content now covers page builders.** As well as post content, it reads **Divi Code modules** (decoding Divi's `||et_pb_line_break_holder||` / `%22` encoding) and **Elementor** widget data in postmeta, and reports the actual snippet and the outside domain - so a planted `<script>` or iframe hidden inside a builder module is visible even though it lives in the database, not a file. Scripts from known providers (Google, Facebook, Stripe, YouTube, jQuery/CDNs, chat widgets…) are not flagged; unknown external or obfuscated ones (eval/atob/base64/char-code/escaped-hex, meta-refresh) are. Settings (`wp_options`) are scanned the same way.
+- **Administrator accounts are audited, not just counted.** Each admin is listed with its email, registration date and post count, and flagged when it looks out of place: created in the last 30 days, a machine-generated or common-attacker username (`admin123`, long random strings), or an email on an unrelated domain.
+
+**Verified** on a local WordPress 7.1.3 with planted, inert fixtures: an external script in a Divi Code module and an obfuscated script in an Elementor widget were both detected with their snippet; a legitimate analytics tag in a Code module was not flagged; and four out-of-place admin accounts (random username, `admin123`, foreign email, recent) were flagged while an ordinary one was listed without a warning.
+
 ### 1.8.5 — Restore WordPress core files
 
 **Added**

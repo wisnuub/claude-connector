@@ -1,6 +1,6 @@
 import { listSites } from './lib/store.js';
 import { call, externalCheck } from './lib/wp.js';
-const VERSION = '1.8.4';
+const VERSION = '1.8.5';
 const ZIP = `https://github.com/wisnuub/claude-connector/releases/download/v${VERSION}/claude-connector.zip`;
 const only = process.argv.slice(2);
 const wp = (s, args, timeout = 180000) => call(s, 'POST', '/wpcli', { body: { args }, timeout });
