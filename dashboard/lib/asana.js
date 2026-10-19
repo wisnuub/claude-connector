@@ -210,6 +210,55 @@ export function parseLoginTask(notes) {
   return rest.length >= 2 ? [{ url, user: rest[0], pass: rest[1] }] : [];
 }
 
+/** A one-line comment that is a new password: one word, 6+ characters, with a digit or symbol. */
+const looksLikePassword = s => !/\s/.test(s) && s.length >= 6 && /[\d\W_]/.test(s) && !URL_RE.test(s);
+
+/**
+ * What one description or comment in a Login task says: any of the address,
+ * username and password. A single line is a new password for the same
+ * username (when it looks like one).
+ */
+export function parseLoginUpdate(text) {
+  const labelled = parseLogins(text);
+  if (labelled.length) return labelled[labelled.length - 1];
+  let url = null;
+  const rest = [];
+  for (const raw of String(text || '').replace(/\r/g, '').split('\n')) {
+    const line = raw.replace(/\u00a0/g, ' ').trim();
+    if (!line || LABEL_ONLY_RE.test(line)) continue;
+    const m = line.match(URL_RE);
+    if (m && line === m[1]) { url ||= m[1]; continue; }
+    rest.push(line);
+  }
+  if (rest.length >= 2) return { url, user: rest[0], pass: rest[1] };
+  if (rest.length === 1 && looksLikePassword(rest[0])) return { url, pass: rest[0], passwordOnly: true };
+  return url ? { url } : null;
+}
+
+/**
+ * A Login task as a history, oldest first: each entry updates the address,
+ * username and/or password. Returns every complete login it went through,
+ * newest first, each with the address last known.
+ *
+ * @param {Array<{ text, where }>} entries  description first, then comments oldest → newest
+ */
+export function loginHistory(entries) {
+  const cur = { url: null, user: null, pass: null };
+  const states = [];
+  for (const e of entries) {
+    const u = parseLoginUpdate(e.text);
+    if (!u) continue;
+    if (u.url) cur.url = u.url;
+    if (u.user) cur.user = u.user;
+    if (u.pass) cur.pass = u.pass;
+    if ((u.user || u.pass) && cur.user && cur.pass) states.push({ ...cur, where: u.passwordOnly ? `${e.where} (new password)` : e.where });
+  }
+  const seen = new Set();
+  return states.reverse()
+    .map(st => ({ ...st, url: st.url || cur.url }))
+    .filter(st => { const k = `${st.user}|${st.pass}`; if (seen.has(k)) return false; seen.add(k); return true; });
+}
+
 /**
  * Looks for the login: first the project's Login task, then the task's own
  * description, the project's description and overview, and the task's
@@ -223,20 +272,16 @@ export async function loginsFor(taskGid) {
       const inProject = await all(`/projects/${p.gid}/tasks`, { opt_fields: 'name,notes,permalink_url' });
       for (const lt of inProject.filter(t => LOGIN_TASK_RE.test(t.name || ''))) {
         const name = lt.name.trim();
-        // The login is usually posted as a comment (address, username, password - or
-        // just the last two when it changes), so newest comment first, then the description.
-        const found = [];
+        // The login is usually posted as comments - address, username and password,
+        // or just a new password when it changes - so read the task as a history.
+        const entries = [{ text: lt.notes, where: `“${name}” description` }];
         try {
-          const comments = (await all(`/tasks/${lt.gid}/stories`, { opt_fields: 'text,type,created_at,created_by.name' }))
-            .filter(c => c.type === 'comment').reverse();
+          const comments = (await all(`/tasks/${lt.gid}/stories`, { opt_fields: 'text,type,created_at,created_by.name' })).filter(c => c.type === 'comment');
           for (const c of comments) {
-            for (const l of parseLoginTask(c.text)) found.push({ ...l, where: `“${name}” · ${c.created_by?.name || 'comment'}, ${new Date(c.created_at).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}` });
+            entries.push({ text: c.text, where: `“${name}” · ${c.created_by?.name || 'comment'}, ${new Date(c.created_at).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}` });
           }
         } catch {}
-        for (const l of parseLoginTask(lt.notes)) found.push({ ...l, where: `“${name}” description` });
-        // An address given once applies to the logins posted without it.
-        const addr = found.find(f => f.url)?.url || null;
-        for (const f of found) f.url ||= addr;
+        const found = loginHistory(entries);
         sources.push({ where: name, logins: found, link: lt.permalink_url });
       }
     } catch {}
