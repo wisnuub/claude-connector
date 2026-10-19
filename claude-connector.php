@@ -3,7 +3,7 @@
  * Plugin Name:  Claude Connector
  * Plugin URI:   https://github.com/wisnuub/claude-connector
  * Description:  Secure REST API bridge for Claude AI - ACF sync, cache purge, file management, database queries, post CRUD, plugin/theme control, maintenance updates with rollback, and more.
- * Version:      1.8.8
+ * Version:      1.8.9
  * Author:       Wisnuub
  * Author URI:   https://wisnuub.github.io
  * License:      GPL-2.0-or-later
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'CLAUDE_CONNECTOR_VERSION', '1.8.8' );
+define( 'CLAUDE_CONNECTOR_VERSION', '1.8.9' );
 define( 'CLAUDE_CONNECTOR_NS',      'claude/v1' );
 define( 'CLAUDE_CONNECTOR_GH_REPO', 'wisnuub/claude-connector' );
 
@@ -3684,8 +3684,18 @@ function claude_security_quarantine_allowed( $abs, $sums ) {
     }
     $rel = ltrim( substr( $real, strlen( wp_normalize_path( $base ) ) ), '/' );
 
-    if ( in_array( strtolower( basename( $rel ) ), array( 'wp-config.php', 'wp-config-sample.php', '.htaccess', '.user.ini', 'php.ini' ), true ) ) {
+    $name = strtolower( basename( $rel ) );
+    if ( in_array( $name, array( 'wp-config.php', 'wp-config-sample.php', '.user.ini', 'php.ini' ), true ) ) {
         return array( 'protected', basename( $rel ) . ' is a configuration file - review it by hand, it is not removed automatically.' );
+    }
+    if ( $name === '.htaccess' ) {
+        // A .htaccess with rules, or the site-root / wp-content one, is never touched.
+        // An EMPTY stub left in wp-admin or wp-includes is just clutter and safe to clear.
+        $in_core_dir = preg_match( '#^wp-(admin|includes)/#', $rel );
+        $empty       = trim( (string) @file_get_contents( $real ) ) === ''; // phpcs:ignore
+        if ( ! $in_core_dir || ! $empty ) {
+            return array( 'protected', $rel . ' is an .htaccess file - ' . ( $in_core_dir ? 'it has rules in it, so' : 'only empty ones in wp-admin / wp-includes can be cleared;' ) . ' review it by hand.' );
+        }
     }
     if ( is_array( $sums ) && isset( $sums[ $rel ] ) ) {
         return array( 'is_core', "{$rel} is a genuine WordPress core file. If it was modified, restore it by reinstalling core (wp core download --skip-content --force), do not delete it." );

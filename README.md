@@ -717,6 +717,14 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 
 ## Changelog
 
+### 1.8.9 — Quarantine empty .htaccess stubs
+
+**Changed**
+
+- **Quarantine now accepts an empty `.htaccess` stub in `wp-admin` or `wp-includes`** - the harmless clutter a cleanup or security plugin leaves behind. The site root `.htaccess`, the `wp-content` one, and any `.htaccess` that actually contains rules are still refused (review those by hand), as are `wp-config.php`, `.user.ini` and `php.ini`.
+
+**Verified** on a local WordPress: empty `.htaccess` stubs in `wp-admin`, a nested `wp-admin` folder and `wp-includes` were quarantined, while the site-root `.htaccess`, the `wp-content` one and a `wp-admin` `.htaccess` with rules were refused.
+
 ### 1.8.8 — Security scan: every embed in a module, and widget providers
 
 **Changed (the security check)**
