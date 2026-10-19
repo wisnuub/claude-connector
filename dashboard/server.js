@@ -169,6 +169,15 @@ async function api(req, res, url) {
     try { return send(res, 200, await asana.myTasks({ refresh: url.searchParams.get('refresh') === '1' })); }
     catch (e) { return send(res, e.status === 401 ? 401 : 502, { message: e.message }); }
   }
+  let tm;
+  if (m === 'GET' && (tm = p.match(/^\/api\/sites\/([\w-]+)\/asana-task$/))) {
+    const site = store.getSite(tm[1]);
+    if (!site) return send(res, 404, { message: 'Unknown site' });
+    const link = store.siteState(site.id).asana;
+    if (!link?.taskGid) return send(res, 200, { linked: false });
+    try { return send(res, 200, { linked: true, ...(await asana.taskStatus(link.taskGid)) }); }
+    catch (e) { return send(res, e.status === 401 ? 401 : 502, { message: e.message }); }
+  }
   if (m === 'GET' && p === '/api/asana/logins') {
     // Fetched when asked for, straight from Asana; not stored here.
     try { return send(res, 200, await asana.loginsFor(String(url.searchParams.get('task') || '').replace(/\D/g, ''))); }

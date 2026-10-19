@@ -32,6 +32,7 @@ const S = {
   showDone: false,          // Tasks: also show WordPress update tasks already done this month
   logins: {},               // task gid -> { busy, error, logins, task }
   drafts: {},               // site id -> { text, basedOn, pending } for the Asana comment
+  taskStatus: {},           // site id -> { completed, completedAt, completedBy, lastComment, lastDoneComment }
   reveal: new Set(),        // "gid|i" of shown passwords
 };
 
@@ -796,12 +797,42 @@ function asanaTab(site) {
       </label>
       ${link ? `<p class="hint" style="margin-top:8px">${link.auto ? 'Matched by project name. ' : ''}<a href="${h(link.url)}" target="_blank" rel="noopener">Open in Asana ↗</a>${S.settings.asana.postResults ? '' : ' · posting results is off in Settings'}</p>` : '<p class="hint" style="margin-top:8px">No task matched this site by project name - pick one.</p>'}
     </div>
+    <div class="card"><h4>Last WordPress update</h4>${taskStatusCard(site)}</div>
     <div class="card" style="grid-column:1/-1"><h4>Comment for Asana</h4>${commentCard(site)}</div>
     <div class="card"><h4>WordPress login</h4>
       ${link ? `<button class="btn sm" data-action="asana-logins" data-gid="${h(link.taskGid)}">${S.logins[link.taskGid] ? 'Read again' : 'Show login from Asana'}</button>${loginsBlock(link.taskGid, site.url)}`
         : '<p class="hint">Link the site\'s Asana task to read its login.</p>'}
     </div>
   </div>`;
+}
+
+function taskStatusCard(site) {
+  if (!site.asana) return '<p class="hint">Link an Asana task to track its status.</p>';
+  if (!(site.id in S.taskStatus)) { loadTaskStatus(site.id); return '<p class="muted">Checking Asana…</p>'; }
+  const t = S.taskStatus[site.id];
+  if (t === null) return '<p class="muted">Checking Asana…</p>';
+  if (t?.error) return `<div class="notice bad">${h(t.error)}</div>`;
+  const comment = c => c ? `“${h(c.text)}”<span class="muted"> - ${h(c.by || 'someone')}, ${h(ago(c.at))}</span>` : null;
+  const rows = [];
+  rows.push(['Status', t.completed
+    ? `<span class="pill ok"><span class="dot"></span>Done</span> ${h(t.completedBy ? `marked by ${t.completedBy}` : 'completed')}${t.completedAt ? ` · ${h(new Date(t.completedAt).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' }))}` : ''}`
+    : `<span class="pill"><span class="dot"></span>Open</span> <span class="muted">not marked complete yet</span>`]);
+  if (t.lastDoneComment) rows.push(['Last "update done"', comment(t.lastDoneComment)]);
+  rows.push(['Latest comment', comment(t.lastComment) || '<span class="faint">none</span>']);
+  // Told the boss but not acknowledged yet?
+  const told = t.lastDoneComment && !t.completed;
+  return `<dl class="kv">${rows.map(([k, v]) => `<dt>${h(k)}</dt><dd>${v}</dd>`).join('')}</dl>
+    ${told ? '<p class="hint" style="margin-top:8px">You\'ve already posted an "update done" comment - waiting for it to be marked complete in Asana. No need to comment again.</p>' : ''}
+    <div class="bar" style="margin:8px 0 0"><a class="btn sm ghost" href="${h(t.url || site.asana.url)}" target="_blank" rel="noopener">Open in Asana ↗</a><button class="btn sm ghost" data-action="refresh-task-status">Refresh</button></div>`;
+}
+
+async function loadTaskStatus(id) {
+  S.taskStatus[id] = null; // "loading" marker distinct from undefined
+  try {
+    const r = await api('GET', `/api/sites/${encodeURIComponent(id)}/asana-task`);
+    S.taskStatus[id] = r.linked ? r : { error: 'No Asana task linked.' };
+  } catch (e) { S.taskStatus[id] = { error: e.message }; }
+  renderSite(id);
 }
 
 function commentCard(site) {
@@ -1238,6 +1269,7 @@ document.addEventListener('click', async (ev) => {
       }
       return openReview(list.map(t => t.siteId), `WordPress update tasks - ${list.length} site${list.length === 1 ? '' : 's'}`);
     }
+    case 'refresh-task-status': delete S.taskStatus[site.id]; renderSite(site.id); return;
     case 'send-comment': {
       const ta = $(`#draft-${CSS.escape(site.id)}`);
       t.disabled = true;
@@ -1245,6 +1277,7 @@ document.addEventListener('click', async (ev) => {
         const r = await api('POST', `/api/sites/${encodeURIComponent(site.id)}/asana-comment`, { text: ta.value });
         toast(`Posted to ${r.project ? `${r.project} › ` : ''}${r.task}`);
         delete S.drafts[site.id];
+        delete S.taskStatus[site.id];
         loadTasks();
         renderSite(site.id);
       } catch (e) { toast(e.message); t.disabled = false; }
@@ -1653,6 +1686,7 @@ document.addEventListener('change', async (ev) => {
   if (a === 'asana-link') {
     const task = (S.tasks?.tasks || []).find(x => x.gid === t.value);
     await api('POST', '/api/asana/link', { site: site.id, task: task ? { gid: task.gid, name: task.name, url: task.url, project: task.project } : null }).catch(e => toast(e.message));
+    delete S.taskStatus[site.id];
   }
   if (a === 'log-days') { S.logDays = Number(t.value); S.log = null; renderLog(); }
   if (a === 'site-agency') { await api('POST', '/api/sites/meta', { sites: [site.id], agencyId: t.value }).catch(e => toast(e.message)); if (agencies().length > 1) { await load(); } }

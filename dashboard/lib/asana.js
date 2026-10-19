@@ -418,6 +418,32 @@ export function shortComment(f) {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
+/**
+ * The linked task's current status - fetched by gid, so it still works after the
+ * boss marks it complete (which drops it from "my tasks"). Includes when it was
+ * completed and the latest comment, so the dashboard can show "last WordPress
+ * update" and avoid duplicate comments.
+ */
+export async function taskStatus(taskGid) {
+  if (!taskGid) return null;
+  const t = (await api('GET', `/tasks/${taskGid}`, { params: { opt_fields: 'name,permalink_url,completed,completed_at,completed_by.name,modified_at' } })).data;
+  let lastComment = null, lastDoneComment = null;
+  try {
+    const comments = (await all(`/tasks/${taskGid}/stories`, { opt_fields: 'text,type,created_at,created_by.name' })).filter(c => c.type === 'comment');
+    const fmt = c => ({ text: String(c.text || '').split(String.fromCharCode(10))[0].slice(0, 200), by: c.created_by?.name || null, at: c.created_at });
+    if (comments.length) lastComment = fmt(comments[comments.length - 1]);
+    const done = comments.filter(c => DONE_RE.test(c.text || '')).pop();
+    if (done) lastDoneComment = fmt(done);
+  } catch {}
+  return {
+    gid: t.gid, name: t.name, url: t.permalink_url,
+    completed: !!t.completed,
+    completedAt: t.completed_at || null,
+    completedBy: t.completed_by?.name || null,
+    lastComment, lastDoneComment,
+  };
+}
+
 /** Posts a comment (plain text, or the detailed HTML log) on a site's linked task. */
 export async function postComment(siteId, { text, html }) {
   const link = siteState(siteId).asana;
