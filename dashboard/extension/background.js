@@ -147,3 +147,22 @@ function signIn(user, pass, submits) {
   obs.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class', 'hidden'] });
   setTimeout(() => obs.disconnect(), 10 * 60_000);
 }
+
+// Clicking the toolbar icon opens the dashboard. It runs on 127.0.0.1; the port
+// is usually 4590 - try that, then a couple of common alternates, and focus an
+// already-open tab instead of opening another.
+const DASHBOARD_PORTS = [4590, 4591, 4599];
+chrome.action.onClicked.addListener(async () => {
+  let url = null;
+  for (const port of DASHBOARD_PORTS) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/api/state`, { signal: AbortSignal.timeout(1500) });
+      if (r.ok) { url = `http://127.0.0.1:${port}/`; break; }
+    } catch {}
+  }
+  if (!url) url = `http://127.0.0.1:${DASHBOARD_PORTS[0]}/`;
+  const tabs = await chrome.tabs.query({ url: 'http://127.0.0.1/*' });
+  const open = tabs.find(t => t.url && t.url.startsWith(url));
+  if (open) chrome.tabs.update(open.id, { active: true });
+  else chrome.tabs.create({ url });
+});

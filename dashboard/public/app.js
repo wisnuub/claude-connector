@@ -345,7 +345,7 @@ function panel(site) {
     ['security', 'Security', null, site.security?.summary?.high || 0],
     ['history', 'History', null, 0],
   ];
-  const body = !ov && ['plugins', 'themes', 'wordpress'].includes(tab) ? '' :
+  const body = !ov && ['plugins', 'themes'].includes(tab) ? '' :
     tab === 'plugins' ? pluginsTab(site) : tab === 'themes' ? themesTab(site) : tab === 'wordpress' ? wordpressTab(site) : tab === 'forms' ? formsTab(site) : tab === 'asana' ? asanaTab(site) : tab === 'security' ? securityTab(site) : historyTab(site);
   return `${notice}
     <div class="tabs">${tabs.map(([k, l, n, u]) => `<button data-action="tab" data-v="${k}" class="${tab === k ? 'on' : ''}">${l}${u ? `<span class="n warn">${u}</span>` : n != null ? `<span class="n">${n}</span>` : ''}</button>`).join('')}
@@ -418,8 +418,25 @@ function themesTab(site) {
     </table></div>`;
 }
 
+function manageCard(site) {
+  const ov = site.overview;
+  return `<div class="card"><h4>Manage site</h4>
+      <dl class="kv">
+        <dt>Address</dt><dd><a href="${h(site.url)}" target="_blank" rel="noopener">${h(site.url)}</a></dd>
+        <dt>Connection</dt><dd>${h(site.mode)}</dd>
+        ${ov ? `<dt>Connector</dt><dd>${h(ov.plugin_version)}</dd><dt>File writes</dt><dd>${h(ov.filesystem.method)}${ov.filesystem.file_mods ? '' : ' (blocked)'}</dd>` : ''}
+        <dt>Found in</dt><dd>${h(site.source)}</dd></dl>
+      <div class="bar" style="margin:10px 0 0">
+        <button class="btn sm" data-action="site-url">Change URL…</button>
+        <button class="btn sm ghost" data-action="site-check">Re-check</button>
+        ${site.source !== 'manual' ? '<button class="btn sm ghost" data-action="site-hide">Hide from dashboard</button>' : ''}
+        <button class="btn sm ghost danger" data-action="site-delete">${site.source === 'manual' ? 'Remove site' : 'Delete site'}</button>
+      </div></div>`;
+}
+
 function wordpressTab(site) {
   const ov = site.overview;
+  if (!ov) return `<div class="grid2">${manageCard(site)}<div class="card"><h4>Not checked yet</h4><p class="hint">Press <b>Re-check</b> or <b>Check</b> to read this site's WordPress, PHP and update status. If the site is unreachable, use <b>Change URL…</b> (for a moved site) or <b>Delete site</b>.</p></div></div>`;
   const php = phpInfo(ov.php_version);
   const core = ov.core;
   return `<div class="grid2">
@@ -437,15 +454,7 @@ function wordpressTab(site) {
     <div class="card"><h4>Translations</h4>
       <p style="margin:0 0 10px">${ov.translations ? `${ov.translations} translation update${ov.translations === 1 ? '' : 's'} available` : 'Up to date'}</p>
       ${ov.translations ? '<button class="btn sm" data-action="translations-update">Update translations</button>' : ''}</div>
-    <div class="card"><h4>Server</h4>
-      <dl class="kv"><dt>File writes</dt><dd>${h(ov.filesystem.method)}${ov.filesystem.file_mods ? '' : ' (blocked)'}</dd>
-        <dt>Connector</dt><dd>${h(ov.plugin_version)}</dd><dt>Connection</dt><dd>${h(site.mode)}</dd>
-        <dt>Last check</dt><dd>${h(ago(ov.last_checked))}</dd><dt>Found in</dt><dd>${h(site.source)}</dd></dl>
-      <div class="bar" style="margin:10px 0 0">
-        <button class="btn sm" data-action="site-url">Change URL…</button>
-        ${site.source !== 'manual' ? '<button class="btn sm ghost" data-action="site-hide">Hide from dashboard</button>' : ''}
-        <button class="btn sm ghost danger" data-action="site-delete">${site.source === 'manual' ? 'Remove site' : 'Delete site'}</button>
-      </div></div>
+    ${manageCard(site)}
   </div>`;
 }
 
@@ -715,14 +724,14 @@ async function renderExtStatus() {
   el.innerHTML = '<p class="hint">Checking for the extension…</p>';
   const ext = await extensionRuntime();
   el.innerHTML = ext
-    ? `<p class="hint" style="margin:0">✓ The Site Maintenance Login extension ${h(ext.version)} is installed in this browser.</p>`
+    ? `<p class="hint" style="margin:0">✓ The Claude Connector extension ${h(ext.version)} is installed in this browser. Click its toolbar icon any time to open this dashboard.</p>`
     : `<div class="notice" style="margin:0">
-        <b>Install the extension once</b> (so Log in can use a new tab in this browser):
+        <b>Install the Claude Connector extension once</b> (Chrome or Edge, Windows or Mac) so Log in opens a new tab in this browser:
         <ol style="margin:6px 0 6px 18px;padding:0">
-          <li>Open <code>chrome://extensions</code> in a new tab (type it in the address bar).</li>
-          <li>Turn on <b>Developer mode</b> (top right).</li>
-          <li>Click <b>Load unpacked</b> and choose the <code>extension</code> folder: <button type="button" class="btn sm" data-action="reveal-extension">Show the folder in Finder</button></li>
-          <li>Come back here - this message turns into a tick.</li>
+          <li>Open <code>chrome://extensions</code> (or <code>edge://extensions</code>) in a new tab.</li>
+          <li>Turn on <b>Developer mode</b> (top-right toggle).</li>
+          <li>Click <b>Load unpacked</b> and choose the <code>extension</code> folder: <button type="button" class="btn sm" data-action="reveal-extension">Open the folder</button></li>
+          <li>Come back here - this message turns into a tick. (Its icon then opens this dashboard in one click.)</li>
         </ol>
         <span class="hint">Folder: <code>${h(S.extensionDir || 'dashboard/extension')}</code>. It only answers this dashboard, and keeps each login in memory for that one tab.</span>
       </div>`;

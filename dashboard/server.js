@@ -245,8 +245,12 @@ async function api(req, res, url) {
     return send(res, 200, { ok: true });
   }
   if (p === '/api/extension/reveal') {
-    // Shows the extension folder in Finder, ready for Chrome's "Load unpacked".
-    if (process.platform === 'darwin') spawn('open', ['-R', path.join(EXTENSION_DIR, 'manifest.json')], { stdio: 'ignore', detached: true }).unref();
+    // Opens the extension folder in the OS file manager, ready for Chrome's "Load unpacked".
+    try {
+      if (process.platform === 'darwin') spawn('open', [EXTENSION_DIR], { stdio: 'ignore', detached: true }).unref();
+      else if (process.platform === 'win32') spawn('explorer', [EXTENSION_DIR.replace(/\//g, '\\')], { stdio: 'ignore', detached: true }).unref();
+      else spawn('xdg-open', [EXTENSION_DIR], { stdio: 'ignore', detached: true }).unref();
+    } catch {}
     return send(res, 200, { dir: EXTENSION_DIR });
   }
   if (p === '/api/asana/site-url') {

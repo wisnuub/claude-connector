@@ -101,6 +101,19 @@ Needs Node.js 18+ and Google Chrome or Microsoft Edge (for the form test). Every
 
 **Shortcut (macOS):** `npm run shortcut` creates **Site Maintenance.app** in `~/Applications` and on the Desktop - open it from Spotlight, Launchpad or the Dock. It starts the dashboard if it is not running (through the background service when installed) and opens it in your browser. It also handles WP Admin's **Connect on this Mac** links (`claude-connector://`). It is built and signed (ad hoc) on your Mac, so Gatekeeper does not ask about it. `npm run shortcut -- --remove` deletes it; run `npm run shortcut` again if Node.js moves.
 
+### Browser extension (Chrome / Edge)
+
+A small **Claude Connector** extension (in [`dashboard/extension`](dashboard/extension)) does two things: its toolbar icon **opens the dashboard** in one click, and it lets **Log in** sign you into WordPress in a new tab of your own browser (rather than a separate window). It works the same on **Windows and Mac**, in Chrome or Edge, and there is nothing to run - no `.bat` or `.ps1`, just Chrome's built-in *Load unpacked*:
+
+1. Open `chrome://extensions` (or `edge://extensions`) in a new tab.
+2. Turn on **Developer mode** (top-right toggle).
+3. Click **Load unpacked** and choose the `dashboard/extension` folder. (In the dashboard, **Settings → Log in → Open the folder** jumps straight to it.)
+4. The **Claude Connector** icon (an orange link) appears in the toolbar. Pin it, then click it any time to open the dashboard.
+
+The extension only talks to the dashboard on `127.0.0.1`; it holds a login in the browser's memory for the one tab it opens and drops it once you are signed in, when the tab closes, or after 10 minutes. Since it is loaded unpacked (not from the Chrome Web Store), the browser may occasionally remind you that a developer-mode extension is installed - that is normal.
+
+**Running the dashboard on Windows:** there is no app bundle as on macOS, but nothing to distrust either - in the `dashboard` folder run `npm install` once, then `npm start`, and open `http://127.0.0.1:4590` (or just click the extension icon). To keep it running in the background across restarts, add that `npm start` as a Task Scheduler task at logon, or use a process manager such as `pm2`.
+
 ### Where the sites come from
 
 Nothing to configure for sites set up with the [one-click installer](#connecting-claude-code-one-click-setup): the dashboard reads every `~/claude-sites/<site>/.mcp.json` (URL, key and connection mode) and watches the folder, so a newly installed site appears within seconds - no reload - marked **New**. It also reads `mcp-server/sites.json`, and you can **Add site** by hand. Each site's **WordPress & server** tab has **Change URL…** (e.g. when a site moves off a `/newsite` staging path to its live address - it rewrites the address in the site's `~/claude-sites` workspace, keeping its history), **Hide from dashboard** (leaves the folder in place; show it again from Settings) and **Delete site** (removes the workspace folder too). **Hide** removes a site from the dashboard without touching its folder. Nothing is sent to a site until you press a button.
@@ -138,7 +151,7 @@ Connect Asana under **Settings → Asana** with a personal access token (Asana: 
 - **Last WordPress update** (a site's Asana & login tab) shows whether the linked task has been marked complete (and by whom, when) - which it reads even after completion drops the task from "my tasks" - plus the latest comment and the latest "update done" comment, so you can see what's been acknowledged and whether you've already let the reviewer know without commenting twice.
 - **Comment for Asana** (a site's Asana & login tab) shows that line for the last run, editable, with **Send** - for posting by hand.
 - **Logins**: **Login** on a task (or **Show login from Asana** on a site) finds the project's **Login** / **Logins** / **Login detail** / **Login details** task and reads it as a history - its description, then its comments oldest to newest: username on one line and password on the next, optionally the `wp-admin` address above them, or just a new password on its own line when only the password changed. The newest login is shown first; the username and address carry over from earlier comments. Labelled lines (`Username: …` / `Password: …`) work too. If there is no Login task it looks in the task itself, the project's description and overview, and the task's comments. When a login has no address and the site is not on the dashboard, **Log in** asks for it once per project. They are read when you ask and not stored by the dashboard. Copy the username or password, or press **Log in**, which opens the site's login page, fills it in and signs in - on any WordPress site, with or without the connector:
-  - **In a new tab of your own browser**, once the **Site Maintenance Login** extension is installed (Settings → Log in shows the steps: `chrome://extensions` → Developer mode → Load unpacked → `dashboard/extension`). Only the dashboard can ask it to log in; it keeps each login in memory for that one tab and drops it once you are in, when the tab closes, or after 10 minutes.
+  - **In a new tab of your own browser**, once the **Claude Connector** browser extension is installed (Chrome or Edge, Windows or Mac - see [Browser extension](#browser-extension-chrome--edge)). Only the dashboard can ask it to log in; it keeps each login in memory for that one tab and drops it once you are in, when the tab closes, or after 10 minutes.
   - **In a separate browser window** otherwise (its own profile, remembered between uses). Chrome does not let other programs fill in forms in your everyday browser, which is why the extension is needed for the tab.
   - When a security check comes before the login form, it waits and fills the form in once it appears. A captcha on the form is left to you: the username and password are filled in, you complete the captcha and press **Log In**. Two-factor codes are yours too.
 
@@ -773,7 +786,7 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 
   Links and commands carry the site's API key, so each works once and expires after 15 minutes. Windows is unchanged.
 - **Dashboard - Asana**: a Tasks view of your Asana tasks, each run's results posted as a comment on the site's task (optionally its time to Actual time), and WordPress logins read from the project's **Login** / **Logins** / **Login details** task (its comments, newest first). The token is kept in the macOS Keychain.
-- **Dashboard - Log in**: signs in to any WordPress site, with or without the connector - in a new tab of your own browser through the new **Site Maintenance Login** extension (`dashboard/extension`), or a separate window. A captcha on the login form is left to you; when a security check comes first, the form is filled in once it appears.
+- **Dashboard - Log in**: signs in to any WordPress site, with or without the connector - in a new tab of your own browser through the new **Claude Connector** browser extension (`dashboard/extension`), or a separate window. A captcha on the login form is left to you; when a security check comes first, the form is filled in once it appears.
 
 **Changed**
 

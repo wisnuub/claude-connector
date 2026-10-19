@@ -1,12 +1,31 @@
 {
   "manifest_version": 3,
-  "name": "Site Maintenance Login",
-  "version": "1.0.0",
-  "description": "Signs you in to WordPress sites from the Claude Connector maintenance dashboard, in a new tab of your own browser.",
+  "name": "Claude Connector",
+  "version": "1.1.0",
+  "description": "Opens the Claude Connector maintenance dashboard and signs you in to WordPress sites from it, in a new tab of your own browser.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA6h7Uyn///lmNekIhK88Iy7u1SgZlcN23nLV5/St8STHYurB6d5gFJ52QuJ4KripQXnPIlbLCTYYkqfub/d2KBas3a6WOaJ7mj9hl+8aKhZK8ifjRJS9vF73KOhFCy8PwsLPDCDlsWYESQVMm6kARMNVWBi9MtvDYNGF5oR78z9N580ssqpEcYqCbbLbb8xYiTgHhvAo+w3ViUCt+oiYjyk+Z5NKwYlIOleyioU4cS8X3mU3W8iy+6eMn4P1gexgO7lRFMeMy2H6aSo+hwkJT9WFOQQ4DfYLcf2cYQxvRd43TFvxDZkS89YYfz9vejuI027goEfIMd2O5BxPP/YizGwIDAQAB",
-  "permissions": ["scripting", "storage"],
-  "host_permissions": ["<all_urls>"],
-  "background": { "service_worker": "background.js" },
-  "externally_connectable": { "matches": ["http://127.0.0.1/*", "http://localhost/*"] },
-  "icons": { "16": "icon16.png", "48": "icon48.png", "128": "icon128.png" }
+  "permissions": [
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "externally_connectable": {
+    "matches": [
+      "http://127.0.0.1/*",
+      "http://localhost/*"
+    ]
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "action": {
+    "default_title": "Open Site Maintenance dashboard"
+  }
 }
