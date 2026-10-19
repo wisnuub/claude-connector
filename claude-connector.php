@@ -3,7 +3,7 @@
  * Plugin Name:  Claude Connector
  * Plugin URI:   https://github.com/wisnuub/claude-connector
  * Description:  Secure REST API bridge for Claude AI - ACF sync, cache purge, file management, database queries, post CRUD, plugin/theme control, maintenance updates with rollback, and more.
- * Version:      1.8.7
+ * Version:      1.8.8
  * Author:       Wisnuub
  * Author URI:   https://wisnuub.github.io
  * License:      GPL-2.0-or-later
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'CLAUDE_CONNECTOR_VERSION', '1.8.7' );
+define( 'CLAUDE_CONNECTOR_VERSION', '1.8.8' );
 define( 'CLAUDE_CONNECTOR_NS',      'claude/v1' );
 define( 'CLAUDE_CONNECTOR_GH_REPO', 'wisnuub/claude-connector' );
 
@@ -4184,21 +4184,37 @@ function claude_security_scan() {
             // analytics / tags / scripts
             'www.googletagmanager.com', 'www.google-analytics.com', 'www.gstatic.com', 'connect.facebook.net', 'platform.twitter.com', 'js.stripe.com', 'maps.googleapis.com', 'cdn.jsdelivr.net', 'cdnjs.cloudflare.com', 'code.jquery.com', 'unpkg.com', 'www.recaptcha.net', 'www.google.com/recaptcha', 'cdn.shopify.com', 'static.hotjar.com', 'embed.tawk.to', 'www.clarity.ms', 'maps.google.com', 'www.googleadservices.com', 'googleads.g.doubleclick.net',
             // embed iframes: maps, video, docs/forms, social, booking, audio
-            'www.google.com', 'www.youtube.com', 'youtube.com', 'www.youtube-nocookie.com', 'youtube-nocookie.com', 'player.vimeo.com', 'vimeo.com', 'www.openstreetmap.org', 'www.bing.com', 'docs.google.com', 'calendar.google.com', 'drive.google.com', 'www.facebook.com', 'web.facebook.com', 'www.instagram.com', 'open.spotify.com', 'w.soundcloud.com', 'bandcamp.com', 'airtable.com', 'calendly.com', 'www.jotform.com', 'form.jotform.com', 'app.acuityscheduling.com', 'link.gmnp.io', 'www.tripadvisor.com', 'widget.trustpilot.com'
+            'www.google.com', 'www.youtube.com', 'youtube.com', 'www.youtube-nocookie.com', 'youtube-nocookie.com', 'player.vimeo.com', 'vimeo.com', 'www.openstreetmap.org', 'www.bing.com', 'docs.google.com', 'calendar.google.com', 'drive.google.com', 'www.facebook.com', 'web.facebook.com', 'www.instagram.com', 'open.spotify.com', 'w.soundcloud.com', 'bandcamp.com', 'airtable.com', 'calendly.com', 'www.jotform.com', 'form.jotform.com', 'app.acuityscheduling.com', 'www.tripadvisor.com', 'widget.trustpilot.com',
+            // review / social-feed / form widgets commonly embedded via a Code module
+            'cdn.trustindex.io', 'static.elfsight.com', 'apps.elfsight.com', 'core.service.elfsight.com', 'static.elfsightcdn.com', 'cdn.curator.io', 'widgets.sociablekit.com', 'embedsocial.com', 'cdn.embedsocial.com', 'www.powr.io', 'cdn.powr.io', 'widget.tagembed.com', 'cdn.tagembed.com', 'widget.reviews.io', 'widget.reviews.co.uk', 'cdn.reviews.io', 'www.birdeye.com', 'reviewsonmywebsite.com', 'static.cdn-website.com', 'www.mailchimp.com', 'chimpstatic.com', 'js.hsforms.net', 'js.hs-scripts.com', 'static.klaviyo.com', 'cdn.jsdelivr.net', 'www.instagram.com', 'snapwidget.com', 'cdn.lightwidget.com', 'lightwidget.com', 'embed.youtube.com', 'maps.googleapis.com', 'www.gstatic.com', 'consent.cookiebot.com', 'consentcdn.cookiebot.com', 'cdn.cookielaw.org'
         );
+        // Known iframe-embed hosts (and regional variants) are not injections.
+        $embed_ok = function ( $host ) use ( $ok ) {
+            return in_array( $host, $ok, true ) || preg_match( '/(^|\.)(google|googleapis|gstatic|youtube|youtube-nocookie|vimeo|facebook|fbcdn|instagram|cdninstagram|spotify|soundcloud|openstreetmap|bing|tripadvisor|trustpilot|trustindex|elfsight|elfsightcdn|curator|sociablekit|embedsocial|powr|tagembed|reviews|birdeye|snapwidget|lightwidget|cookiebot|cookielaw|hubspot|hs-scripts|hsforms|klaviyo|mailchimp|stripe|paypal|cloudflareinsights)\.[a-z.]+$/', $host );
+        };
         foreach ( array( (string) $text, (string) $decoded ) as $hay ) {
-            if ( preg_match( '#<script\b[^>]*\bsrc\s*=\s*["\']?(?:https?:)?//([^"\'\s>/]+)#i', $hay, $m ) ) {
-                $host = strtolower( $m[1] );
-                if ( $host !== $home_host && strpos( $host, $home_host ) === false && ! in_array( $host, $ok, true ) ) return array( 'why' => "external script from {$host}", 'snippet' => trim( substr( $m[0], 0, 180 ) ) );
+            // EVERY <script src> and <iframe src> is checked, not just the first - a
+            // single Divi Code module can hold a legitimate embed and a planted one.
+            if ( preg_match_all( '#<script\b[^>]*\bsrc\s*=\s*["\']?(?:https?:)?//([^"\'\s>/]+)[^>]*>#i', $hay, $ms, PREG_SET_ORDER ) ) {
+                foreach ( $ms as $m ) {
+                    $host = strtolower( $m[1] );
+                    if ( $host !== $home_host && strpos( $host, $home_host ) === false && ! $embed_ok( $host ) ) return array( 'why' => "external script from {$host}", 'snippet' => trim( substr( $m[0], 0, 180 ) ) );
+                }
+            }
+            if ( preg_match_all( '#<iframe\b[^>]*\bsrc\s*=\s*["\']?(?:https?:)?//([^"\'\s>/]+)[^>]*>#i', $hay, $ms, PREG_SET_ORDER ) ) {
+                foreach ( $ms as $m ) {
+                    $fhost = strtolower( $m[1] );
+                    if ( $fhost !== $home_host && strpos( $fhost, $home_host ) === false && ! $embed_ok( $fhost ) ) return array( 'why' => "iframe from {$fhost}", 'snippet' => trim( substr( $m[0], 0, 180 ) ) );
+                }
             }
             if ( preg_match( '#(eval\s*\(\s*(?:atob|function|String\.fromCharCode)|String\.fromCharCode\s*\(|document\.write\s*\(\s*unescape|\batob\s*\(\s*["\']|(?:\\\\x[0-9a-f]{2}){8,}|base64_decode\s*\()#i', $hay, $m, PREG_OFFSET_CAPTURE ) ) {
                 return array( 'why' => 'obfuscated or self-decoding script', 'snippet' => trim( substr( $hay, max( 0, $m[0][1] - 20 ), 180 ) ) );
             }
-            if ( preg_match( '#<iframe\b[^>]*\bsrc\s*=\s*["\']?(?:https?:)?//([^"\'\s>/]+)#i', $hay, $m ) ) {
-                $fhost = strtolower( $m[1] );
-                if ( $fhost !== $home_host && strpos( $fhost, $home_host ) === false && ! in_array( $fhost, $ok, true ) && ! preg_match( '/(^|\.)(google|youtube|vimeo|facebook|instagram|spotify|soundcloud|openstreetmap|bing|tripadvisor|trustpilot)\.[a-z.]+$/', $fhost ) ) {
-                    return array( 'why' => "iframe from {$fhost}", 'snippet' => trim( substr( $m[0], 0, 180 ) ) );
-                }
+            // Inline script doing something an injection does: building a <script>
+            // element, loading an external src, or redirecting the browser. (Plain
+            // analytics/dataLayer code is left alone; obfuscation is caught above.)
+            if ( preg_match( '#(createElement\s*\(\s*["\']script|document\.write\s*\([^)]*<(?:script|iframe)|\.src\s*=\s*["\']?(?:https?:)?//(?!(?:[^"\'\s/]*\.)?' . preg_quote( $home_host, '#' ) . ')|(?:window|top|self|document)\.location(?:\.href)?\s*=\s*["\'](?:https?:)?//(?!(?:[^"\'\s/]*\.)?' . preg_quote( $home_host, '#' ) . '))#i', $hay, $m, PREG_OFFSET_CAPTURE ) ) {
+                return array( 'why' => 'inline script loads code or redirects elsewhere', 'snippet' => trim( preg_replace( '/\s+/', ' ', substr( $hay, max( 0, $m[0][1] - 10 ), 180 ) ) ) );
             }
             if ( preg_match( '#<meta[^>]+http-equiv=["\']?refresh["\']?[^>]+url=([^"\'>]+)#i', $hay, $m ) ) {
                 return array( 'why' => 'meta-refresh redirect', 'snippet' => trim( substr( $m[0], 0, 180 ) ) );

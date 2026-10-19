@@ -693,6 +693,16 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 
 ## Changelog
 
+### 1.8.8 — Security scan: every embed in a module, and widget providers
+
+**Changed (the security check)**
+
+- **Every script and iframe in a block of content is now checked, not just the first** - so a legitimate embed and a planted one in the *same* Divi Code module (two code blocks in one module) are told apart: the Map or video reads as normal and the injected script/iframe is still flagged.
+- **An inline `<script>` that builds a script element, loads an external `src`, or redirects the browser elsewhere is flagged** (plain analytics/dataLayer code is left alone; obfuscated code is already caught).
+- **Review, social-feed and form widget providers are allowlisted** so their embed code is not mistaken for an injection: Trustindex (Google Reviews), Elfsight, Curator, SociableKit, EmbedSocial, POWr, Tagembed, Reviews.io, SnapWidget, LightWidget (Instagram), Birdeye, Mailchimp, HubSpot, Klaviyo, Cookiebot/OneTrust and the usual Google/YouTube/Vimeo/Facebook/Instagram/Stripe hosts, across regional domains.
+
+**Verified** on a local WordPress: a Google Map plus a malicious iframe, a malicious external script, and a malicious inline injector in the *same* Code module were each flagged while the Map stayed clean; a Map-only module and a Map + Google Analytics module were clean; Trustindex, Elfsight, LightWidget and SnapWidget embeds were clean; and a malicious script next to a Trustindex embed was still flagged.
+
 ### 1.8.7 — Security scan: allow embed iframes
 
 **Fixed (the security check)**
