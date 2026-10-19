@@ -152,7 +152,7 @@ async function safeCall(fn) {
 // Kept in step with CLAUDE_CONNECTOR_VERSION in claude-connector.php. The two
 // halves ship together, and a stale copy of this file silently hides whole
 // tools - which is much harder to notice than an outright error.
-const MCP_VERSION = '1.8.2';
+const MCP_VERSION = '1.8.3';
 
 const server = new McpServer({ name: 'claude-connector', version: MCP_VERSION });
 
@@ -402,6 +402,22 @@ server.tool('wp_security_scan',
   + 'Findings are leads, not proof: open each file (wp_files_read) before concluding, and change nothing without the user agreeing.',
   { site: S },
   ({ site }) => safeCall(async () => ok(await api('GET', '/security/scan', null, null, site, 180_000)))
+);
+
+server.tool('wp_divi_forms',
+  'Every Divi 4 contact form on the site (pages and Theme Builder layouts) with its recipient, fields (ID, title, type) and '
+  + 'email Message Pattern, plus problems: fields missing from the pattern and placeholders that match no field ID (Divi '
+  + 'drops both from the email silently). "suggested" is a pattern listing every field. Divi 5 forms are listed separately.',
+  { site: S },
+  ({ site }) => safeCall(async () => ok(await api('GET', '/divi/forms', null, null, site)))
+);
+
+server.tool('wp_divi_form_pattern',
+  'Set one Divi 4 contact form\'s email Message Pattern (plain text with real line breaks; %%Field_ID%% placeholders must '
+  + 'match field IDs exactly). post_id and index come from wp_divi_forms. The previous pattern is kept on the site for undo. '
+  + 'Ask the user before changing a client form.',
+  { site: S, post_id: z.number(), index: z.number(), pattern: z.string() },
+  ({ site, ...body }) => safeCall(async () => ok(await api('POST', '/divi/forms/pattern', null, body, site)))
 );
 
 server.tool('wp_test_email',

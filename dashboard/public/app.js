@@ -225,6 +225,7 @@ function renderToolbar() {
     <button class="btn sm" data-action="bulk-plugin" ${dis}>Plugin…</button>
     <button class="btn sm" data-action="bulk-agency" ${dis}>Agency…</button>
     <button class="btn sm" data-action="bulk-security" ${dis}>Security check</button>
+    <button class="btn sm" data-action="bulk-divi" ${dis}>Check Divi forms</button>
     <span class="grow"></span>
     ${scheduleChip()}
     ${agencies().length > 1 ? `<select data-action="agency-filter" aria-label="Agency">
@@ -477,6 +478,7 @@ function formsTab(site) {
       ${site.mailer ? `<p class="hint" style="margin-top:10px">${site.mailer.plugin ? `Mail is sent through ${h(site.mailer.plugin)}.` : h(site.mailer.warning)}</p>` : ''}
     </div>
   </div>
+  ${diviCard(site)}
   ${f ? `<div class="card" style="margin-top:12px"><h4>Last result · ${h(ago(f.at))}${f.agency ? ` · as ${h(f.agency)}` : ''}</h4>
     <p style="margin:0">${formPill(site)} ${h(f.message || '')}</p>
     <dl class="kv" style="margin-top:8px">${f.ref ? `<dt>Reference</dt><dd><code>${h(f.ref)}</code> - search the inbox for this</dd>` : ''}${f.kind ? `<dt>Form</dt><dd>${h(f.kind)}</dd>` : ''}${f.url ? `<dt>Page</dt><dd><a href="${h(f.url)}" target="_blank" rel="noopener">${h(f.url)}</a></dd>` : ''}${f.to ? `<dt>Sent to</dt><dd>${h(f.to)}</dd>` : ''}</dl>
@@ -510,6 +512,32 @@ function securityTab(site) {
       ? `<b>${s.high} high · ${s.medium} medium</b> warning sign${s.high + s.medium === 1 ? '' : 's'}. These are leads, not proof - open the site in VS Code and let Claude look into each one before anything is changed.`
       : 'No warning signs found. The items below are for review.'}</div>
     ${findings}`;
+}
+
+/** Divi contact forms: does the email (Message Pattern) carry every field? */
+function diviCard(site) {
+  const d = site.diviForms;
+  const forms = (d?.forms || []).filter(f => f.fields.length);
+  const head = `<div class="bar" style="margin:0"><h4 style="margin:0;flex:1">Divi email pattern</h4>
+    <button class="btn sm" data-action="check-divi">${d ? 'Check again' : 'Check Divi forms'}</button></div>`;
+  if (!d) return `<div class="card" style="margin-top:12px">${head}<p class="hint" style="margin:8px 0 0">Divi only emails the fields named in a form's Message Pattern. This lists every Divi contact form and any field its emails leave out.</p></div>`;
+  if (!forms.length) return `<div class="card" style="margin-top:12px">${head}<p class="hint" style="margin:8px 0 0">No Divi 4 contact forms on this site${d.divi5?.length ? ` (${d.divi5.length} Divi 5 form page${d.divi5.length === 1 ? '' : 's'} - check those in the builder)` : ''}.</p></div>`;
+  return `<div class="card" style="margin-top:12px">${head}
+    ${forms.map(f => `<div class="divi-form" data-post="${h(f.post_id)}" data-index="${h(f.index)}">
+      <div class="bar" style="margin:10px 0 4px">
+        ${f.ok ? '<span class="pill ok"><span class="dot"></span>sends every field</span>' : '<span class="pill warn"><span class="dot"></span>drops fields</span>'}
+        <b>${h(f.post)}</b><span class="muted">${h(f.where)}${f.title ? ` · ${h(f.title)}` : ''}${f.recipient ? ` · to ${h(f.recipient)}` : ''}</span>
+        ${f.url ? `<a href="${h(f.url)}" target="_blank" rel="noopener" class="faint">open ↗</a>` : ''}
+      </div>
+      ${!f.ok ? `<p class="hint" style="margin:0 0 6px">${!f.pattern ? 'No Message Pattern set.' : ''}${f.missing.length ? ` Not in the email: <b>${h(f.missing.join(', '))}</b>.` : ''}${f.unknown.length ? ` Placeholders that match no field (the ID differs): <code>${h(f.unknown.map(u => `%%${u}%%`).join(' '))}</code>.` : ''} Field IDs: <code>${h(f.fields.map(x => x.id).join(', '))}</code></p>` : ''}
+      <div class="grid2">
+        <label class="field">Current pattern<textarea rows="${Math.min(8, (f.pattern || '').split('\n').length + 1)}" readonly>${h(f.pattern || '')}</textarea></label>
+        <label class="field">${f.ok ? 'Pattern' : 'Suggested pattern'} (edit if you like)<textarea data-pattern rows="${Math.min(8, f.suggested.split('\n').length + 1)}">${h(f.ok ? f.pattern : f.suggested)}</textarea></label>
+      </div>
+      <div class="bar" style="margin:6px 0 0"><button class="btn sm ${f.ok ? '' : 'primary'}" data-action="set-divi-pattern">Set this pattern</button></div>
+    </div>`).join('')}
+    ${d.divi5?.length ? `<p class="hint">Divi 5 forms on ${h(d.divi5.map(x => x.post).join(', '))} are not checked here - set their pattern in the builder.</p>` : ''}
+  </div>`;
 }
 
 function stepLi(s) {
@@ -1386,6 +1414,19 @@ document.addEventListener('click', async (ev) => {
     case 'site-refresh': return startJob({ type: 'refresh', sites: [site.id] });
     case 'site-form': return startJob({ type: 'formtest', sites: [site.id], url: site.formUrl || undefined }, `Submit the contact form on ${site.name}? It sends a real enquiry to the form's recipients.`);
     case 'site-mail': return startJob({ type: 'mailtest', sites: [site.id] });
+    case 'check-divi': return startJob({ type: 'diviforms', sites: [site.id] });
+    case 'bulk-divi': return startJob({ type: 'diviforms', sites: selectedIds() });
+    case 'set-divi-pattern': {
+      const box = t.closest('.divi-form');
+      const pattern = $('textarea[data-pattern]', box).value;
+      if (!confirm(`Set this Message Pattern on ${site.name}?\n\n${pattern}\n\nThe current one is kept on the site and can be put back.`)) return;
+      t.disabled = true;
+      try {
+        const r = await api('POST', `/api/sites/${encodeURIComponent(site.id)}/divi-pattern`, { post_id: Number(box.dataset.post), index: Number(box.dataset.index), pattern });
+        toast(r.missing?.length || r.unknown?.length ? 'Saved - some placeholders still match no field' : 'Pattern saved - the form now emails every field');
+      } catch (e) { toast(e.message); t.disabled = false; }
+      return;
+    }
     case 'site-security': S.tab[site.id] = 'security'; return startJob({ type: 'security', sites: [site.id] });
     case 'bulk-security': return startJob({ type: 'security', sites: selectedIds() });
     case 'claude-review': {

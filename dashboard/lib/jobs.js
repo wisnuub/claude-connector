@@ -122,6 +122,8 @@ function startJob(spec, worker) {
       addHistory(record);
       appendTextLog(record);
       if (job.type === 'maintain') patchSiteState(id, { lastRun: { status: entry.status, summary: entry.summary, at: entry.finishedAt, jobId: job.id } });
+      // Whatever the job saved for the site (security results, form test, Divi forms…) reaches open pages.
+      bus.emit('site', { id });
       emitJob(job);
     }
   };
@@ -528,6 +530,27 @@ export function startSecurityScan({ sites }) {
       s.high || s.medium ? `Security check: ${s.high} high, ${s.medium} medium` : 'Security check: no warning signs found',
       top.join(' · ') || null, { kind: 'security', result: s.high ? 'failed' : 'ok' });
     return s.high || s.medium ? `${s.high} high · ${s.medium} medium` : 'clean';
+  });
+}
+
+/** Read-only: Divi contact forms whose email Message Pattern drops fields. */
+export function startDiviFormsCheck({ sites }) {
+  return startJob({ type: 'diviforms', title: `Check Divi forms${sites.length > 1 ? ` on ${sites.length} sites` : ''}`, sites }, async (ctx) => {
+    const st = ctx.step('Checking Divi contact form email patterns…');
+    let r;
+    try { r = await ctx.api('GET', '/divi/forms', { timeout: 60_000 }); }
+    catch (e) {
+      const i = errInfo(e);
+      st.set('failed', i.code === 'rest_no_route' ? 'Divi form check needs Claude Connector 1.8.3 or newer on this site' : `Divi form check: ${i.message}`);
+      return null;
+    }
+    patchSiteState(ctx.site.id, { diviForms: { ...r, at: new Date().toISOString() } });
+    const forms = (r.forms || []).filter(f => f.fields.length);
+    const bad = forms.filter(f => !f.ok);
+    if (!forms.length) { st.set('ok', 'No Divi 4 contact forms on this site'); return 'no Divi forms'; }
+    st.set(bad.length ? 'warning' : 'ok', bad.length ? `${bad.length} of ${forms.length} Divi form${forms.length === 1 ? '' : 's'} drop fields from the email` : `All ${forms.length} Divi form${forms.length === 1 ? '' : 's'} send every field`,
+      bad.map(f => `${f.post}${f.title ? ` (${f.title})` : ''}: ${!f.pattern ? 'no pattern' : [f.missing.length && `missing ${f.missing.join(', ')}`, f.unknown.length && `no field for %%${f.unknown.join('%%, %%')}%%`].filter(Boolean).join('; ')}`).join(' · ') || null);
+    return bad.length ? `${bad.length} form(s) to fix` : 'all good';
   });
 }
 

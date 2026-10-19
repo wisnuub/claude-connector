@@ -1,6 +1,6 @@
 {
   "name": "claude-connector-dashboard",
-  "version": "1.8.2",
+  "version": "1.8.3",
   "private": true,
   "description": "Local maintenance dashboard for many Claude Connector WordPress sites: bulk updates with rollback, plugin management, form tests",
   "type": "module",

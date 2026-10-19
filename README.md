@@ -170,6 +170,8 @@ The dashboard opens the site's contact page in a real (headless) browser, fills 
 - **Result**: Sent / Failed (with the plugin's message, e.g. CF7's "One or more fields have an error") / Captcha (reCAPTCHA v2, hCaptcha or Turnstile - these block automation, test by hand) / No reply, plus exactly what was typed into each field and a screenshot.
 - With no form on the site, a plain `wp_mail()` test is sent instead (optional), reporting the SMTP plugin in use or warning when mail goes out through PHP `mail()`.
 
+**Divi email pattern** (Form test tab, or **Check Divi forms** for selected sites): Divi only emails the fields named in a contact form's *Message Pattern*, and a placeholder whose ID does not match a field (`%%Service%%` for a field with ID `services`) is dropped silently. The check lists every Divi 4 contact form - pages and Theme Builder layouts - with fields missing from its pattern and placeholders matching no field, and suggests a pattern listing every field (`Name: %%Name%%`, …, `Message:` then `%%Message%%`), which you can edit and **Set**. The previous pattern is kept on the site. Divi 5 forms are listed for checking in the builder.
+
 A form test sends a real enquiry to the form's recipients - the message says it is an automated maintenance test.
 
 ### Morning form tests
@@ -686,6 +688,20 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 ---
 
 ## Changelog
+
+### 1.8.3 — Divi email patterns
+
+**Added**
+
+- **`GET /divi/forms`** - every Divi 4 contact form (pages and Theme Builder layouts) with its recipient, fields and email Message Pattern, the fields the pattern leaves out, placeholders that match no field ID, and a suggested pattern. **`POST /divi/forms/pattern`** sets one form's pattern in Divi's own format (line breaks as `||et_pb_line_break_holder||`), leaving the rest of the module untouched and keeping the previous pattern for undo. MCP tools `wp_divi_forms` and `wp_divi_form_pattern`.
+- **Dashboard**: a Divi email pattern card in the Form test tab and **Check Divi forms** for selected sites.
+
+**Fixed (dashboard)**
+
+- The form test fills a Divi field whose type is email with the email address whatever its label (a Careers form's "Availability" set as an email field failed as "Invalid email"), and picks the contact form over job application, newsletter and login forms.
+- Results of a security check, form test or Divi check now appear without reloading the page.
+
+**Verified** against the format read from live Divi forms, then on a local WordPress with a copy of a real Theme Builder footer form whose pattern used `%%Service%%` for a field with ID `services`: the check reported the missing field and the unmatched placeholder, Set stored the new pattern in Divi's format with every other attribute unchanged, and the re-check found every field.
 
 ### 1.8.2 — Security check
 

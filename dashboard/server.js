@@ -63,6 +63,7 @@ function publicSite(s) {
     forms: st.forms || null, formUrl: st.formUrl || null, mailer: st.mailer || st.overview?.mailer || null,
     agencyId: st.agencyId || null,
     security: st.security || null,
+    diviForms: st.diviForms || null,
     formTestQueued: st.formTestQueued || null,
     held: st.held || [],
     asana: st.asana || null,
@@ -267,6 +268,15 @@ async function api(req, res, url) {
     store.removeSite(mm[1]);
     return send(res, 200, { ok: true });
   }
+  if ((mm = p.match(/^\/api\/sites\/([\w-]+)\/divi-pattern$/))) {
+    // { post_id, index, pattern } - sets one Divi form's Message Pattern, then re-checks the site.
+    const site = store.getSite(mm[1]);
+    if (!site) return send(res, 404, { message: 'Unknown site' });
+    const r = await call(site, 'POST', '/divi/forms/pattern', { body: { post_id: body.post_id, index: body.index, pattern: body.pattern }, timeout: 60_000 });
+    const forms = await call(site, 'GET', '/divi/forms', { timeout: 60_000 }).catch(() => null);
+    if (forms) { store.patchSiteState(site.id, { diviForms: { ...forms, at: new Date().toISOString() } }); broadcast('site', publicSite(site)); }
+    return send(res, 200, r);
+  }
   if ((mm = p.match(/^\/api\/sites\/([\w-]+)\/asana-comment$/))) {
     // POST { text } sends it to the site's Asana task; POST {} returns a draft.
     const site = store.getSite(mm[1]);
@@ -310,6 +320,7 @@ async function api(req, res, url) {
       case 'queue-form': jobs.queueFormTest({ sites, queued: body.queued !== false }); return send(res, 200, { ok: true });
       case 'mailtest': return send(res, 200, jobs.startMailTest({ sites }));
       case 'security': return send(res, 200, jobs.startSecurityScan({ sites }));
+      case 'diviforms': return send(res, 200, jobs.startDiviFormsCheck({ sites }));
       default: return send(res, 400, { message: `Unknown job type ${body.type}` });
     }
   }

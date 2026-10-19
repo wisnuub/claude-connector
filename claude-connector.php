@@ -3,7 +3,7 @@
  * Plugin Name:  Claude Connector
  * Plugin URI:   https://github.com/wisnuub/claude-connector
  * Description:  Secure REST API bridge for Claude AI - ACF sync, cache purge, file management, database queries, post CRUD, plugin/theme control, maintenance updates with rollback, and more.
- * Version:      1.8.2
+ * Version:      1.8.3
  * Author:       Wisnuub
  * Author URI:   https://wisnuub.github.io
  * License:      GPL-2.0-or-later
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'CLAUDE_CONNECTOR_VERSION', '1.8.2' );
+define( 'CLAUDE_CONNECTOR_VERSION', '1.8.3' );
 define( 'CLAUDE_CONNECTOR_NS',      'claude/v1' );
 define( 'CLAUDE_CONNECTOR_GH_REPO', 'wisnuub/claude-connector' );
 
@@ -527,6 +527,8 @@ function claude_settings_page() {
         array( 'GET',    '/maintenance/forms',        'Pages with a contact form (Divi, CF7, Gravity, WPForms, Elementor...)' ),
         array( 'POST',   '/maintenance/test-email',   'Send a wp_mail() test and report the mailer in use' ),
         array( 'GET',    '/security/scan',            'Read-only security check: core/plugin checksums, PHP in uploads, malware patterns, new admins, redirects' ),
+        array( 'GET',    '/divi/forms',               'Divi contact forms and their email Message Pattern: missing fields, placeholders matching no field' ),
+        array( 'POST',   '/divi/forms/pattern',       'Set a Divi contact form\'s Message Pattern (previous one kept for undo)' ),
         array( 'GET',    '/themes',                   'List installed themes' ),
         array( 'POST',   '/themes',                   'Switch active theme' ),
         array( 'GET',    '/files?path=',              'List files in a wp-content subdirectory' ),
@@ -910,6 +912,8 @@ add_action( 'rest_api_init', function () {
     register_rest_route( $ns, '/maintenance/forms',      array( 'methods' => 'GET',  'callback' => 'claude_maint_forms',      'permission_callback' => $a ) );
     register_rest_route( $ns, '/maintenance/test-email', array( 'methods' => 'POST', 'callback' => 'claude_maint_test_email', 'permission_callback' => $a ) );
     register_rest_route( $ns, '/security/scan',          array( 'methods' => 'GET',  'callback' => 'claude_security_scan',    'permission_callback' => $a ) );
+    register_rest_route( $ns, '/divi/forms',             array( 'methods' => 'GET',  'callback' => 'claude_divi_forms',       'permission_callback' => $a ) );
+    register_rest_route( $ns, '/divi/forms/pattern',     array( 'methods' => 'POST', 'callback' => 'claude_divi_set_pattern', 'permission_callback' => $a ) );
 } );
 
 // Log every request to our namespace after dispatch (only when logging is enabled).
@@ -3898,6 +3902,147 @@ function claude_security_scan() {
         'summary'    => array( 'high' => $count( 'high' ), 'medium' => $count( 'medium' ), 'low' => $count( 'low' ) ),
         'stats'      => array( 'php_files_pattern_scanned' => $scanned, 'wporg_plugins_verified' => $checked, 'seconds' => round( microtime( true ) - $started, 1 ), 'stopped_early' => microtime( true ) > $deadline ),
         'findings'   => $findings,
+    ) );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+//  Divi contact form email patterns
+//
+//  Divi only puts the fields listed in a form's Message Pattern into the email
+//  it sends; a field missing from it, or a placeholder whose ID does not match
+//  a field (%%Service%% for a field with ID "services"), is silently dropped.
+//  Divi 4 stores the pattern in the contact form shortcode's custom_message
+//  attribute, with line breaks as ||et_pb_line_break_holder||.
+// ──────────────────────────────────────────────────────────────────────────────
+
+const CLAUDE_DIVI_LINE_BREAK = '||et_pb_line_break_holder||';
+
+/** Attributes of one shortcode tag, as Divi writes them (name="value"). */
+function claude_divi_attrs( $tag ) {
+    preg_match_all( '/([\w-]+)="([^"]*)"/', $tag, $m, PREG_SET_ORDER );
+    $out = array();
+    foreach ( $m as $a ) $out[ $a[1] ] = $a[2];
+    return $out;
+}
+
+/** Divi 4 attribute encoding <-> plain text. */
+function claude_divi_decode( $v ) {
+    return strtr( str_replace( CLAUDE_DIVI_LINE_BREAK, "\n", $v ), array( '%22' => '"', '%91' => '[', '%93' => ']' ) );
+}
+function claude_divi_encode( $v ) {
+    $v = str_replace( array( "\r\n", "\r" ), "\n", (string) $v );
+    return str_replace( "\n", CLAUDE_DIVI_LINE_BREAK, strtr( $v, array( '"' => '%22', '[' => '%91', ']' => '%93' ) ) );
+}
+
+/**
+ * The Divi 4 contact forms in a piece of content, in order: their tag's
+ * position (to rewrite it), attributes, fields and pattern problems.
+ */
+function claude_divi_parse_forms( $content ) {
+    $forms = array();
+    if ( ! preg_match_all( '/\[et_pb_contact_form\b[^\]]*\](.*?)\[\/et_pb_contact_form\]/s', $content, $m, PREG_SET_ORDER | PREG_OFFSET_CAPTURE ) ) return $forms;
+    foreach ( $m as $i => $hit ) {
+        $open = substr( $hit[0][0], 0, strpos( $hit[0][0], ']' ) + 1 );
+        $a    = claude_divi_attrs( $open );
+        $fields = array();
+        preg_match_all( '/\[et_pb_contact_field\b[^\]]*\]/', $hit[1][0], $fm );
+        foreach ( $fm[0] as $ft ) {
+            $fa = claude_divi_attrs( $ft );
+            if ( empty( $fa['field_id'] ) ) continue;
+            $fields[] = array( 'id' => $fa['field_id'], 'title' => claude_divi_decode( $fa['field_title'] ?? $fa['field_id'] ), 'type' => $fa['field_type'] ?? 'input' );
+        }
+        $pattern = isset( $a['custom_message'] ) ? claude_divi_decode( $a['custom_message'] ) : '';
+        preg_match_all( '/%%([^%\s]+)%%/', $pattern, $pm );
+        $used   = array_unique( $pm[1] );
+        $ids    = array_column( $fields, 'id' );
+        $forms[] = array(
+            'index'      => $i,
+            'offset'     => $hit[0][1],
+            'open_tag'   => $open,
+            'title'      => claude_divi_decode( $a['title'] ?? '' ),
+            'recipient'  => $a['email'] ?? '',
+            'fields'     => $fields,
+            'pattern'    => $pattern,
+            // Placeholders are matched exactly (the field ID as written).
+            'missing'    => array_values( array_diff( $ids, $used ) ),
+            'unknown'    => array_values( array_diff( $used, $ids ) ),
+            'suggested'  => claude_divi_suggest_pattern( $fields ),
+        );
+    }
+    return $forms;
+}
+
+/**
+ * "Name: %%Name%%" per field, labelled from the field ID (Full_Name -> "Full Name");
+ * text areas as "Message:" with the value on the next line.
+ */
+function claude_divi_suggest_pattern( $fields ) {
+    $lines = array();
+    foreach ( $fields as $f ) {
+        $label   = ucwords( trim( preg_replace( '/[_\-]+/', ' ', $f['id'] ) ) ) ?: $f['title'];
+        $lines[] = $f['type'] === 'text' ? "{$label}:\n%%{$f['id']}%%" : "{$label}: %%{$f['id']}%%";
+    }
+    return implode( "\n", $lines );
+}
+
+/** GET /divi/forms - every Divi 4 contact form on the site and its pattern problems. */
+function claude_divi_forms() {
+    global $wpdb;
+    $rows = $wpdb->get_results( "SELECT ID, post_title, post_type, post_content FROM {$wpdb->posts} WHERE post_status IN ('publish','private','draft') AND post_type NOT IN ('revision','nav_menu_item') AND (post_content LIKE '%[et\\_pb\\_contact\\_form%' OR post_content LIKE '%wp:divi/contact-form%') LIMIT 200" ); // phpcs:ignore
+    $out  = array();
+    $divi5 = array();
+    foreach ( (array) $rows as $r ) {
+        $layout = in_array( $r->post_type, array( 'et_header_layout', 'et_body_layout', 'et_footer_layout' ), true );
+        foreach ( claude_divi_parse_forms( $r->post_content ) as $f ) {
+            unset( $f['offset'], $f['open_tag'] );
+            $out[] = array_merge( array(
+                'post_id' => (int) $r->ID,
+                'post'    => $r->post_title ?: "#{$r->ID}",
+                'where'   => $layout ? 'Theme Builder ' . str_replace( array( 'et_', '_layout' ), '', $r->post_type ) : $r->post_type,
+                'url'     => $layout ? home_url( '/' ) : get_permalink( $r->ID ),
+            ), $f, array( 'ok' => $f['pattern'] !== '' && ! $f['missing'] && ! $f['unknown'] ) );
+        }
+        if ( strpos( $r->post_content, 'wp:divi/contact-form' ) !== false ) $divi5[] = array( 'post_id' => (int) $r->ID, 'post' => $r->post_title, 'url' => get_permalink( $r->ID ) );
+    }
+    return new WP_REST_Response( array( 'forms' => $out, 'divi5' => $divi5 ) );
+}
+
+/**
+ * POST /divi/forms/pattern { post_id, index, pattern } - sets one form's Message
+ * Pattern. The previous pattern is kept in an option for undo.
+ */
+function claude_divi_set_pattern( $req ) {
+    $post_id = (int) $req->get_param( 'post_id' );
+    $index   = (int) $req->get_param( 'index' );
+    $pattern = trim( (string) $req->get_param( 'pattern' ) );
+    $post    = get_post( $post_id );
+    if ( ! $post ) return new WP_Error( 'not_found', "No post #{$post_id}.", array( 'status' => 404 ) );
+    if ( $pattern === '' ) return new WP_Error( 'missing', 'pattern is empty.', array( 'status' => 400 ) );
+    $forms = claude_divi_parse_forms( $post->post_content );
+    if ( ! isset( $forms[ $index ] ) ) return new WP_Error( 'not_found', "Post #{$post_id} has no Divi contact form #{$index}.", array( 'status' => 404 ) );
+    $f = $forms[ $index ];
+
+    $encoded = claude_divi_encode( $pattern );
+    $tag     = preg_match( '/\scustom_message="[^"]*"/', $f['open_tag'] )
+        ? preg_replace( '/\scustom_message="[^"]*"/', ' custom_message="' . $encoded . '"', $f['open_tag'], 1 )
+        : preg_replace( '/^\[et_pb_contact_form\b/', '[et_pb_contact_form custom_message="' . $encoded . '"', $f['open_tag'], 1 );
+    $content = substr_replace( $post->post_content, $tag, $f['offset'], strlen( $f['open_tag'] ) );
+
+    $backup = (array) get_option( 'claude_divi_pattern_backup', array() );
+    $backup[ "{$post_id}:{$index}" ] = array( 'pattern' => $f['pattern'], 'at' => gmdate( 'c' ) );
+    update_option( 'claude_divi_pattern_backup', $backup, false );
+
+    $r = wp_update_post( wp_slash( array( 'ID' => $post_id, 'post_content' => $content ) ), true );
+    if ( is_wp_error( $r ) ) return $r;
+    clean_post_cache( $post_id );
+    $after = claude_divi_parse_forms( get_post( $post_id )->post_content )[ $index ] ?? null;
+    return new WP_REST_Response( array(
+        'post_id'  => $post_id,
+        'index'    => $index,
+        'previous' => $f['pattern'],
+        'pattern'  => $after['pattern'] ?? null,
+        'missing'  => $after['missing'] ?? null,
+        'unknown'  => $after['unknown'] ?? null,
     ) );
 }
 
