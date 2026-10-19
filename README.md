@@ -696,6 +696,7 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 
 - **`GET /divi/forms`** - every Divi 4 contact form (pages and Theme Builder layouts) with its recipient, fields and email Message Pattern, the fields the pattern leaves out, placeholders that match no field ID, and a suggested pattern. **`POST /divi/forms/pattern`** sets one form's pattern in Divi's own format (line breaks as `||et_pb_line_break_holder||`), leaving the rest of the module untouched and keeping the previous pattern for undo. MCP tools `wp_divi_forms` and `wp_divi_form_pattern`.
 - **Dashboard**: a Divi email pattern card in the Form test tab and **Check Divi forms** for selected sites.
+- **`GET /security/core-file?path=`** - a WordPress core file and a line-by-line diff against the official copy for the site's version, for the security check's "core files that differ" findings (the file tools only reach `wp-content`). Read-only and limited to files in wordpress.org's checksum list, so `wp-config.php` and anything else outside core stay out of reach. MCP tool `wp_core_file_diff`; the security report tells Claude to use it, and how core is restored once you agree.
 
 **Fixed (dashboard)**
 

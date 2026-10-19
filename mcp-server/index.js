@@ -404,6 +404,17 @@ server.tool('wp_security_scan',
   ({ site }) => safeCall(async () => ok(await api('GET', '/security/scan', null, null, site, 180_000)))
 );
 
+server.tool('wp_core_file_diff',
+  'Read a WordPress core file (wp-admin, wp-includes or a root core file) and see exactly what differs from the official '
+  + 'copy for the site\'s WordPress version - for the "core files that differ" findings of wp_security_scan, since the file '
+  + 'tools only reach wp-content. Read-only, and only for files in wordpress.org\'s checksum list (never wp-config.php). '
+  + 'In the diff, "<" lines are the official file and ">" lines are the site\'s. content:true also returns the whole file. '
+  + 'To restore core, the usual fix is wp_wpcli ["core","download","--skip-content","--force","--version=<same version>"] '
+  + '- only after the user agrees.',
+  { site: S, path: z.string().describe('e.g. wp-includes/version.php'), content: z.boolean().optional() },
+  ({ site, path, content }) => safeCall(async () => ok(await api('GET', '/security/core-file', { path, ...(content ? { content: '1' } : {}) }, null, site)))
+);
+
 server.tool('wp_divi_forms',
   'Every Divi 4 contact form on the site (pages and Theme Builder layouts) with its recipient, fields (ID, title, type) and '
   + 'email Message Pattern, plus problems: fields missing from the pattern and placeholders that match no field ID (Divi '

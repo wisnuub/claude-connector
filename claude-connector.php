@@ -527,6 +527,7 @@ function claude_settings_page() {
         array( 'GET',    '/maintenance/forms',        'Pages with a contact form (Divi, CF7, Gravity, WPForms, Elementor...)' ),
         array( 'POST',   '/maintenance/test-email',   'Send a wp_mail() test and report the mailer in use' ),
         array( 'GET',    '/security/scan',            'Read-only security check: core/plugin checksums, PHP in uploads, malware patterns, new admins, redirects' ),
+        array( 'GET',    '/security/core-file?path=', 'A WordPress core file and its diff against the official copy (core files only, read-only)' ),
         array( 'GET',    '/divi/forms',               'Divi contact forms and their email Message Pattern: missing fields, placeholders matching no field' ),
         array( 'POST',   '/divi/forms/pattern',       'Set a Divi contact form\'s Message Pattern (previous one kept for undo)' ),
         array( 'GET',    '/themes',                   'List installed themes' ),
@@ -912,6 +913,7 @@ add_action( 'rest_api_init', function () {
     register_rest_route( $ns, '/maintenance/forms',      array( 'methods' => 'GET',  'callback' => 'claude_maint_forms',      'permission_callback' => $a ) );
     register_rest_route( $ns, '/maintenance/test-email', array( 'methods' => 'POST', 'callback' => 'claude_maint_test_email', 'permission_callback' => $a ) );
     register_rest_route( $ns, '/security/scan',          array( 'methods' => 'GET',  'callback' => 'claude_security_scan',    'permission_callback' => $a ) );
+    register_rest_route( $ns, '/security/core-file',     array( 'methods' => 'GET',  'callback' => 'claude_security_core_file', 'permission_callback' => $a ) );
     register_rest_route( $ns, '/divi/forms',             array( 'methods' => 'GET',  'callback' => 'claude_divi_forms',       'permission_callback' => $a ) );
     register_rest_route( $ns, '/divi/forms/pattern',     array( 'methods' => 'POST', 'callback' => 'claude_divi_set_pattern', 'permission_callback' => $a ) );
 } );
@@ -3624,6 +3626,59 @@ function claude_maint_test_email( $req ) {
 //  .htaccess and scripts injected into content. Findings are leads for a
 //  person (or Claude) to look into - not proof, and nothing is cleaned here.
 // ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /security/core-file?path=wp-includes/x.php - a WordPress core file and
+ * what differs from the official copy for this version. Read-only, and only
+ * for files in wordpress.org's checksum list - never wp-config.php or anything
+ * else outside core.
+ */
+function claude_security_core_file( $req ) {
+    require_once ABSPATH . 'wp-admin/includes/admin.php';
+    $path = ltrim( wp_normalize_path( (string) $req->get_param( 'path' ) ), '/' );
+    $ver  = get_bloginfo( 'version' );
+    $sums = get_core_checksums( $ver, get_locale() ) ?: get_core_checksums( $ver, 'en_US' );
+    if ( ! is_array( $sums ) || ! $sums ) {
+        return new WP_Error( 'no_checksums', "Could not fetch wordpress.org's checksums for WordPress {$ver}.", array( 'status' => 502 ) );
+    }
+    if ( $path === '' || strpos( $path, 'wp-content/' ) === 0 || ! isset( $sums[ $path ] ) ) {
+        return new WP_Error( 'not_core', 'Only WordPress core files listed in wordpress.org\'s checksums can be read here. Files in wp-content: use /files/read.', array( 'status' => 403 ) );
+    }
+    $abs  = ABSPATH . $path;
+    $real = realpath( $abs );
+    if ( $real === false ) return new WP_REST_Response( array( 'path' => $path, 'version' => $ver, 'exists' => false ) );
+    if ( strpos( wp_normalize_path( $real ), wp_normalize_path( realpath( ABSPATH ) ) ) !== 0 ) {
+        return new WP_Error( 'forbidden', 'Path is outside the WordPress folder.', array( 'status' => 403 ) );
+    }
+    $local    = (string) file_get_contents( $real, false, null, 0, 2 * MB_IN_BYTES );
+    $modified = md5( $local ) !== $sums[ $path ];
+    $out      = array(
+        'path'         => $path,
+        'version'      => $ver,
+        'exists'       => true,
+        'modified'     => $modified,
+        'size'         => strlen( $local ),
+        'modified_at'  => wp_date( 'Y-m-d H:i:s', filemtime( $real ) ),
+        'official_md5' => $sums[ $path ],
+        'local_md5'    => md5( $local ),
+    );
+    if ( $modified ) {
+        $r = wp_remote_get( 'https://core.svn.wordpress.org/tags/' . rawurlencode( $ver ) . '/' . implode( '/', array_map( 'rawurlencode', explode( '/', $path ) ) ), array( 'timeout' => 20 ) );
+        $official = ! is_wp_error( $r ) && wp_remote_retrieve_response_code( $r ) === 200 ? (string) wp_remote_retrieve_body( $r ) : null;
+        if ( $official !== null && md5( $official ) === $sums[ $path ] ) {
+            require_once ABSPATH . WPINC . '/wp-diff.php';
+            $diff     = new Text_Diff( explode( "\n", $official ), explode( "\n", $local ) );
+            $renderer = new Text_Diff_Renderer( array( 'leading_context_lines' => 2, 'trailing_context_lines' => 2 ) );
+            // Normal diff: "<" lines are the official file, ">" lines are this site's.
+            $out['diff']      = substr( (string) $renderer->render( $diff ), 0, 200 * KB_IN_BYTES );
+            $out['diff_note'] = 'Lines starting "<" are the official WordPress file, ">" are this site\'s copy.';
+        } else {
+            $out['diff_note'] = 'The official copy could not be fetched from wordpress.org, so no diff - compare by hand.';
+        }
+    }
+    if ( rest_sanitize_boolean( $req->get_param( 'content' ) ) ) $out['content'] = substr( $local, 0, 400 * KB_IN_BYTES );
+    return new WP_REST_Response( $out );
+}
 
 /** Patterns that are rare in honest code and common in malware. */
 function claude_security_patterns() {
