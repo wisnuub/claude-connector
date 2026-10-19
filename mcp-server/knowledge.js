@@ -132,16 +132,18 @@ async function commitEntry(entry) {
   const updatedText = insertEntry(currentText, entry);
   const b64 = Buffer.from(updatedText, 'utf8').toString('base64');
 
-  // Content is written to a temp file and read via -f content=@path rather than
-  // passed inline, since a growing KNOWLEDGE.md will eventually exceed the OS
-  // command-line length limit if base64-encoded straight into an argv entry.
-  const tmpFile = path.join(os.tmpdir(), `claude-connector-knowledge-${Date.now()}.b64`);
-  fs.writeFileSync(tmpFile, b64);
+  // The request body goes through a temp file (--input) rather than argv: a
+  // growing KNOWLEDGE.md would exceed the OS command-line length limit, and
+  // `-f content=@path` does not read files (only -F does) - it sent the literal
+  // path, which GitHub rejected as "content is not valid Base64".
+  const tmpFile = path.join(os.tmpdir(), `claude-connector-knowledge-${Date.now()}.json`);
+  fs.writeFileSync(tmpFile, JSON.stringify({
+    message: `knowledge: ${entry.category} - ${entry.symptom.slice(0, 60)}`,
+    content: b64,
+    sha: meta.sha,
+  }));
   try {
-    const put = await gh(['api', `repos/${REPO}/contents/${KNOWLEDGE_PATH}`, '-X', 'PUT',
-      '-f', `message=knowledge: ${entry.category} - ${entry.symptom.slice(0, 60)}`,
-      '-f', `content=@${tmpFile}`,
-      '-f', `sha=${meta.sha}`]);
+    const put = await gh(['api', `repos/${REPO}/contents/${KNOWLEDGE_PATH}`, '-X', 'PUT', '--input', tmpFile]);
     return put.ok ? { ok: true } : { ok: false, error: put.error };
   } finally {
     fs.unlink(tmpFile, () => {});
@@ -211,9 +213,10 @@ export async function addKnowledge({ category, symptom, fix, why }) {
   }
   if (status.canPush) {
     const res = await commitEntry(entry);
-    return res.ok
-      ? { status: 'committed', message: 'Recorded directly to KNOWLEDGE.md.' }
-      : { status: 'error', message: res.error };
+    if (res.ok) return { status: 'committed', message: 'Recorded directly to KNOWLEDGE.md.' };
+    // Keep the finding rather than lose it; adding it again later retries the write.
+    loadBufferAndSave(entry);
+    return { status: 'error', message: `Could not write to KNOWLEDGE.md (${res.error}). Saved locally in knowledge-buffer.json - add it again later to retry.` };
   }
 
   const flushed = await bufferAndMaybeFlush(entry);
