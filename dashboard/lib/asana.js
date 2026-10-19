@@ -96,6 +96,28 @@ function matchSite(projectName, sites) {
 
 let cache = { at: null, tasks: [] };
 
+export const WP_UPDATE_TASK_RE = /^\s*wordpress\s+updates?\s*$/i;
+// A comment saying the month's updates were done ("WP core + plugin update done",
+// "No updates needed", "all plugins updated").
+// Only used to hide tasks in the dashboard - tasks are never completed from here;
+// the person who signs the work off does that in Asana.
+const DONE_RE = /\bupdates?\b[^\n]{0,80}\b(?:done|completed?)\b|\bno updates? needed\b|\ball (?:plugins? )?updated\b|\bupdated all\b|^\s*updated (?:the )?(?:wp|wordpress|core|plugins?|themes?)\b/im;
+
+/** The latest "updates done" comment on a task, if any. */
+async function lastDone(taskGid) {
+  const stories = await all(`/tasks/${taskGid}/stories`, { opt_fields: 'text,type,created_at,created_by.name' });
+  const hit = stories.filter(s => s.type === 'comment' && DONE_RE.test(s.text || '')).pop();
+  return hit ? { at: hit.created_at, by: hit.created_by?.name || null, text: String(hit.text).split('\n')[0].slice(0, 160) } : null;
+}
+
+/** Runs fn over items, n at a time. */
+async function pool(items, n, fn) {
+  const queue = [...items];
+  await Promise.all(Array.from({ length: Math.min(n, queue.length) }, async () => {
+    while (queue.length) { const it = queue.shift(); await fn(it).catch(() => {}); }
+  }));
+}
+
 /** Your incomplete tasks in the chosen workspace, each with the site it is for. */
 export async function myTasks({ refresh = false } = {}) {
   if (!refresh && cache.at && Date.now() - cache.at < 5 * 60_000) return withSites(cache.tasks);
@@ -113,6 +135,8 @@ export async function myTasks({ refresh = false } = {}) {
       project: t.projects?.[0] ? { gid: t.projects[0].gid, name: t.projects[0].name } : null,
     })),
   };
+  // Which WordPress update tasks already have this period's "update done" comment.
+  await pool(cache.tasks.filter(t => WP_UPDATE_TASK_RE.test(t.name)), 6, async t => { t.lastDone = await lastDone(t.gid); });
   return withSites(cache.tasks);
 }
 
@@ -399,6 +423,9 @@ export async function postComment(siteId, { text, html }) {
   const link = siteState(siteId).asana;
   if (!link?.taskGid) throw new AsanaError(400, 'This site has no Asana task linked - pick one in its Asana & login tab.');
   await api('POST', `/tasks/${link.taskGid}/stories`, { body: html ? { html_text: html } : { text } });
+  // Count it as done straight away, without waiting for the next refresh.
+  const cached = cache.tasks.find(t => t.gid === link.taskGid);
+  if (cached && (html || DONE_RE.test(text || ''))) cached.lastDone = { at: new Date().toISOString(), by: 'dashboard', text: (text || 'Detailed log').split('\n')[0] };
   return { task: link.taskName, project: link.project, url: link.url };
 }
 

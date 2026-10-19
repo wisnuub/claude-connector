@@ -29,6 +29,7 @@ const S = {
   tasks: null,              // { at, tasks }
   tasksQ: '',
   tasksShow: 'all',
+  showDone: false,          // Tasks: also show WordPress update tasks already done this month
   logins: {},               // task gid -> { busy, error, logins, task }
   drafts: {},               // site id -> { text, basedOn, pending } for the Asana comment
   reveal: new Set(),        // "gid|i" of shown passwords
@@ -822,6 +823,13 @@ async function loadDraft(id) {
   renderSite(id);
 }
 
+/** "Updates done" commented in the current calendar month. */
+const doneThisMonth = t => {
+  if (!t.lastDone?.at) return false;
+  const d = new Date(t.lastDone.at), n = new Date();
+  return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth();
+};
+
 function renderTasks() {
   const el = $('#view-tasks');
   if (!S.asana) { el.innerHTML = '<p class="muted">Checking Asana…</p>'; loadAsana().then(renderTasks); return; }
@@ -831,7 +839,9 @@ function renderTasks() {
   }
   if (!S.tasks) { el.innerHTML = '<p class="muted">Loading your tasks from Asana…</p>'; loadTasks(); return; }
   const q = S.tasksQ.toLowerCase();
+  const hiddenDone = (S.tasks.tasks || []).filter(doneThisMonth).length;
   const list = (S.tasks.tasks || []).filter(t => {
+    if (!S.showDone && doneThisMonth(t)) return false;
     if (q && !`${t.name} ${t.project?.name || ''} ${t.siteName || ''}`.toLowerCase().includes(q)) return false;
     if (S.tasksShow === 'site') return !!t.siteId;
     if (S.tasksShow === 'nosite') return !t.siteId;
@@ -844,6 +854,7 @@ function renderTasks() {
       <span class="count">${list.length} task${list.length === 1 ? '' : 's'}</span>
       <div class="seg" role="group" aria-label="Show">${[['all', 'All'], ['site', 'Connected'], ['nosite', 'Not connected']].map(([k, l]) => `<button data-action="tasks-show" data-v="${k}" class="${S.tasksShow === k ? 'on' : ''}">${l}</button>`).join('')}</div>
       <input type="search" id="tq" placeholder="Search tasks" value="${h(S.tasksQ)}" data-action="search-tasks">
+      <label class="check" title="WordPress update tasks with an 'update done' comment this month"><input type="checkbox" data-action="show-done" ${S.showDone ? 'checked' : ''}> Show done this month${hiddenDone ? ` (${hiddenDone})` : ''}</label>
       <span class="grow"></span>
       <span class="muted" style="font-size:13px">${h(S.asana.user.name)} · ${h(ws?.name || '')}${S.tasks.at ? ` · ${h(ago(S.tasks.at))}` : ''}</span>
       <button class="btn sm" data-action="tasks-refresh">↻ Refresh</button>
@@ -854,7 +865,7 @@ function renderTasks() {
       <div class="tablewrap"><table class="list tasks">
         <thead><tr><th>Task</th><th>Project</th><th>Site</th><th class="hide-sm">Due</th><th class="hide-sm">Actual time</th><th></th></tr></thead>
         <tbody>${list.map(t => `<tr data-gid="${h(t.gid)}">
-          <td><a href="${h(t.url)}" target="_blank" rel="noopener">${h(t.name)}</a></td>
+          <td><a href="${h(t.url)}" target="_blank" rel="noopener">${h(t.name)}</a>${doneThisMonth(t) ? ` <span class="tag accent" title="${h(`${t.lastDone.text}${t.lastDone.by ? ` - ${t.lastDone.by}` : ''}`)}">✓ updated ${h(new Date(t.lastDone.at).toLocaleDateString('en-AU', { day: 'numeric', month: 'short' }))}</span>` : ''}</td>
           <td>${h(t.project?.name || '')}</td>
           <td>${t.siteId ? `<a href="#" data-action="goto-site" data-site="${h(t.siteId)}">${h(t.siteName)}</a>`
             : `<span class="tag" title="Log in works on any site. Updates, form tests and the security check need Claude Connector installed and connected: install it from wp-admin, then click Connect on this Mac on its settings page.">Not connected</span>${t.siteUrl ? ` <a href="${h(t.siteUrl)}" target="_blank" rel="noopener" class="faint">${h(t.siteUrl.replace(/^https?:\/\//, '').replace(/\/wp-(admin|login\.php).*$/, ''))}</a>` : ''}`}</td>
@@ -870,7 +881,7 @@ function renderTasks() {
 /** Open "WordPress update(s)" tasks whose site is on the dashboard - one per site. */
 function wpUpdateTasks() {
   const seen = new Set();
-  return (S.tasks?.tasks || []).filter(t => /^\s*wordpress\s+updates?\s*$/i.test(t.name) && t.siteId && !seen.has(t.siteId) && seen.add(t.siteId));
+  return (S.tasks?.tasks || []).filter(t => /^\s*wordpress\s+updates?\s*$/i.test(t.name) && t.siteId && !doneThisMonth(t) && !seen.has(t.siteId) && seen.add(t.siteId));
 }
 
 function renderAsanaSettings() {
@@ -1232,6 +1243,7 @@ document.addEventListener('click', async (ev) => {
         const r = await api('POST', `/api/sites/${encodeURIComponent(site.id)}/asana-comment`, { text: ta.value });
         toast(`Posted to ${r.project ? `${r.project} › ` : ''}${r.task}`);
         delete S.drafts[site.id];
+        loadTasks();
         renderSite(site.id);
       } catch (e) { toast(e.message); t.disabled = false; }
       return;
@@ -1633,6 +1645,7 @@ document.addEventListener('change', async (ev) => {
   if (a === 'agency-filter') { S.agency = t.value; if (S.view === 'log') renderLog(); else { renderToolbar(); renderSites(); } }
   if (t.dataset.rv) updateReviewCount();
   if (t.form?.id === 'form-review' && (t.name === 'allowMajorCore' || t.name === 'formTest')) renderReview();
+  if (a === 'show-done') { S.showDone = t.checked; renderTasks(); return; }
   if (a === 'asana-link') {
     const task = (S.tasks?.tasks || []).find(x => x.gid === t.value);
     await api('POST', '/api/asana/link', { site: site.id, task: task ? { gid: task.gid, name: task.name, url: task.url, project: task.project } : null }).catch(e => toast(e.message));

@@ -75,6 +75,9 @@ const FORM_KINDS = [
   { kind: 'forminator', sel: 'form.forminator-custom-form' },
 ];
 
+// What anti-spam tools answer when they turn a submission away.
+const ANTI_SPAM_RE = /must be (?:a )?human|are you (?:a )?(?:human|robot)|not a robot|captcha|verify (?:that )?you(?:'re| are)|bot (?:check|detected|protection)|spam (?:check|detected|protection)|flagged as spam|looks like spam|suspicious (?:activity|submission)/i;
+
 const CAPTCHA_SEL = '.g-recaptcha, iframe[src*="recaptcha/api2/anchor"], .h-captcha, iframe[src*="hcaptcha.com"], .cf-turnstile, iframe[src*="challenges.cloudflare.com"]';
 
 /**
@@ -404,6 +407,11 @@ export async function runFormTest({ url, ref, contact, siteId = 'site', show = f
     result.screenshot = fs.existsSync(shot) ? path.basename(shot) : null;
     result.finalUrl = page.url() !== before ? page.url() : undefined;
     if (!outcome.done) return { ...result, status: 'unknown', message: 'Submitted, but the page showed no success or error message within 25 s. Check the screenshot and the inbox.' };
+    // Turned away by the site's anti-spam ("You must be a human to submit this form.",
+    // CF7's spam status): the form works, an automated test just cannot pass it.
+    if (!outcome.ok && (ANTI_SPAM_RE.test(outcome.message || '') || /\[spam\]/.test(outcome.message || ''))) {
+      return { ...result, status: 'blocked', captcha: plan.recaptchaV3 ? 'invisible reCAPTCHA' : "the site's anti-spam check", message: `${outcome.message} - test this form by hand.` };
+    }
     const v3 = plan.recaptchaV3 && !outcome.ok ? ' (the site uses invisible reCAPTCHA v3, which can flag automated tests as spam)' : '';
     return { ...result, status: outcome.ok ? 'sent' : 'failed', message: (outcome.message || (outcome.ok ? 'Sent' : 'Failed')) + v3 };
   } catch (e) {
