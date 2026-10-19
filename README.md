@@ -8,6 +8,12 @@
   Give Claude full, secure control of many WordPress sites - update, test, secure and clean them from one dashboard.
 </p>
 
+<p align="center">
+  <a href="https://github.com/wisnuub/claude-connector/releases/latest/download/claude-connector.zip"><img alt="Download plugin" src="https://img.shields.io/github/v/release/wisnuub/claude-connector?style=for-the-badge&label=Download%20plugin&color=C0502D&logo=wordpress&logoColor=white"></a>
+  &nbsp;
+  <a href="https://github.com/wisnuub/claude-connector/releases/latest/download/site-maintenance.zip"><img alt="Site Maintenance add-on" src="https://img.shields.io/github/v/release/wisnuub/claude-connector?style=for-the-badge&label=Site%20Maintenance%20add-on&color=1D48B8"></a>
+</p>
+
 
 A WordPress plugin that gives [Claude Code](https://claude.ai/code) (or any Claude AI agent) full programmatic access to a WordPress site - without needing cPanel, SSH, or hosting credentials.
 
@@ -100,11 +106,14 @@ existing entries runs before every write to avoid spamming the repo with near-id
 
 A local web app for routine maintenance across all your sites, in [`dashboard/`](dashboard/). It runs on your own computer, talks to each site through the connector, and keeps API keys on your machine.
 
+Download the **[Site Maintenance add-on](https://github.com/wisnuub/claude-connector/releases/latest/download/site-maintenance.zip)** (ready to run - dependencies included), unzip it and start it:
+
 ```bash
-cd dashboard
-npm install
+cd site-maintenance/dashboard
 npm start            # → http://127.0.0.1:4590
 ```
+
+Or from a clone of this repository: `cd dashboard`, `npm install`, `npm start`.
 
 Needs Node.js 18+ and Google Chrome or Microsoft Edge (for the form test). Every site must run Claude Connector **1.8.0 or newer**. The plugin's auto-updater gets them there.
 
