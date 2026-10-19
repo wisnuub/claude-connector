@@ -187,7 +187,7 @@ Connect Asana under **Settings → Asana** with a personal access token (Asana: 
 
 "Update everything" runs the security check after updating, too (Settings → Updates), which is how the Asana comment knows a site was cleaned.
 
-A planted file that is not part of WordPress - including one outside `wp-content` (the root, `wp-admin`, `wp-includes`) - can be removed with **quarantine**: it is moved into a hidden folder, not deleted, so it can be restored. Genuine core files are refused (reinstall core to fix those), as are `wp-config.php` and anything outside the install. Claude in VS Code does this with `wp_quarantine_file`, after examining the file and with your agreement.
+A planted file that is not part of WordPress - including one outside `wp-content` (the root, `wp-admin`, `wp-includes`) - can be removed with **quarantine**: it is moved into a hidden folder, not deleted, so it can be restored. Genuine core files are refused (reinstall core to fix those - if WordPress's own reinstall cannot write somewhere, the connector restores the files one by one and names any folder the host has to fix), as are `wp-config.php` and anything outside the install. Claude in VS Code does this with `wp_quarantine_file`, after examining the file and with your agreement.
 
 Findings are leads, not proof. **Open in VS Code with Claude** writes them to `SECURITY-REPORT.md` in the site's workspace and opens it, with instructions for Claude to investigate each finding with the connector's MCP tools (including `wp_security_scan` to re-run the check), explain what it finds and propose a cleanup plan - and to change nothing until you agree to it.
 
@@ -725,6 +725,17 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 ---
 
 ## Changelog
+
+### 1.8.10 — Core reinstall that finishes, or says exactly why not
+
+**Fixed**
+
+- **Reinstalling core no longer stops at the first file it cannot write.** WordPress's own reinstall gives up on the first problem - "Could not copy file", or silently when it cannot write to the site root - which left missing core files missing. The connector now checks the files afterwards and restores whatever is still missing or modified **one file at a time** from the official package. Each file is written to a temporary name and then swapped in, so a failed write never leaves a half-written file.
+- **Folders and files made read-only (often by the malware itself) are reset** to WordPress's standard permissions (0755 folders, 0644 files) when the site's own account owns them. The result lists each change under `permissions_fixed`.
+- **Anything that still cannot be written is explained** under `blocked_by`: the folder or file, its owner and permissions, the user PHP runs as, and the likely cause (owned by another account, or locked by the server or a security tool), ready to send to the host.
+- A reinstall that WordPress reports as successful but that left files unfixed is no longer reported as done.
+
+**Verified** on a local WordPress 7.1.3: with the site root and `wp-admin` set read-only (0555) and core files missing or modified, the folders were reset and all files restored; with a folder and a file locked (immutable flag), the other files were restored and both locked paths were reported with the reason; with nothing blocking, WordPress's own reinstall ran as before.
 
 ### 1.8.9 — Quarantine empty .htaccess stubs
 

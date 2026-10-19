@@ -152,7 +152,7 @@ async function safeCall(fn) {
 // Kept in step with CLAUDE_CONNECTOR_VERSION in claude-connector.php. The two
 // halves ship together, and a stale copy of this file silently hides whole
 // tools - which is much harder to notice than an outright error.
-const MCP_VERSION = '1.8.9';
+const MCP_VERSION = '1.8.10';
 
 const server = new McpServer({ name: 'claude-connector', version: MCP_VERSION });
 
@@ -421,7 +421,11 @@ server.tool('wp_reinstall_core',
   + 'wp-includes, which the file tools cannot reach. Does NOT change the WordPress version and does NOT touch wp-content '
   + '(plugins, themes, uploads). It does not remove ADDED/planted files that are not part of core - use wp_quarantine_file '
   + 'for those. Use for the "core files that differ" findings, after the user agrees; it then re-checks and reports how many '
-  + 'core files were fixed and the site health.',
+  + 'core files were fixed and the site health. If WordPress\'s own reinstall cannot finish (e.g. "Could not copy file" - '
+  + 'folders made read-only, often by the malware itself), it restores the files one by one instead (method: file_by_file), '
+  + 'resetting read-only folders/files the site owns to standard 0755/0644 (permissions_fixed). Anything it still cannot '
+  + 'write is listed in blocked_by - each folder or file with its owner, permissions, the user PHP runs as and the likely '
+  + 'reason (wrong owner, or locked by the server). Give that list to the user to pass to the host, then run this again.',
   { site: S },
   ({ site }) => safeCall(async () => ok(await api('POST', '/security/reinstall-core', null, {}, site, 300_000)))
 );

@@ -3,7 +3,7 @@
  * Plugin Name:  Claude Connector
  * Plugin URI:   https://github.com/wisnuub/claude-connector
  * Description:  Secure REST API bridge for Claude AI - ACF sync, cache purge, file management, database queries, post CRUD, plugin/theme control, maintenance updates with rollback, and more.
- * Version:      1.8.9
+ * Version:      1.8.10
  * Author:       Wisnuub
  * Author URI:   https://wisnuub.github.io
  * License:      GPL-2.0-or-later
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'CLAUDE_CONNECTOR_VERSION', '1.8.9' );
+define( 'CLAUDE_CONNECTOR_VERSION', '1.8.10' );
 define( 'CLAUDE_CONNECTOR_NS',      'claude/v1' );
 define( 'CLAUDE_CONNECTOR_GH_REPO', 'wisnuub/claude-connector' );
 
@@ -3835,6 +3835,8 @@ function claude_security_reinstall_core() {
         'locale'   => 'en_US',
     );
 
+    $maintenance = ABSPATH . '.maintenance';
+    $had_maint   = file_exists( $maintenance );
     $skin = new Automatic_Upgrader_Skin();
     add_filter( 'update_feedback', '__return_false' );
     ob_start();
@@ -3842,21 +3844,204 @@ function claude_security_reinstall_core() {
     $stray  = trim( wp_strip_all_tags( (string) ob_get_clean() ) );
     remove_filter( 'update_feedback', '__return_false' );
 
+    if ( ! $had_maint && file_exists( $maintenance ) ) @unlink( $maintenance ); // phpcs:ignore
+
+    // Never trust the upgrader's answer alone: it stops at the first file it
+    // cannot write (an error), quietly gives up when it cannot write to the site
+    // root (false, no message), and can report success with files left unfixed.
+    // Check the files, and restore what is left one by one.
+    $why = null;
     if ( is_wp_error( $result ) ) {
-        return new WP_Error( 'reinstall_failed', 'Core reinstall failed: ' . $result->get_error_message() . ( $stray ? " ({$stray})" : '' ), array( 'status' => 500 ) );
+        $data = $result->get_error_data();
+        $why  = array( 'code' => $result->get_error_code(), 'message' => $result->get_error_message() . ( $stray ? " ({$stray})" : '' ), 'file' => is_string( $data ) && $data !== '' ? $data : null );
+    } elseif ( ! $result ) {
+        $why = array( 'code' => 'no_write_access', 'message' => 'WordPress could not get write access to the site root, so it did not start', 'file' => null );
+    } else {
+        claude_cc_opcache_flush();
+        $after = $tally();
+        if ( $after && ( $after['modified'] || $after['missing'] ) ) {
+            $why = array( 'code' => 'incomplete', 'message' => "WordPress reported success, but {$after['modified']} core files still differ and {$after['missing']} are still missing", 'file' => null );
+        } else {
+            return new WP_REST_Response( array(
+                'version'  => $ver,
+                'method'   => 'upgrader',
+                'complete' => true,
+                'before'   => $before,
+                'after'    => $after,
+                'restored' => ( $before && $after ) ? array( 'modified' => $before['modified'] - $after['modified'], 'missing' => $before['missing'] - $after['missing'] ) : null,
+                'health'   => claude_loopback_health(),
+                'note'     => 'WordPress ' . $ver . ' core files were reinstalled from wordpress.org. wp-content (plugins, themes, uploads) was not touched. Planted files that are NOT part of core are not removed by this - use quarantine for those.',
+            ) );
+        }
     }
 
+    $said = $why['message'] . ( $why['file'] ? " (at {$why['file']})" : '' );
+    if ( 'direct' !== get_filesystem_method() ) {
+        return new WP_Error( 'reinstall_failed', "Core reinstall failed: {$said}. Restoring file by file needs direct file access, which this host does not give WordPress.", array( 'status' => 500, 'upgrader' => $why ) );
+    }
+    $fb = claude_security_restore_core_files( $ver );
+    if ( is_wp_error( $fb ) ) {
+        return new WP_Error( 'reinstall_failed', "Core reinstall failed: {$said}. Restoring file by file also failed: " . $fb->get_error_message(), array( 'status' => 500, 'upgrader' => $why ) );
+    }
     claude_cc_opcache_flush();
-    $after  = $tally();
-    $health = claude_loopback_health();
+    $after = $tally();
+    $n_ok  = count( $fb['restored'] );
+    $n_bad = count( $fb['failed'] );
+    if ( $n_bad ) {
+        $note = "WordPress's own reinstall did not finish ({$said}), so core files were restored one by one: {$n_ok} restored, {$n_bad} could not be written. blocked_by lists the folders or files that refused the write, with their owner, permissions and the likely reason - the host needs to fix those (give them that list), then run this again.";
+    } elseif ( $n_ok ) {
+        $note = "WordPress's own reinstall did not finish ({$said}), so core files were restored one by one instead: all {$n_ok} missing or modified core files now match WordPress {$ver}.";
+    } else {
+        $note = "Every core file already matches the official WordPress {$ver} package.";
+    }
+    if ( $fb['chmodded'] ) $note .= ' Some read-only folders or files were reset to standard permissions first - see permissions_fixed.';
     return new WP_REST_Response( array(
-        'version'  => $ver,
-        'before'   => $before,
-        'after'    => $after,
-        'restored' => ( $before && $after ) ? array( 'modified' => $before['modified'] - $after['modified'], 'missing' => $before['missing'] - $after['missing'] ) : null,
-        'health'   => $health,
-        'note'     => 'WordPress ' . $ver . ' core files were reinstalled from wordpress.org. wp-content (plugins, themes, uploads) was not touched. Planted files that are NOT part of core are not removed by this - use quarantine for those.',
+        'version'           => $ver,
+        'method'            => 'file_by_file',
+        'complete'          => ! $n_bad,
+        'upgrader'          => $why,
+        'before'            => $before,
+        'after'             => $after,
+        'restored_count'    => $n_ok,
+        'restored'          => array_slice( $fb['restored'], 0, 60 ),
+        'not_restored'      => $n_bad,
+        'failed'            => array_slice( $fb['failed'], 0, 60, true ),
+        'blocked_by'        => $fb['blocked'],
+        'permissions_fixed' => $fb['chmodded'],
+        'health'            => claude_loopback_health(),
+        'note'              => $note,
     ) );
+}
+
+/**
+ * Core reinstall fallback: copy every missing or modified core file from the
+ * official package one at a time, so one unwritable folder does not stop the
+ * rest. Each file goes to a temporary name in its folder and is then renamed
+ * over the old one, so a failed write never leaves a half-written file. A
+ * folder or file the site owns but that was made read-only (a common malware
+ * trick) is reset to WordPress's standard permissions first.
+ *
+ * @return array|WP_Error  restored (paths), failed (path => blocking path),
+ *                         blocked (why, per blocking path), chmodded.
+ */
+function claude_security_restore_core_files( $ver ) {
+    global $wp_filesystem;
+    $pkg = download_url( 'https://downloads.wordpress.org/release/wordpress-' . $ver . '-no-content.zip', 300 );
+    if ( is_wp_error( $pkg ) ) return $pkg;
+    $work  = WP_CONTENT_DIR . '/upgrade/claude-core-' . wp_generate_password( 8, false, false );
+    $unzip = unzip_file( $pkg, $work );
+    @unlink( $pkg ); // phpcs:ignore
+    if ( is_wp_error( $unzip ) ) {
+        $wp_filesystem->delete( $work, true );
+        return $unzip;
+    }
+
+    $src      = wp_normalize_path( $work . '/wordpress' );
+    $restored = $failed = $blocked = $chmodded = array();
+    $files    = new RecursiveIteratorIterator( new RecursiveDirectoryIterator( $src, FilesystemIterator::SKIP_DOTS ) );
+    foreach ( $files as $f ) {
+        if ( ! $f->isFile() ) continue;
+        $from = wp_normalize_path( $f->getPathname() );
+        $rel  = ltrim( substr( $from, strlen( $src ) ), '/' );
+        if ( strpos( $rel, 'wp-content/' ) === 0 ) continue;
+        $to  = ABSPATH . $rel;
+        $md5 = md5_file( $from );
+        if ( is_file( $to ) && md5_file( $to ) === $md5 ) continue;
+
+        $dir = dirname( $to );
+        if ( ! is_dir( $dir ) ) {
+            $parent = $dir;
+            while ( ! is_dir( $parent ) && dirname( $parent ) !== $parent ) $parent = dirname( $parent );
+            claude_core_make_writable( $parent, $chmodded );
+            wp_mkdir_p( $dir );
+        }
+        if ( is_dir( $dir ) ) {
+            claude_core_make_writable( $dir, $chmodded );
+            $tmp = $to . '.claude-tmp';
+            if ( @copy( $from, $tmp ) ) { // phpcs:ignore
+                @chmod( $tmp, defined( 'FS_CHMOD_FILE' ) ? FS_CHMOD_FILE : 0644 ); // phpcs:ignore
+                if ( @rename( $tmp, $to ) || ( @copy( $tmp, $to ) && @unlink( $tmp ) ) ) { // phpcs:ignore
+                    clearstatcache( true, $to );
+                    if ( md5_file( $to ) === $md5 ) {
+                        $restored[] = $rel;
+                        continue;
+                    }
+                }
+                @unlink( $tmp ); // phpcs:ignore
+            }
+        }
+        // A folder that is missing or unwritable blocks the file; otherwise the file itself is locked.
+        $why = claude_core_write_problem( ( ! is_dir( $dir ) || ! is_writable( $dir ) || ! is_file( $to ) ) ? $dir : $to );
+        $failed[ $rel ]          = $why['path'];
+        $blocked[ $why['path'] ] = $why;
+    }
+    $wp_filesystem->delete( $work, true );
+    return array( 'restored' => $restored, 'failed' => $failed, 'blocked' => array_values( $blocked ), 'chmodded' => $chmodded );
+}
+
+/** Path relative to the WordPress root, for reports. */
+function claude_core_rel( $path ) {
+    $rel = ltrim( substr( wp_normalize_path( $path ), strlen( wp_normalize_path( ABSPATH ) ) ), '/' );
+    return $rel === '' ? '(site root)' : $rel;
+}
+
+/**
+ * Makes a folder or file writable when the site's own account owns it but it is
+ * read-only, using WordPress's standard permissions (0755 folders, 0644 files).
+ * Records each change in $chmodded.
+ */
+function claude_core_make_writable( $path, &$chmodded ) {
+    clearstatcache( true, $path );
+    if ( is_writable( $path ) ) return true;
+    $mode = is_dir( $path ) ? ( defined( 'FS_CHMOD_DIR' ) ? FS_CHMOD_DIR : 0755 ) : ( defined( 'FS_CHMOD_FILE' ) ? FS_CHMOD_FILE : 0644 );
+    $old  = substr( sprintf( '%o', (int) @fileperms( $path ) ), -4 ); // phpcs:ignore
+    if ( @chmod( $path, $mode ) ) { // phpcs:ignore
+        clearstatcache( true, $path );
+        if ( is_writable( $path ) ) {
+            $chmodded[] = array( 'path' => claude_core_rel( $path ), 'from' => $old, 'to' => sprintf( '%04o', $mode ) );
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Why WordPress cannot write to a path: its owner and permissions against the
+ * user PHP runs as, in words a host can act on.
+ */
+function claude_core_write_problem( $path ) {
+    while ( ! file_exists( $path ) && dirname( $path ) !== $path ) $path = dirname( $path );
+    clearstatcache( true, $path );
+    $name  = function ( $id ) {
+        if ( $id === false || $id === null ) return '?';
+        if ( function_exists( 'posix_getpwuid' ) ) {
+            $p = @posix_getpwuid( $id ); // phpcs:ignore
+            if ( $p ) return $p['name'];
+        }
+        return (string) $id;
+    };
+    $uid   = @fileowner( $path ); // phpcs:ignore
+    $me    = function_exists( 'posix_geteuid' ) ? posix_geteuid() : null;
+    $mode  = (int) @fileperms( $path ); // phpcs:ignore
+    $perms = substr( sprintf( '%o', $mode ), -4 );
+    $what  = is_dir( $path ) ? 'folder' : 'file';
+    if ( is_writable( $path ) ) {
+        $reason = "the {$what} is writable, but the server still refused the write - usually a server security tool (e.g. Imunify360 or a file lock) or a full disk quota";
+    } elseif ( $me !== null && $uid !== false && $uid !== $me ) {
+        $reason = "the {$what} belongs to " . $name( $uid ) . ', but WordPress runs as ' . $name( $me ) . ' - the host needs to give it back to the hosting account';
+    } elseif ( ! ( $mode & 0200 ) ) {
+        $reason = "the {$what} is read-only ({$perms}) and could not be reset - the host needs to make it writable (0755 for folders, 0644 for files)";
+    } else {
+        $reason = "the {$what} has normal permissions ({$perms}) but is locked against changes - an immutable flag or a server security tool; the host needs to unlock it";
+    }
+    return array(
+        'path'     => claude_core_rel( $path ),
+        'type'     => $what,
+        'perms'    => $perms,
+        'owner'    => $name( $uid ),
+        'php_user' => $me !== null ? $name( $me ) : null,
+        'reason'   => $reason,
+    );
 }
 
 /**
