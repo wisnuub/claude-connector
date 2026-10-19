@@ -153,6 +153,8 @@ Connect Asana under **Settings → Asana** with a personal access token (Asana: 
 
 "Update everything" runs the security check after updating, too (Settings → Updates), which is how the Asana comment knows a site was cleaned.
 
+A planted file that is not part of WordPress - including one outside `wp-content` (the root, `wp-admin`, `wp-includes`) - can be removed with **quarantine**: it is moved into a hidden folder, not deleted, so it can be restored. Genuine core files are refused (reinstall core to fix those), as are `wp-config.php` and anything outside the install. Claude in VS Code does this with `wp_quarantine_file`, after examining the file and with your agreement.
+
 Findings are leads, not proof. **Open in VS Code with Claude** writes them to `SECURITY-REPORT.md` in the site's workspace and opens it, with instructions for Claude to investigate each finding with the connector's MCP tools (including `wp_security_scan` to re-run the check), explain what it finds and propose a cleanup plan - and to change nothing until you agree to it.
 
 ### Agencies
@@ -689,6 +691,14 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 ---
 
 ## Changelog
+
+### 1.8.4 — Remove malware outside wp-content (quarantine)
+
+**Added**
+
+- **`POST /security/quarantine`** - moves one added (non-core) file out of the live site into a hidden, request-blocked folder (`wp-content/uploads/.claude-quarantine`), **including files outside `wp-content`** (the site root, `wp-admin`, `wp-includes`) that the file tools cannot reach, which is where root-path malware hides. It is moved, not deleted, and can be put back with **`POST /security/restore`**; **`GET /security/quarantine`** lists what is held. Refused for genuine WordPress core files (matching wordpress.org's checksums - restore those by reinstalling core), `wp-config.php` and other config files, anything outside the WordPress install, and the connector itself. MCP tools `wp_quarantine_file`, `wp_quarantine_list`, `wp_quarantine_restore`; the security report tells Claude to use them for planted files once you have examined them and agreed.
+
+**Verified** on a local WordPress 7.1.3: planted files in the site root and in `wp-admin` were quarantined (removed from the live site) and restored intact; a genuine core file, `wp-config.php` and paths outside the install were refused; the site stayed healthy throughout.
 
 ### 1.8.3 — Divi email patterns
 

@@ -3,7 +3,7 @@
  * Plugin Name:  Claude Connector
  * Plugin URI:   https://github.com/wisnuub/claude-connector
  * Description:  Secure REST API bridge for Claude AI - ACF sync, cache purge, file management, database queries, post CRUD, plugin/theme control, maintenance updates with rollback, and more.
- * Version:      1.8.3
+ * Version:      1.8.4
  * Author:       Wisnuub
  * Author URI:   https://wisnuub.github.io
  * License:      GPL-2.0-or-later
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'CLAUDE_CONNECTOR_VERSION', '1.8.3' );
+define( 'CLAUDE_CONNECTOR_VERSION', '1.8.4' );
 define( 'CLAUDE_CONNECTOR_NS',      'claude/v1' );
 define( 'CLAUDE_CONNECTOR_GH_REPO', 'wisnuub/claude-connector' );
 
@@ -528,6 +528,9 @@ function claude_settings_page() {
         array( 'POST',   '/maintenance/test-email',   'Send a wp_mail() test and report the mailer in use' ),
         array( 'GET',    '/security/scan',            'Read-only security check: core/plugin checksums, PHP in uploads, malware patterns, new admins, redirects' ),
         array( 'GET',    '/security/core-file?path=', 'A WordPress core file and its diff against the official copy (core files only, read-only)' ),
+        array( 'POST',   '/security/quarantine',      'Move one added (non-core) file out of the live site into quarantine - incl. outside wp-content; reversible' ),
+        array( 'GET',    '/security/quarantine',      'List quarantined files' ),
+        array( 'POST',   '/security/restore',         'Put a quarantined file back' ),
         array( 'GET',    '/divi/forms',               'Divi contact forms and their email Message Pattern: missing fields, placeholders matching no field' ),
         array( 'POST',   '/divi/forms/pattern',       'Set a Divi contact form\'s Message Pattern (previous one kept for undo)' ),
         array( 'GET',    '/themes',                   'List installed themes' ),
@@ -914,6 +917,11 @@ add_action( 'rest_api_init', function () {
     register_rest_route( $ns, '/maintenance/test-email', array( 'methods' => 'POST', 'callback' => 'claude_maint_test_email', 'permission_callback' => $a ) );
     register_rest_route( $ns, '/security/scan',          array( 'methods' => 'GET',  'callback' => 'claude_security_scan',    'permission_callback' => $a ) );
     register_rest_route( $ns, '/security/core-file',     array( 'methods' => 'GET',  'callback' => 'claude_security_core_file', 'permission_callback' => $a ) );
+    register_rest_route( $ns, '/security/quarantine',    array(
+        array( 'methods' => 'GET',  'callback' => 'claude_security_quarantine_list', 'permission_callback' => $a ),
+        array( 'methods' => 'POST', 'callback' => 'claude_security_quarantine',      'permission_callback' => $a ),
+    ) );
+    register_rest_route( $ns, '/security/restore',       array( 'methods' => 'POST', 'callback' => 'claude_security_restore', 'permission_callback' => $a ) );
     register_rest_route( $ns, '/divi/forms',             array( 'methods' => 'GET',  'callback' => 'claude_divi_forms',       'permission_callback' => $a ) );
     register_rest_route( $ns, '/divi/forms/pattern',     array( 'methods' => 'POST', 'callback' => 'claude_divi_set_pattern', 'permission_callback' => $a ) );
 } );
@@ -3626,6 +3634,148 @@ function claude_maint_test_email( $req ) {
 //  .htaccess and scripts injected into content. Findings are leads for a
 //  person (or Claude) to look into - not proof, and nothing is cleaned here.
 // ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Where quarantined files are kept: a hidden, request-blocked folder inside
+ * uploads (always writable by WordPress). A moved file keeps its original path
+ * so it can be put back.
+ */
+function claude_security_quarantine_dir() {
+    $dir = wp_upload_dir()['basedir'] . '/.claude-quarantine';
+    if ( ! is_dir( $dir ) ) {
+        wp_mkdir_p( $dir );
+        @file_put_contents( $dir . '/.htaccess', "Require all denied\nDeny from all\n" ); // phpcs:ignore
+        @file_put_contents( $dir . '/index.php', "<?php // Silence is golden.\n" ); // phpcs:ignore
+    }
+    return $dir;
+}
+
+function claude_security_manifest() {
+    $file = claude_security_quarantine_dir() . '/manifest.json';
+    $data = is_readable( $file ) ? json_decode( (string) file_get_contents( $file ), true ) : array();
+    return array( $file, is_array( $data ) ? $data : array() );
+}
+
+/**
+ * Whether a path may be quarantined, and why not if it may not. The guard for
+ * the whole feature - keep it strict.
+ *
+ * Allowed: a file inside the WordPress install that is NOT a legitimate core
+ * file (its path is absent from wordpress.org's checksums, so it was added),
+ * is not wp-config.php, and is not already in quarantine.
+ *
+ * Refused: anything outside ABSPATH, any file matching the official checksums
+ * (that is real core - restore it by reinstalling core, never delete), config
+ * files, and directories.
+ *
+ * @return array|true  array( code, message ) on refusal, true when allowed.
+ */
+function claude_security_quarantine_allowed( $abs, $sums ) {
+    $real = realpath( $abs );
+    if ( $real === false || ! is_file( $real ) ) {
+        return array( 'not_found', 'No such file.' );
+    }
+    $base = realpath( ABSPATH );
+    $real = wp_normalize_path( $real );
+    if ( $base === false || strpos( $real, wp_normalize_path( $base ) . '/' ) !== 0 ) {
+        return array( 'outside_site', 'Only files inside this WordPress installation can be quarantined.' );
+    }
+    $rel = ltrim( substr( $real, strlen( wp_normalize_path( $base ) ) ), '/' );
+
+    if ( in_array( strtolower( basename( $rel ) ), array( 'wp-config.php', 'wp-config-sample.php', '.htaccess', '.user.ini', 'php.ini' ), true ) ) {
+        return array( 'protected', basename( $rel ) . ' is a configuration file - review it by hand, it is not removed automatically.' );
+    }
+    if ( is_array( $sums ) && isset( $sums[ $rel ] ) ) {
+        return array( 'is_core', "{$rel} is a genuine WordPress core file. If it was modified, restore it by reinstalling core (wp core download --skip-content --force), do not delete it." );
+    }
+    if ( strpos( $real, wp_normalize_path( claude_security_quarantine_dir() ) ) === 0 ) {
+        return array( 'already_quarantined', 'This file is already in quarantine.' );
+    }
+    // Belt and braces: never touch our own plugin.
+    if ( strpos( $real, wp_normalize_path( dirname( __DIR__ ) ) ) === 0 && strpos( $rel, 'wp-content/plugins/' . dirname( claude_connector_basename() ) ) === 0 ) {
+        return array( 'protected', 'Refusing to quarantine Claude Connector itself.' );
+    }
+    return true;
+}
+
+/**
+ * POST /security/quarantine { path } - move one added (non-core) file out of the
+ * live site into quarantine. Reversible via /security/restore. For malware the
+ * security scan found outside wp-content (root, wp-admin, wp-includes) that the
+ * file tools cannot reach.
+ */
+function claude_security_quarantine( $req ) {
+    require_once ABSPATH . 'wp-admin/includes/admin.php';
+    $input = ltrim( wp_normalize_path( (string) $req->get_param( 'path' ) ), '/' );
+    if ( $input === '' ) return new WP_Error( 'missing', 'Give the path of the file to quarantine, relative to the WordPress root (e.g. wp-admin/js/widgets/radio.php).', array( 'status' => 400 ) );
+
+    $abs  = wp_normalize_path( ABSPATH ) . '/' . $input;
+    $ver  = get_bloginfo( 'version' );
+    $sums = get_core_checksums( $ver, get_locale() ) ?: get_core_checksums( $ver, 'en_US' );
+    if ( ! is_array( $sums ) || ! $sums ) {
+        return new WP_Error( 'no_checksums', "Could not fetch wordpress.org's checksums for WordPress {$ver}, so a core file cannot be told from a planted one - not quarantining anything.", array( 'status' => 502 ) );
+    }
+    $allowed = claude_security_quarantine_allowed( $abs, $sums );
+    if ( $allowed !== true ) {
+        return new WP_Error( $allowed[0], $allowed[1], array( 'status' => $allowed[0] === 'not_found' ? 404 : 403 ) );
+    }
+
+    $real   = realpath( $abs );
+    $rel     = ltrim( substr( wp_normalize_path( $real ), strlen( wp_normalize_path( realpath( ABSPATH ) ) ) ), '/' );
+    $id      = gmdate( 'Ymd-His' ) . '-' . substr( md5( $rel . microtime() ), 0, 8 );
+    $dest    = claude_security_quarantine_dir() . '/' . $id . '.quarantined';
+    $size    = filesize( $real );
+    $md5     = md5_file( $real );
+    $preview = substr( (string) file_get_contents( $real, false, null, 0, 4 * KB_IN_BYTES ), 0, 2000 );
+
+    if ( ! @rename( $real, $dest ) ) { // phpcs:ignore
+        if ( ! @copy( $real, $dest ) || ! @unlink( $real ) ) { // phpcs:ignore
+            return new WP_Error( 'move_failed', "Could not move {$rel} - the web server user may not have permission to change that folder. Ask your host to remove it.", array( 'status' => 500 ) );
+        }
+    }
+    if ( substr( $rel, -4 ) === '.php' && function_exists( 'wp_opcache_invalidate' ) ) wp_opcache_invalidate( $real, true );
+
+    list( $mf_file, $manifest ) = claude_security_manifest();
+    $manifest[ $id ] = array( 'original' => $rel, 'size' => $size, 'md5' => $md5, 'at' => gmdate( 'c' ), 'by' => wp_get_current_user()->user_login ?: null, 'restored' => false );
+    @file_put_contents( $mf_file, wp_json_encode( $manifest, JSON_PRETTY_PRINT ) ); // phpcs:ignore
+
+    return new WP_REST_Response( array(
+        'quarantined' => $rel,
+        'id'          => $id,
+        'size'        => $size,
+        'md5'         => $md5,
+        'preview'     => $preview,
+        'note'        => 'Moved out of the live site into wp-content/uploads/.claude-quarantine. The site no longer loads or serves it. Put it back with POST /security/restore {"id":"' . $id . '"} if needed.',
+    ) );
+}
+
+/** GET /security/quarantine - what is currently in quarantine. */
+function claude_security_quarantine_list() {
+    list( , $manifest ) = claude_security_manifest();
+    $items = array();
+    foreach ( $manifest as $id => $m ) {
+        $items[] = array_merge( array( 'id' => $id ), $m, array( 'in_quarantine' => file_exists( claude_security_quarantine_dir() . '/' . $id . '.quarantined' ) ) );
+    }
+    usort( $items, function ( $a, $b ) { return strcmp( $b['at'], $a['at'] ); } );
+    return new WP_REST_Response( array( 'dir' => 'wp-content/uploads/.claude-quarantine', 'items' => $items ) );
+}
+
+/** POST /security/restore { id } - put a quarantined file back where it was. */
+function claude_security_restore( $req ) {
+    $id = preg_replace( '/[^a-z0-9\-]/', '', (string) $req->get_param( 'id' ) );
+    list( $mf_file, $manifest ) = claude_security_manifest();
+    if ( $id === '' || ! isset( $manifest[ $id ] ) ) return new WP_Error( 'not_found', 'No quarantined file with that id.', array( 'status' => 404 ) );
+    $src = claude_security_quarantine_dir() . '/' . $id . '.quarantined';
+    if ( ! is_file( $src ) ) return new WP_Error( 'not_found', 'The quarantined file is gone.', array( 'status' => 404 ) );
+    $dest = wp_normalize_path( ABSPATH ) . '/' . $manifest[ $id ]['original'];
+    wp_mkdir_p( dirname( $dest ) );
+    if ( ! @rename( $src, $dest ) && ! ( @copy( $src, $dest ) && @unlink( $src ) ) ) { // phpcs:ignore
+        return new WP_Error( 'restore_failed', 'Could not put the file back.', array( 'status' => 500 ) );
+    }
+    $manifest[ $id ]['restored'] = gmdate( 'c' );
+    @file_put_contents( $mf_file, wp_json_encode( $manifest, JSON_PRETTY_PRINT ) ); // phpcs:ignore
+    return new WP_REST_Response( array( 'restored' => $manifest[ $id ]['original'] ) );
+}
 
 /**
  * GET /security/core-file?path=wp-includes/x.php - a WordPress core file and

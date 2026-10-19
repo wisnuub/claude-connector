@@ -152,7 +152,7 @@ async function safeCall(fn) {
 // Kept in step with CLAUDE_CONNECTOR_VERSION in claude-connector.php. The two
 // halves ship together, and a stale copy of this file silently hides whole
 // tools - which is much harder to notice than an outright error.
-const MCP_VERSION = '1.8.3';
+const MCP_VERSION = '1.8.4';
 
 const server = new McpServer({ name: 'claude-connector', version: MCP_VERSION });
 
@@ -413,6 +413,29 @@ server.tool('wp_core_file_diff',
   + '- only after the user agrees.',
   { site: S, path: z.string().describe('e.g. wp-includes/version.php'), content: z.boolean().optional() },
   ({ site, path, content }) => safeCall(async () => ok(await api('GET', '/security/core-file', { path, ...(content ? { content: '1' } : {}) }, null, site)))
+);
+
+server.tool('wp_quarantine_file',
+  'Move ONE added (non-core) file out of the live site into quarantine - including files OUTSIDE wp-content (site root, '
+  + 'wp-admin, wp-includes) that the file tools cannot reach, which is where root-path malware hides. The file is moved to '
+  + 'wp-content/uploads/.claude-quarantine (not deleted), so it can be restored. Refused for genuine WordPress core files '
+  + '(fix those by reinstalling core), wp-config.php and other config files. path is relative to the WordPress root, e.g. '
+  + '"wp-admin/js/widgets/radio.php". Only quarantine files you have examined (wp_core_file_diff / wp_files_read) and the '
+  + 'user has agreed to remove.',
+  { site: S, path: z.string() },
+  ({ site, path }) => safeCall(async () => ok(await api('POST', '/security/quarantine', null, { path }, site)))
+);
+
+server.tool('wp_quarantine_list',
+  'List files currently in quarantine on the site (what was moved, from where, when).',
+  { site: S },
+  ({ site }) => safeCall(async () => ok(await api('GET', '/security/quarantine', null, null, site)))
+);
+
+server.tool('wp_quarantine_restore',
+  'Put a quarantined file back where it was (undo a quarantine). id comes from wp_quarantine_file or wp_quarantine_list.',
+  { site: S, id: z.string() },
+  ({ site, id }) => safeCall(async () => ok(await api('POST', '/security/restore', null, { id }, site)))
 );
 
 server.tool('wp_divi_forms',
