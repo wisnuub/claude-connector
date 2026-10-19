@@ -97,10 +97,18 @@ function planInPage({ kinds, contact, ref }) {
   const randomChoices = contact.choices === 'random';
   const rules = (contact.rules || []).filter(r => r && r.match).map(r => ({ match: String(r.match).toLowerCase().trim(), value: String(r.value ?? '') }));
 
+  // The contact form when a page has several: one with a message box, and not a
+  // job application, newsletter sign-up or login.
+  const NOT_CONTACT = /career|job|employ|recruit|vacanc|resume|\bcv\b|apply|application|availability|newsletter|subscribe|log ?in|register|sign ?up/i;
+  // Divi and others label fields with placeholders, so read those and the field names too.
+  const formText = f => `${f.innerText || ''} ${[...f.querySelectorAll('input, textarea, select')].map(e => `${e.placeholder || ''} ${e.name || ''}`).join(' ')}`;
+  const formScore = f => (f.querySelector('textarea') ? 2 : 0)
+    + (/message|enquir|inquir|comment|question|how can we help/i.test(formText(f)) ? 1 : 0)
+    - (NOT_CONTACT.test(formText(f)) ? 4 : 0);
   let form = null, kind = 'generic';
   for (const k of kinds) {
-    form = [...document.querySelectorAll(k.sel)].find(visible);
-    if (form) { kind = k.kind; break; }
+    const found = [...document.querySelectorAll(k.sel)].filter(visible);
+    if (found.length) { form = found.sort((a, b) => formScore(b) - formScore(a))[0]; kind = k.kind; break; }
   }
   if (!form) {
     // Any form that looks like a contact form: has a textarea or email field and is not search/login/comments.
@@ -232,7 +240,8 @@ function planInPage({ kinds, contact, ref }) {
 
     let value;
     if (el.tagName === 'TEXTAREA') value = message;
-    else if (type === 'email' || /e-?mail/.test(label)) value = contact.email;
+    // Divi validates by its own field type, whatever the label says.
+    else if (type === 'email' || el.dataset.field_type === 'email' || el.getAttribute('autocomplete') === 'email' || el.inputMode === 'email' || /e-?mail/.test(label)) value = contact.email;
     else if (type === 'tel' || /phone|mobile|tel\b|contact number/.test(label)) value = contact.phone;
     else if (type === 'url' || /website|url\b/.test(label)) value = 'https://example.com';
     else if (type === 'number' || type === 'range') value = el.min || '1';
@@ -309,6 +318,26 @@ function outcomeInPage(kind) {
   const thanks = /thank you|thanks for|message (has been|was) sent|we('|’)ll be in touch|we will (get back|be in touch|contact you)|successfully (sent|submitted)|received your (message|enquiry)/i.exec(body);
   if (thanks && (!form || !visible(form) || /thank|success/i.test(location.href))) return { done: true, ok: true, message: thanks[0] };
   return { done: false };
+}
+
+/**
+ * Dry run: which form would be tested on a page and what would go in each
+ * field - without filling anything in or submitting.
+ */
+export async function previewFormTest({ url, contact, ref = 'PREVIEW' }) {
+  const b = await browser(true);
+  const ctx = await b.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 900 } });
+  const page = await ctx.newPage();
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+    await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {});
+    return await page.evaluate(
+      new Function('args', `const CAPTCHA_SEL_IN_PAGE = ${JSON.stringify(CAPTCHA_SEL)}; return (${planInPage.toString()})(args);`),
+      { kinds: FORM_KINDS, contact, ref },
+    );
+  } finally {
+    await ctx.close().catch(() => {});
+  }
 }
 
 /**

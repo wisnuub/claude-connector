@@ -440,9 +440,16 @@ function wordpressTab(site) {
   </div>`;
 }
 
+// Same order the form test picks in (lib/jobs.js formStep).
+const NOT_CONTACT = /career|job|employ|recruit|vacanc|apply|application|newsletter|subscribe|login|register|sign-?up/i;
+const rankForms = forms => [...forms].sort((a, b) => {
+  const r = f => (f.contact ? 3 : 0) + (f.via && f.via !== 'content' ? 1 : 0) - (NOT_CONTACT.test(`${f.title} ${f.url}`) ? 5 : 0);
+  return r(b) - r(a);
+});
+
 function formsTab(site) {
   const f = site.formTest;
-  const forms = site.forms || [];
+  const forms = rankForms(site.forms || []);
   const current = site.formUrl || '';
   const ag = agencyOf(site);
   const fields = f?.fields?.length ? `<div class="tablewrap"><table class="list" style="margin-top:8px"><thead><tr><th>Field</th><th>Filled with</th></tr></thead><tbody>${f.fields.map(x => `<tr><td>${h(x.label)}${x.rule ? ` <span class="tag accent" title="From the agency's field rule">rule: ${h(x.rule)}</span>` : ''}</td><td>${h(x.value)}${x.shown ? ` <span class="faint">(${h(x.shown)})</span>` : ''}${x.error ? ` <span class="tag bad" title="${h(x.error)}">not filled</span>` : ''}</td></tr>`).join('')}</tbody></table></div>` : '';

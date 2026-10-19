@@ -284,6 +284,11 @@ async function formStep(ctx, { url } = {}) {
   } catch (e) {
     if (!target) { st.set('failed', `Form test: could not list forms - ${errInfo(e).message}`, null, { kind: 'form', form: 'error', result: 'failed' }); return null; }
   }
+  // Contact pages first, then site-wide forms (Theme Builder / Elementor templates);
+  // job applications, newsletter sign-ups and logins last.
+  const NOT_CONTACT = /career|job|employ|recruit|vacanc|apply|application|newsletter|subscribe|login|register|sign-?up/i;
+  const rank = f => (f.contact ? 3 : 0) + (f.via && f.via !== 'content' ? 1 : 0) - (NOT_CONTACT.test(`${f.title} ${f.url}`) ? 5 : 0);
+  forms = [...forms].sort((a, b) => rank(b) - rank(a));
   if (!target && forms.length) target = forms[0].url;
 
   const ref = newRef();
