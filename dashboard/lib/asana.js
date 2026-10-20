@@ -1,23 +1,24 @@
 // Asana: your task list, which task belongs to which site, the WordPress logins
 // written in Asana, and posting each run's results back as a comment.
 //
-// Auth is a Personal Access Token (Asana → Settings → Apps → Developer apps),
-// kept in the macOS Keychain via secrets.js. Logins are read from Asana when
-// asked for and never stored by the dashboard.
+// Each agency can have its own Asana: a Personal Access Token (Asana → Settings
+// → Apps → Developer apps) kept in the macOS Keychain via secrets.js, and a
+// workspace. Every call uses the token of the agency the task belongs to.
+// Logins are read from Asana when asked for and never stored by the dashboard.
 import { getSecret, setSecret, deleteSecret } from './secrets.js';
-import { getSettings, saveSettings, listSites, siteState, patchSiteState, getMeta, patchMeta } from './store.js';
-import { summarize } from './log.js';
+import { getSettings, saveSettings, listSites, siteState, patchSiteState, getMeta, patchMeta, agencyFor, addHistory } from './store.js';
+import { summarize, appendTextLog } from './log.js';
 
 const BASE = process.env.CC_ASANA_BASE || 'https://app.asana.com/api/1.0';
-const TOKEN = 'asana-token';
+const LEGACY_TOKEN = 'asana-token'; // from before agencies had their own; belongs to the default agency
+const tokenKey = id => `asana-token:${id}`;
 
 export class AsanaError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
 async function api(method, path, { params, body, token } = {}) {
-  token ||= await getSecret(TOKEN);
-  if (!token) throw new AsanaError(401, 'Asana is not connected - add a personal access token in Settings.');
+  if (!token) throw new AsanaError(401, 'Asana is not connected for this agency - add its personal access token in Settings.');
   const url = new URL(BASE + path);
   for (const [k, v] of Object.entries(params || {})) if (v != null) url.searchParams.set(k, v);
   const res = await fetch(url, {
@@ -34,11 +35,11 @@ async function api(method, path, { params, body, token } = {}) {
 }
 
 /** Every page of a list endpoint. */
-async function all(path, params) {
+async function all(path, params, token) {
   const out = [];
   let offset;
   do {
-    const r = await api('GET', path, { params: { ...params, limit: 100, offset } });
+    const r = await api('GET', path, { params: { ...params, limit: 100, offset }, token });
     out.push(...(r.data || []));
     offset = r.next_page?.offset;
   } while (offset && out.length < 2000);
@@ -47,29 +48,73 @@ async function all(path, params) {
 
 // ── Connection ───────────────────────────────────────────────────────────────
 
-export async function status() {
-  const token = await getSecret(TOKEN);
-  if (!token) return { connected: false };
-  try {
-    const me = (await api('GET', '/users/me', { params: { opt_fields: 'name,email,workspaces.name' }, token })).data;
-    const s = getSettings().asana;
-    return { connected: true, user: { name: me.name, email: me.email }, workspaces: me.workspaces || [], workspace: s.workspace || me.workspaces?.[0]?.gid || null };
-  } catch (e) {
-    return { connected: false, error: e.message };
+/** Every agency with its Asana token (or null) and chosen workspace. */
+async function accounts() {
+  const s = getSettings();
+  const out = [];
+  for (const a of s.agencies) {
+    let token = await getSecret(tokenKey(a.id));
+    if (!token && a.id === s.defaultAgency) token = await getSecret(LEGACY_TOKEN);
+    out.push({ agency: a, token, workspace: a.asana?.workspace || (a.id === s.defaultAgency ? s.asana.workspace : null) || null });
   }
+  return out;
 }
 
-export async function connect(token) {
+/** The token that can see a task: its agency's when known, else whichever connected account can. */
+async function tokenForTask(taskGid, agencyId) {
+  const accs = (await accounts()).filter(a => a.token);
+  if (!accs.length) throw new AsanaError(401, 'Asana is not connected - add a personal access token in Settings.');
+  const known = agencyId
+    || cache.tasks.find(t => t.gid === taskGid)?.agency
+    || listSites({ includeHidden: true }).map(s => siteState(s.id).asana).find(l => l?.taskGid === taskGid)?.agency;
+  const mine = accs.find(a => a.agency.id === known);
+  if (mine) return mine.token;
+  if (accs.length === 1) return accs[0].token;
+  for (const a of accs) {
+    try { await api('GET', `/tasks/${taskGid}`, { params: { opt_fields: 'gid' }, token: a.token }); return a.token; } catch {}
+  }
+  throw new AsanaError(404, 'None of the connected Asana accounts can see this task.');
+}
+
+export async function status() {
+  const agencies = await Promise.all((await accounts()).map(async ({ agency, token, workspace }) => {
+    const base = { id: agency.id, label: agency.label, color: agency.color };
+    if (!token) return { ...base, connected: false };
+    try {
+      const me = (await api('GET', '/users/me', { params: { opt_fields: 'name,email,workspaces.name' }, token })).data;
+      return { ...base, connected: true, user: { name: me.name, email: me.email }, workspaces: me.workspaces || [], workspace: workspace || me.workspaces?.[0]?.gid || null };
+    } catch (e) {
+      return { ...base, connected: false, error: e.message };
+    }
+  }));
+  return { connected: agencies.some(a => a.connected), agencies };
+}
+
+export function setWorkspace(agencyId, workspace) {
+  const s = getSettings();
+  saveSettings({ agencies: s.agencies.map(a => a.id === agencyId ? { ...a, asana: { ...(a.asana || {}), workspace: workspace || null } } : a) });
+  cache = { at: null, tasks: [], errors: [] };
+}
+
+export async function connect(token, agencyId) {
+  const s = getSettings();
+  const agency = s.agencies.find(a => a.id === agencyId) || s.agencies.find(a => a.id === s.defaultAgency);
   token = String(token || '').trim();
   if (!token) throw new AsanaError(400, 'Paste the personal access token.');
   const me = (await api('GET', '/users/me', { params: { opt_fields: 'name,workspaces.name' }, token })).data;
-  await setSecret(TOKEN, token);
-  const s = getSettings().asana;
-  if (!s.workspace || !me.workspaces?.some(w => w.gid === s.workspace)) saveSettings({ asana: { ...s, workspace: me.workspaces?.[0]?.gid || null } });
+  await setSecret(tokenKey(agency.id), token);
+  if (agency.id === s.defaultAgency) await deleteSecret(LEGACY_TOKEN);
+  const ws = agency.asana?.workspace || (agency.id === s.defaultAgency ? s.asana.workspace : null);
+  setWorkspace(agency.id, ws && me.workspaces?.some(w => w.gid === ws) ? ws : me.workspaces?.[0]?.gid || null);
   return status();
 }
 
-export async function disconnect() { await deleteSecret(TOKEN); }
+export async function disconnect(agencyId) {
+  const s = getSettings();
+  await deleteSecret(tokenKey(agencyId));
+  if (agencyId === s.defaultAgency) await deleteSecret(LEGACY_TOKEN);
+  cache = { at: null, tasks: [], errors: [] };
+}
 
 // ── Tasks and sites ──────────────────────────────────────────────────────────
 
@@ -94,7 +139,7 @@ function matchSite(projectName, sites) {
   return best?.site || null;
 }
 
-let cache = { at: null, tasks: [] };
+let cache = { at: null, tasks: [], errors: [] };
 
 export const WP_UPDATE_TASK_RE = /^\s*wordpress\s+updates?\s*$/i;
 // A comment saying the month's updates were done ("WP core + plugin update done",
@@ -104,8 +149,8 @@ export const WP_UPDATE_TASK_RE = /^\s*wordpress\s+updates?\s*$/i;
 const DONE_RE = /\bupdates?\b[^\n]{0,80}\b(?:done|completed?)\b|\bno updates? needed\b|\ball (?:plugins? )?updated\b|\bupdated all\b|^\s*updated (?:the )?(?:wp|wordpress|core|plugins?|themes?)\b/im;
 
 /** The latest "updates done" comment on a task, if any. */
-async function lastDone(taskGid) {
-  const stories = await all(`/tasks/${taskGid}/stories`, { opt_fields: 'text,type,created_at,created_by.name' });
+async function lastDone(taskGid, token) {
+  const stories = await all(`/tasks/${taskGid}/stories`, { opt_fields: 'text,type,created_at,created_by.name' }, token);
   const hit = stories.filter(s => s.type === 'comment' && DONE_RE.test(s.text || '')).pop();
   return hit ? { at: hit.created_at, by: hit.created_by?.name || null, text: String(hit.text).split('\n')[0].slice(0, 160) } : null;
 }
@@ -118,26 +163,81 @@ async function pool(items, n, fn) {
   }));
 }
 
-/** Your incomplete tasks in the chosen workspace, each with the site it is for. */
+/** Your incomplete tasks in every connected agency's workspace, each with the site it is for. */
 export async function myTasks({ refresh = false } = {}) {
-  if (!refresh && cache.at && Date.now() - cache.at < 5 * 60_000) return withSites(cache.tasks);
-  const ws = getSettings().asana.workspace || (await status()).workspace;
-  if (!ws) throw new AsanaError(400, 'Pick an Asana workspace in Settings.');
-  const tasks = await all('/tasks', {
-    assignee: 'me', workspace: ws, completed_since: 'now',
-    opt_fields: 'name,permalink_url,due_on,num_subtasks,modified_at,actual_time_minutes,projects.name,num_likes',
-  });
-  cache = {
-    at: Date.now(),
-    tasks: tasks.map(t => ({
-      gid: t.gid, name: t.name, url: t.permalink_url, due: t.due_on || null, modified: t.modified_at,
-      minutes: t.actual_time_minutes ?? null,
-      project: t.projects?.[0] ? { gid: t.projects[0].gid, name: t.projects[0].name } : null,
-    })),
-  };
+  if (!refresh && cache.at && Date.now() - cache.at < 5 * 60_000) return withSites(cache.tasks, cache.errors);
+  const accs = (await accounts()).filter(a => a.token);
+  if (!accs.length) throw new AsanaError(401, 'Asana is not connected - add a personal access token in Settings.');
+  const tasks = [], errors = [], fetched = new Set(), seen = new Set();
+  const tok = Object.fromEntries(accs.map(a => [a.agency.id, a.token]));
+  await Promise.all(accs.map(async ({ agency, token, workspace }) => {
+    try {
+      const ws = workspace || (await api('GET', '/users/me', { params: { opt_fields: 'workspaces' }, token })).data.workspaces?.[0]?.gid;
+      if (!ws) throw new AsanaError(400, 'Pick an Asana workspace in Settings.');
+      const list = await all('/tasks', {
+        assignee: 'me', workspace: ws, completed_since: 'now',
+        opt_fields: 'name,permalink_url,due_on,num_subtasks,created_at,modified_at,actual_time_minutes,projects.name,num_likes',
+      }, token);
+      for (const t of list) {
+        if (seen.has(t.gid)) continue; // the same account connected for two agencies
+        seen.add(t.gid);
+        tasks.push({
+          gid: t.gid, name: t.name, url: t.permalink_url, due: t.due_on || null, created: t.created_at || null, modified: t.modified_at,
+          minutes: t.actual_time_minutes ?? null, agency: agency.id,
+          project: t.projects?.[0] ? { gid: t.projects[0].gid, name: t.projects[0].name } : null,
+        });
+      }
+      fetched.add(agency.id);
+    } catch (e) {
+      errors.push({ agency: agency.id, label: agency.label, message: e.message });
+    }
+  }));
+  if (!fetched.size) throw new AsanaError(502, errors.map(e => `${e.label}: ${e.message}`).join(' · '));
   // Which WordPress update tasks already have this period's "update done" comment.
-  await pool(cache.tasks.filter(t => WP_UPDATE_TASK_RE.test(t.name)), 6, async t => { t.lastDone = await lastDone(t.gid); });
-  return withSites(cache.tasks);
+  await pool(tasks.filter(t => WP_UPDATE_TASK_RE.test(t.name)), 6, async t => { t.lastDone = await lastDone(t.gid, tok[t.agency]); });
+  cache = { at: Date.now(), tasks, errors };
+  const out = withSites(tasks, errors);
+  await trackRequests(out.tasks, fetched, tok).catch(() => {});
+  return out;
+}
+
+/**
+ * Each site's "WordPress update" task in its history: "Update requested" when
+ * it first shows up in your Asana tasks, "Update done" when it is ticked
+ * complete. Only agencies whose task list came through are judged, so an
+ * Asana outage never reads as "completed".
+ */
+async function trackRequests(tasks, fetched, tok) {
+  const seen = { ...(getMeta().asanaWpTasks || {}) };
+  const open = new Set();
+  let changed = false;
+  for (const t of tasks) {
+    if (!WP_UPDATE_TASK_RE.test(t.name) || !t.siteId) continue;
+    open.add(t.gid);
+    if (seen[t.gid]) continue;
+    seen[t.gid] = { site: t.siteId, agency: t.agency, url: t.url, requestedAt: t.created || new Date().toISOString() };
+    changed = true;
+    asanaHistory(t.siteId, 'Update requested', seen[t.gid].requestedAt, `${t.project?.name ? `${t.project.name} › ` : ''}${t.name} - in Asana`, t.url, `asana:${t.gid}:requested`);
+  }
+  for (const [gid, rec] of Object.entries(seen)) {
+    if (open.has(gid) || !fetched.has(rec.agency)) continue;
+    try {
+      const t = (await api('GET', `/tasks/${gid}`, { params: { opt_fields: 'completed,completed_at,completed_by.name' }, token: tok[rec.agency] })).data;
+      if (t.completed) asanaHistory(rec.site, 'Update done', t.completed_at || new Date().toISOString(), `ticked complete in Asana${t.completed_by?.name ? ` by ${t.completed_by.name}` : ''}`, rec.url, `asana:${gid}:done`);
+    } catch (e) {
+      if (e.status !== 403 && e.status !== 404) continue; // try again next time
+    }
+    delete seen[gid]; // done, deleted, or no longer assigned to you
+    changed = true;
+  }
+  if (changed) patchMeta({ asanaWpTasks: seen });
+}
+
+function asanaHistory(siteId, title, at, summary, url, jobId) {
+  const site = listSites({ includeHidden: true }).find(s => s.id === siteId);
+  const record = { jobId, type: 'asana', title, site: siteId, siteName: site?.name || siteId, status: 'ok', summary, url, steps: [], at };
+  addHistory(record);
+  appendTextLog(record);
 }
 
 const hostOf = u => { try { return new URL(u).host.replace(/^www\./, '').toLowerCase(); } catch { return null; } };
@@ -147,14 +247,16 @@ const hostOf = u => { try { return new URL(u).host.replace(/^www\./, '').toLower
  * project (from its login, or typed in for Log in), else by project name - and
  * links unlinked sites to their maintenance task.
  */
-function withSites(tasks) {
+function withSites(tasks, errors = []) {
   const sites = listSites();
   const urls = getMeta().asanaSiteUrls || {};
   const out = tasks.map(t => {
     const linked = sites.find(s => siteState(s.id).asana?.taskGid === t.gid);
     const known = t.project ? urls[t.project.gid] || null : null;
     const byHost = known ? sites.find(s => hostOf(s.url) === hostOf(known)) : null;
-    const site = linked || byHost || (t.project ? matchSite(t.project.name, sites) : null);
+    // Match within the task's agency first, then across all sites.
+    const own = sites.filter(s => agencyFor(s.id).id === t.agency);
+    const site = linked || byHost || (t.project ? matchSite(t.project.name, own) || matchSite(t.project.name, sites) : null);
     return { ...t, siteId: site?.id || null, siteName: site?.name || null, linked: !!linked, siteUrl: site?.url || known };
   });
   for (const s of sites) {
@@ -162,13 +264,13 @@ function withSites(tasks) {
     // Prefer the "wordpress update" task when a project has several.
     const mine = out.filter(t => t.siteId === s.id);
     const pick = mine.find(t => /wordpress|update/i.test(t.name)) || (mine.length === 1 ? mine[0] : null);
-    if (pick) patchSiteState(s.id, { asana: { taskGid: pick.gid, taskName: pick.name, project: pick.project?.name || null, url: pick.url, auto: true } });
+    if (pick) patchSiteState(s.id, { asana: { taskGid: pick.gid, taskName: pick.name, project: pick.project?.name || null, url: pick.url, agency: pick.agency || null, auto: true } });
   }
-  return { at: new Date(cache.at).toISOString(), tasks: out };
+  return { at: new Date(cache.at).toISOString(), tasks: out, errors };
 }
 
 export function linkTask(siteId, task) {
-  patchSiteState(siteId, { asana: task ? { taskGid: task.gid, taskName: task.name, project: task.project?.name || null, url: task.url, auto: false } : null });
+  patchSiteState(siteId, { asana: task ? { taskGid: task.gid, taskName: task.name, project: task.project?.name || null, url: task.url, agency: task.agency || null, auto: false } : null });
 }
 
 // ── Logins written in Asana ──────────────────────────────────────────────────
@@ -297,19 +399,20 @@ export function loginHistory(entries) {
  * description, the project's description and overview, and the task's
  * comments (newest first). Returns where each was found.
  */
-export async function loginsFor(taskGid) {
-  const task = (await api('GET', `/tasks/${taskGid}`, { params: { opt_fields: 'name,notes,permalink_url,projects.name,projects.notes,projects.project_brief' } })).data;
+export async function loginsFor(taskGid, agencyId) {
+  const token = await tokenForTask(taskGid, agencyId);
+  const task = (await api('GET', `/tasks/${taskGid}`, { params: { opt_fields: 'name,notes,permalink_url,projects.name,projects.notes,projects.project_brief' }, token })).data;
   const sources = [];
   for (const p of task.projects || []) {
     try {
-      const inProject = await all(`/projects/${p.gid}/tasks`, { opt_fields: 'name,notes,permalink_url' });
+      const inProject = await all(`/projects/${p.gid}/tasks`, { opt_fields: 'name,notes,permalink_url' }, token);
       for (const lt of inProject.filter(t => LOGIN_TASK_RE.test(t.name || ''))) {
         const name = lt.name.trim();
         // The login is usually posted as comments - address, username and password,
         // or just a new password when it changes - so read the task as a history.
         const entries = [{ text: lt.notes, where: `“${name}” description` }];
         try {
-          const comments = (await all(`/tasks/${lt.gid}/stories`, { opt_fields: 'text,type,created_at,created_by.name' })).filter(c => c.type === 'comment');
+          const comments = (await all(`/tasks/${lt.gid}/stories`, { opt_fields: 'text,type,created_at,created_by.name' }, token)).filter(c => c.type === 'comment');
           for (const c of comments) {
             entries.push({ text: c.text, where: `“${name}” · ${c.created_by?.name || 'comment'}, ${new Date(c.created_at).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}` });
           }
@@ -324,13 +427,13 @@ export async function loginsFor(taskGid) {
     sources.push({ where: `Project “${p.name}” description`, text: p.notes });
     if (p.project_brief?.gid) {
       try {
-        const brief = (await api('GET', `/project_briefs/${p.project_brief.gid}`, { params: { opt_fields: 'text' } })).data;
+        const brief = (await api('GET', `/project_briefs/${p.project_brief.gid}`, { params: { opt_fields: 'text' }, token })).data;
         sources.push({ where: `Project “${p.name}” overview`, text: brief.text });
       } catch {}
     }
   }
   try {
-    const stories = await all(`/tasks/${taskGid}/stories`, { opt_fields: 'text,type,created_at,created_by.name' });
+    const stories = await all(`/tasks/${taskGid}/stories`, { opt_fields: 'text,type,created_at,created_by.name' }, token);
     for (const st of stories.filter(s => s.type === 'comment').reverse()) {
       sources.push({ where: `Comment by ${st.created_by?.name || 'someone'}, ${new Date(st.created_at).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}`, text: st.text });
     }
@@ -424,12 +527,13 @@ export function shortComment(f) {
  * completed and the latest comment, so the dashboard can show "last WordPress
  * update" and avoid duplicate comments.
  */
-export async function taskStatus(taskGid) {
+export async function taskStatus(taskGid, agencyId) {
   if (!taskGid) return null;
-  const t = (await api('GET', `/tasks/${taskGid}`, { params: { opt_fields: 'name,permalink_url,completed,completed_at,completed_by.name,modified_at' } })).data;
+  const token = await tokenForTask(taskGid, agencyId);
+  const t = (await api('GET', `/tasks/${taskGid}`, { params: { opt_fields: 'name,permalink_url,completed,completed_at,completed_by.name,modified_at' }, token })).data;
   let lastComment = null, lastDoneComment = null;
   try {
-    const comments = (await all(`/tasks/${taskGid}/stories`, { opt_fields: 'text,type,created_at,created_by.name' })).filter(c => c.type === 'comment');
+    const comments = (await all(`/tasks/${taskGid}/stories`, { opt_fields: 'text,type,created_at,created_by.name' }, token)).filter(c => c.type === 'comment');
     const fmt = c => ({ text: String(c.text || '').split(String.fromCharCode(10))[0].slice(0, 200), by: c.created_by?.name || null, at: c.created_at });
     if (comments.length) lastComment = fmt(comments[comments.length - 1]);
     const done = comments.filter(c => DONE_RE.test(c.text || '')).pop();
@@ -448,7 +552,8 @@ export async function taskStatus(taskGid) {
 export async function postComment(siteId, { text, html }) {
   const link = siteState(siteId).asana;
   if (!link?.taskGid) throw new AsanaError(400, 'This site has no Asana task linked - pick one in its Asana & login tab.');
-  await api('POST', `/tasks/${link.taskGid}/stories`, { body: html ? { html_text: html } : { text } });
+  const token = await tokenForTask(link.taskGid, link.agency);
+  await api('POST', `/tasks/${link.taskGid}/stories`, { body: html ? { html_text: html } : { text }, token });
   // Count it as done straight away, without waiting for the next refresh.
   const cached = cache.tasks.find(t => t.gid === link.taskGid);
   if (cached && (html || DONE_RE.test(text || ''))) cached.lastDone = { at: new Date().toISOString(), by: 'dashboard', text: (text || 'Detailed log').split('\n')[0] };
@@ -464,7 +569,7 @@ export async function postComment(siteId, { text, html }) {
 export async function postResults(siteId, record, durationMs) {
   const s = getSettings().asana;
   const link = siteState(siteId).asana;
-  if (!s.postResults || !link?.taskGid || !(await getSecret(TOKEN))) return null;
+  if (!s.postResults || !link?.taskGid || !(await accounts()).some(a => a.token)) return null;
   const facts = runFacts(record);
   if (s.commentStyle !== 'detailed' && facts.formQueued) {
     patchSiteState(siteId, { asanaPending: { facts, durationMs } });
@@ -472,24 +577,24 @@ export async function postResults(siteId, record, durationMs) {
   }
   const posted = await postComment(siteId, s.commentStyle === 'detailed' ? { html: commentHtml(record) } : { text: shortComment(facts) });
   patchSiteState(siteId, { asanaPending: null });
-  return { ...posted, time: await logTime(link.taskGid, durationMs) };
+  return { ...posted, time: await logTime(link, durationMs) };
 }
 
 /** After a (morning) form test: post the comment a run left waiting, now with the form result. */
 export async function postAfterFormTest(siteId, record) {
   const pending = siteState(siteId).asanaPending;
-  if (!pending || !getSettings().asana.postResults || !(await getSecret(TOKEN))) return null;
+  if (!pending || !getSettings().asana.postResults || !(await accounts()).some(a => a.token)) return null;
   const form = runFacts(record).form;
   const posted = await postComment(siteId, { text: shortComment({ ...pending.facts, form }) });
   patchSiteState(siteId, { asanaPending: null });
-  return { ...posted, time: await logTime(siteState(siteId).asana?.taskGid, pending.durationMs) };
+  return { ...posted, time: await logTime(siteState(siteId).asana, pending.durationMs) };
 }
 
-async function logTime(taskGid, durationMs) {
-  if (!getSettings().asana.logTime || !taskGid || !(durationMs > 0)) return null;
+async function logTime(link, durationMs) {
+  if (!getSettings().asana.logTime || !link?.taskGid || !(durationMs > 0)) return null;
   const minutes = Math.max(1, Math.round(durationMs / 60000));
   try {
-    await api('POST', `/tasks/${taskGid}/time_tracking_entries`, { body: { duration_minutes: minutes } });
+    await api('POST', `/tasks/${link.taskGid}/time_tracking_entries`, { body: { duration_minutes: minutes }, token: await tokenForTask(link.taskGid, link.agency) });
     return minutes;
   } catch (e) {
     return e.status === 402 ? 'not available on this Asana plan' : e.message;

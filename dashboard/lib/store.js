@@ -83,7 +83,22 @@ function cleanAgency(a, i) {
   out.rules = (Array.isArray(out.rules) ? out.rules : [])
     .map(r => ({ match: String(r?.match ?? '').trim().slice(0, 100), value: String(r?.value ?? '').slice(0, 1000) }))
     .filter(r => r.match);
+  // Asana workspace for this agency (its token is in the Keychain), and the
+  // administrator emails the security check trusts on its sites.
+  out.asana = { workspace: /^\d+$/.test(String(a?.asana?.workspace || '')) ? String(a.asana.workspace) : null };
+  out.trustedAdmins = cleanTrusted(a?.trustedAdmins);
   return out;
+}
+
+/** "Name <x@y.com>", "x@y.com" or "@domain.com" entries, lower-cased and de-duplicated. */
+export function cleanTrusted(list) {
+  const items = Array.isArray(list) ? list : String(list || '').split(/[\s,;]+/);
+  const out = [];
+  for (let e of items) {
+    e = String(e || '').trim().toLowerCase().replace(/^.*<([^>]+)>.*$/, '$1');
+    if (/^[^@\s]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(e) || /^@[a-z0-9.-]+\.[a-z]{2,}$/.test(e)) { if (!out.includes(e)) out.push(e); }
+  }
+  return out.slice(0, 200);
 }
 
 function cleanSchedule(sc) {
@@ -305,7 +320,9 @@ export function patchMeta(patch) {
 let history = readJson(F.history, []);
 
 export function addHistory(entry) {
-  history.unshift(entry);
+  // Newest first. Asana events can be dated in the past (when a task was created).
+  const i = history.findIndex(h => h.at <= entry.at);
+  if (i === -1) history.push(entry); else history.splice(i, 0, entry);
   history = history.slice(0, 1000);
   writeJson(F.history, history);
 }

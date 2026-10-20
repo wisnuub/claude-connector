@@ -584,6 +584,9 @@ function historyTab(site) {
   if (!list) { loadHistory(site.id); return '<p class="muted">Loading…</p>'; }
   if (!list.length) return '<p class="muted">Nothing has been run on this site from the dashboard yet.</p>';
   return list.map(e => {
+    if (e.type === 'asana') {
+      return `<div class="card hist-asana" style="margin-bottom:8px"><span class="pill ${e.title === 'Update done' ? 'ok' : 'warn'}"><span class="dot"></span>Asana</span> <b>${h(e.title)}</b> <span class="muted">· ${h(new Date(e.at).toLocaleString())}${e.summary ? ` · ${h(e.summary)}` : ''}</span>${e.url ? ` <a href="${h(e.url)}" target="_blank" rel="noopener" class="faint">open ↗</a>` : ''}</div>`;
+    }
     const k = e.status === 'ok' ? 'ok' : e.status === 'warning' ? 'warn' : e.status === 'failed' ? 'bad' : '';
     return `<details class="card" style="margin-bottom:8px"><summary style="cursor:pointer"><span class="pill ${k}"><span class="dot"></span>${h(e.status)}</span> <b>${h(e.title)}</b> <span class="muted">· ${h(new Date(e.at).toLocaleString())}${e.summary ? ` · ${h(e.summary)}` : ''}</span></summary>
       <ul class="steps" style="margin-top:8px">${e.steps.map(stepLi).join('')}</ul></details>`;
@@ -954,7 +957,9 @@ function renderTasks() {
     if (S.tasksShow === 'nosite') return !t.siteId;
     return true;
   }).sort((a, b) => (a.project?.name || '').localeCompare(b.project?.name || ''));
-  const ws = S.asana.workspaces.find(w => w.gid === S.asana.workspace);
+  const conn = (S.asana.agencies || []).filter(a => a.connected);
+  const who = conn.map(a => `${a.label}: ${a.user.name} · ${a.workspaces.find(w => w.gid === a.workspace)?.name || ''}`).join(' | ');
+  const agTag = id => { const a = conn.length > 1 && conn.find(x => x.id === id); return a ? `<span class="tag" style="border-color:${h(a.color)};color:${h(a.color)}">${h(a.label)}</span> ` : ''; };
   const focused = document.activeElement?.id === 'tq';
   el.innerHTML = `
     <div class="toolbar">
@@ -963,17 +968,18 @@ function renderTasks() {
       <input type="search" id="tq" placeholder="Search tasks" value="${h(S.tasksQ)}" data-action="search-tasks">
       <label class="check" title="WordPress update tasks with an 'update done' comment this month"><input type="checkbox" data-action="show-done" ${S.showDone ? 'checked' : ''}> Show done this month${hiddenDone ? ` (${hiddenDone})` : ''}</label>
       <span class="grow"></span>
-      <span class="muted" style="font-size:13px">${h(S.asana.user.name)} · ${h(ws?.name || '')}${S.tasks.at ? ` · ${h(ago(S.tasks.at))}` : ''}</span>
+      <span class="muted" style="font-size:13px">${h(who)}${S.tasks.at ? ` · ${h(ago(S.tasks.at))}` : ''}</span>
       <button class="btn sm" data-action="tasks-refresh">↻ Refresh</button>
       ${(() => { const n = wpUpdateTasks().length; return `<button class="btn sm primary" data-action="do-wp-updates" ${n ? '' : 'disabled'} title="Every open WordPress update task whose site is connected">Do WordPress updates (${n})</button>`; })()}
     </div>
     ${S.tasks.error ? `<div class="notice bad">${h(S.tasks.error)}</div>` : ''}
+    ${(S.tasks.errors || []).map(e => `<div class="notice warn">Could not read ${h(e.label)}'s Asana: ${h(e.message)}</div>`).join('')}
     <div class="card" style="padding:0">
       <div class="tablewrap"><table class="list tasks">
         <thead><tr><th>Task</th><th>Project</th><th>Site</th><th class="hide-sm">Due</th><th class="hide-sm">Actual time</th><th></th></tr></thead>
         <tbody>${list.map(t => `<tr data-gid="${h(t.gid)}">
           <td><a href="${h(t.url)}" target="_blank" rel="noopener">${h(t.name)}</a>${doneThisMonth(t) ? ` <span class="tag accent" title="${h(`${t.lastDone.text}${t.lastDone.by ? ` - ${t.lastDone.by}` : ''}`)}">✓ updated ${h(new Date(t.lastDone.at).toLocaleDateString('en-AU', { day: 'numeric', month: 'short' }))}</span>` : ''}</td>
-          <td>${h(t.project?.name || '')}</td>
+          <td>${agTag(t.agency)}${h(t.project?.name || '')}</td>
           <td>${t.siteId ? `<a href="#" data-action="goto-site" data-site="${h(t.siteId)}">${h(t.siteName)}</a>`
             : `<span class="tag" title="Log in works on any site. Updates, form tests and the security check need Claude Connector installed and connected: install it from wp-admin, then click Connect on this Mac on its settings page.">Not connected</span>${t.siteUrl ? ` <a href="${h(t.siteUrl)}" target="_blank" rel="noopener" class="faint">${h(t.siteUrl.replace(/^https?:\/\//, '').replace(/\/wp-(admin|login\.php).*$/, ''))}</a>` : ''}`}</td>
           <td class="hide-sm">${t.due ? `<span class="${t.due < new Date().toISOString().slice(0, 10) ? 'ver-arrow' : ''}">${h(new Date(t.due + 'T00:00').toLocaleDateString())}</span>` : ''}</td>
@@ -999,14 +1005,23 @@ function renderAsanaSettings() {
   const a = S.asana;
   if (!a) { el.innerHTML = '<p class="muted">Checking…</p>'; loadAsana().then(renderAsanaSettings); return; }
   const st = draft?.asana || S.settings.asana;
-  if (!a.connected) {
-    el.innerHTML = `${a.error ? `<div class="notice bad">${h(a.error)}</div>` : ''}
-      <p class="hint" style="margin:0 0 6px">Create a personal access token in Asana: profile picture → <b>Settings → Apps → Developer apps → + Create new token</b>, then paste it here. It is kept in your Mac's Keychain.</p>
-      <div class="bar" style="margin:0"><input type="password" id="asana-token" placeholder="Personal access token" autocomplete="off" style="flex:1"><button type="button" class="btn sm primary" data-action="asana-connect">Connect</button></div>`;
-    return;
-  }
-  el.innerHTML = `<div class="bar" style="margin:0"><span>Connected as <b>${h(a.user.name)}</b> (${h(a.user.email || '')})</span><span class="grow"></span><button type="button" class="btn sm ghost danger" data-action="asana-disconnect">Disconnect</button></div>
-    <label class="field" style="max-width:360px">Workspace<select name="asanaWorkspace">${a.workspaces.map(w => `<option value="${h(w.gid)}" ${w.gid === (st.workspace || a.workspace) ? 'selected' : ''}>${h(w.name)}</option>`).join('')}</select></label>
+  const acct = ag => {
+    const head = `<span class="swatch" style="background:${h(ag.color)}"></span><b>${h(ag.label)}</b>`;
+    if (!ag.connected) {
+      return `<div class="card asana-acct" data-agency="${h(ag.id)}">
+        <div class="bar" style="margin:0">${head}<span class="muted">not connected</span></div>
+        ${ag.error ? `<div class="notice bad" style="margin:6px 0 0">${h(ag.error)}</div>` : ''}
+        <div class="bar" style="margin:6px 0 0"><input type="password" data-asana-token placeholder="${h(ag.label)}'s personal access token" autocomplete="off" style="flex:1"><button type="button" class="btn sm primary" data-action="asana-connect">Connect</button></div>
+      </div>`;
+    }
+    return `<div class="card asana-acct" data-agency="${h(ag.id)}">
+      <div class="bar" style="margin:0">${head}<span class="muted">${h(ag.user.name)}${ag.user.email ? ` (${h(ag.user.email)})` : ''}</span><span class="grow"></span><button type="button" class="btn sm ghost danger" data-action="asana-disconnect">Disconnect</button></div>
+      <label class="field" style="max-width:360px;margin:6px 0 0">Workspace<select data-asana-workspace>${ag.workspaces.map(w => `<option value="${h(w.gid)}" ${w.gid === ag.workspace ? 'selected' : ''}>${h(w.name)}</option>`).join('')}</select></label>
+    </div>`;
+  };
+  el.innerHTML = `<p class="hint" style="margin:0 0 6px">Each agency can have its own Asana account and workspace - its sites' tasks, comments and logins use it. Create a personal access token in Asana: profile picture → <b>Settings → Apps → Developer apps → + Create new token</b>. Tokens are kept in your Mac's Keychain.</p>
+    ${(a.agencies || []).map(acct).join('')}
+    ${a.connected ? `
     <label class="check"><input type="checkbox" name="asanaPost" ${st.postResults ? 'checked' : ''}> After each run, post the results as a comment on the site's Asana task automatically (you can always send one by hand from the site's Asana & login tab)</label>
     <label class="field" style="max-width:520px">Comment
       <select name="asanaStyle">
@@ -1014,7 +1029,7 @@ function renderAsanaSettings() {
         <option value="detailed" ${st.commentStyle === 'detailed' ? 'selected' : ''}>Detailed - every update, what was not done and what failed</option>
       </select>
     </label>
-    <label class="check"><input type="checkbox" name="asanaTime" ${st.logTime ? 'checked' : ''}> Also add the run's time to the task's Actual time</label>`;
+    <label class="check"><input type="checkbox" name="asanaTime" ${st.logTime ? 'checked' : ''}> Also add the run's time to the task's Actual time</label>` : ''}`;
 }
 
 // ── Log view ─────────────────────────────────────────────────────────────────
@@ -1076,7 +1091,7 @@ function renderLog() {
       const c = { updated: 0, notdone: 0, failed: 0 };
       for (const e of j.entries) for (const k of Object.keys(c)) c[k] += e.log[k].length;
       return `<section class="card logjob">
-        <h4>${h(j.title)} <span class="muted" style="font-weight:400">· ${h(new Date(j.at).toLocaleString())} · ${j.entries.length} site${j.entries.length === 1 ? '' : 's'} · ${c.updated} updated${c.notdone ? ` · ${c.notdone} not done` : ''}${c.failed ? ` · <span style="color:var(--bad)">${c.failed} failed</span>` : ''}</span></h4>
+        <h4>${h(j.title)} <span class="muted" style="font-weight:400">· ${h(new Date(j.at).toLocaleString())} ${String(j.jobId).startsWith('asana:') ? '· from Asana' : `· ${j.entries.length} site${j.entries.length === 1 ? '' : 's'} · ${c.updated} updated${c.notdone ? ` · ${c.notdone} not done` : ''}${c.failed ? ` · <span style="color:var(--bad)">${c.failed} failed</span>` : ''}`}</span></h4>
         ${j.entries.map(e => {
           const k = e.status === 'ok' ? 'ok' : e.status === 'warning' ? 'warn' : e.status === 'failed' ? 'bad' : '';
           const ag = siteAgencyLabel(e.site);
@@ -1342,17 +1357,28 @@ document.addEventListener('click', async (ev) => {
     }
     case 'reveal-extension': await api('POST', '/api/extension/reveal', {}).catch(e => toast(e.message)); return;
     case 'asana-connect': {
-      const token = $('#asana-token').value;
+      const box = t.closest('[data-agency]');
+      const agency = box.dataset.agency;
       t.disabled = true;
-      try { S.asana = await api('POST', '/api/asana/connect', { token }); S.tasks = null; draft.asana = { ...draft.asana, workspace: S.asana.workspace }; }
-      catch (e) { S.asana = { connected: false, error: e.message }; }
+      try {
+        S.asana = await api('POST', '/api/asana/connect', { token: $('[data-asana-token]', box).value, agency });
+        S.tasks = null;
+        // The workspace picked on connect must survive this dialog's Save.
+        const ws = S.asana.agencies.find(x => x.id === agency)?.workspace;
+        const da = draft?.agencies.find(x => x.id === agency);
+        if (da) da.asana = { ...(da.asana || {}), workspace: ws || null };
+      } catch (e) {
+        S.asana = { ...(S.asana || {}), agencies: (S.asana?.agencies || []).map(x => x.id === agency ? { ...x, connected: false, error: e.message } : x) };
+      }
       renderAsanaSettings();
       return;
     }
     case 'asana-disconnect': {
-      if (!confirm('Disconnect Asana? The token is removed from the Keychain.')) return;
-      await api('POST', '/api/asana/disconnect', {}).catch(() => {});
-      S.asana = { connected: false }; S.tasks = null; S.logins = {};
+      const agency = t.closest('[data-agency]').dataset.agency;
+      const label = S.asana.agencies.find(x => x.id === agency)?.label || agency;
+      if (!confirm(`Disconnect ${label}'s Asana? Its token is removed from the Keychain.`)) return;
+      await api('POST', '/api/asana/disconnect', { agency }).catch(() => {});
+      await loadAsana(); S.tasks = null; S.logins = {};
       renderAsanaSettings();
       return;
     }
@@ -1764,9 +1790,12 @@ document.addEventListener('click', async (ev) => {
       draft.formTestMode = f.elements.formTestMode.value;
       draft.loginMode = f.elements.loginMode.value;
       if (f.elements.sitesDir) draft.sitesDir = f.elements.sitesDir.value.trim();
-      if (f.elements.asanaWorkspace) {
-        draft.asana = { ...draft.asana, workspace: f.elements.asanaWorkspace.value, postResults: f.elements.asanaPost.checked, logTime: f.elements.asanaTime.checked, commentStyle: f.elements.asanaStyle.value };
-        if (draft.asana.workspace !== S.settings.asana.workspace) S.tasks = null;
+      if (f.elements.asanaPost) {
+        draft.asana = { ...draft.asana, postResults: f.elements.asanaPost.checked, logTime: f.elements.asanaTime.checked, commentStyle: f.elements.asanaStyle.value };
+      }
+      for (const sel of document.querySelectorAll('#asana-settings [data-asana-workspace]')) {
+        const da = draft.agencies.find(x => x.id === sel.closest('[data-agency]').dataset.agency);
+        if (da && da.asana?.workspace !== sel.value) { da.asana = { ...(da.asana || {}), workspace: sel.value }; S.tasks = null; }
       }
       draft.schedule = {
         enabled: f.elements.scheduleEnabled.checked,

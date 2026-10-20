@@ -135,6 +135,12 @@ watchSitesFolder();
 try { fs.watch(path.dirname(store.MCP_SITES_FILE), { recursive: process.platform !== 'linux' }, rescanSites); } catch {}
 setInterval(rescanSites, 15_000);
 
+// Read Asana every half hour (and shortly after start) so each site's history
+// shows "Update requested" / "Update done" even when nobody has the page open.
+const pollAsana = () => asana.myTasks({ refresh: true }).catch(() => {});
+setTimeout(pollAsana, 20_000);
+setInterval(pollAsana, 30 * 60_000);
+
 async function api(req, res, url) {
   const p = url.pathname;
   const m = req.method;
@@ -179,12 +185,12 @@ async function api(req, res, url) {
     if (!site) return send(res, 404, { message: 'Unknown site' });
     const link = store.siteState(site.id).asana;
     if (!link?.taskGid) return send(res, 200, { linked: false });
-    try { return send(res, 200, { linked: true, ...(await asana.taskStatus(link.taskGid)) }); }
+    try { return send(res, 200, { linked: true, ...(await asana.taskStatus(link.taskGid, link.agency)) }); }
     catch (e) { return send(res, e.status === 401 ? 401 : 502, { message: e.message }); }
   }
   if (m === 'GET' && p === '/api/asana/logins') {
     // Fetched when asked for, straight from Asana; not stored here.
-    try { return send(res, 200, await asana.loginsFor(String(url.searchParams.get('task') || '').replace(/\D/g, ''))); }
+    try { return send(res, 200, await asana.loginsFor(String(url.searchParams.get('task') || '').replace(/\D/g, ''), url.searchParams.get('agency') || null)); }
     catch (e) { return send(res, e.status === 401 ? 401 : 502, { message: e.message }); }
   }
   if (m === 'GET' && p === '/api/wporg/versions') {
@@ -244,10 +250,11 @@ async function api(req, res, url) {
     return send(res, 200, { held: [...held] });
   }
   if (p === '/api/asana/connect') {
-    try { return send(res, 200, await asana.connect(body.token)); }
+    try { return send(res, 200, await asana.connect(body.token, body.agency)); }
     catch (e) { return send(res, e.status === 401 ? 400 : 502, { message: e.message }); }
   }
-  if (p === '/api/asana/disconnect') { await asana.disconnect(); return send(res, 200, { ok: true }); }
+  if (p === '/api/asana/disconnect') { await asana.disconnect(String(body.agency || '')); return send(res, 200, { ok: true }); }
+  if (p === '/api/asana/workspace') { asana.setWorkspace(String(body.agency || ''), String(body.workspace || '').replace(/\D/g, '') || null); return send(res, 200, await asana.status()); }
   if (p === '/api/asana/link') {
     // { site, task: { gid, name, url, project } | null }
     if (!store.getSite(body.site)) return send(res, 404, { message: 'Unknown site' });
