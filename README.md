@@ -732,6 +732,11 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 
 ## Changelog
 
+### 1.8.14 — Faster connector install on a new site
+
+- **Install connector** (dashboard, Tasks view, on a task whose site is not connected yet): downloads the latest `claude-connector.zip` and opens the site's **Add Plugins › Upload** page in your browser - signed in with the login from Asana when there is one. You choose the file, Install Now and Activate.
+- **After activating Claude Connector by hand** in wp-admin, WordPress goes straight to its settings page, with a note pointing at **Connect on this Mac**. Activation by WP-CLI or through the connector's API does not redirect.
+
 ### 1.8.13 — Safer updates for WooCommerce stores; Handle with care; shared Asana tasks
 
 **Added**

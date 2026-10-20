@@ -1077,7 +1077,7 @@ function renderTasks() {
             : `<span class="tag" title="Log in works on any site. Updates, form tests and the security check need Claude Connector installed and connected: install it from wp-admin, then click Connect on this Mac on its settings page.">Not connected</span>${t.siteUrl ? ` <a href="${h(t.siteUrl)}" target="_blank" rel="noopener" class="faint">${h(t.siteUrl.replace(/^https?:\/\//, '').replace(/\/wp-(admin|login\.php).*$/, ''))}</a>` : ''}`}</td>
           <td class="hide-sm">${t.due ? `<span class="${t.due < new Date().toISOString().slice(0, 10) ? 'ver-arrow' : ''}">${h(new Date(t.due + 'T00:00').toLocaleDateString())}</span>` : ''}</td>
           <td class="hide-sm">${h(minutes(t.minutes))}</td>
-          <td class="acts"><button class="btn sm" data-action="asana-logins" data-gid="${h(t.gid)}">${S.logins[t.gid] ? 'Hide login' : 'Login'}</button></td>
+          <td class="acts">${t.siteId ? '' : `<button class="btn sm" data-action="install-connector" data-gid="${h(t.gid)}" title="Downloads claude-connector.zip and opens the site's Add Plugins › Upload page, signed in with the login from Asana when there is one">Install connector</button>`}<button class="btn sm" data-action="asana-logins" data-gid="${h(t.gid)}">${S.logins[t.gid] ? 'Hide login' : 'Login'}</button></td>
         </tr>${S.logins[t.gid] ? `<tr class="logins-row"><td colspan="6">${loginsBlock(t.gid, S.sites.find(s => s.id === t.siteId)?.url)}</td></tr>` : ''}`).join('')}</tbody>
       </table></div>
     </div>`;
@@ -1543,6 +1543,36 @@ document.addEventListener('click', async (ev) => {
       const l = S.logins[row.dataset.gid].logins[Number(row.dataset.login)];
       try { await navigator.clipboard.writeText(t.dataset.k === 'user' ? l.user : l.pass); toast(`${t.dataset.k === 'user' ? 'Username' : 'Password'} copied`); }
       catch { toast('Could not copy - the browser blocked clipboard access'); }
+      return;
+    }
+    case 'install-connector': {
+      // You upload and activate it yourself; the dashboard only gets you to the right page with the file ready.
+      const gid = t.dataset.gid;
+      const task = (S.tasks?.tasks || []).find(x => x.gid === gid);
+      t.disabled = true;
+      t.textContent = 'Opening…';
+      try {
+        if (!S.logins[gid]?.logins) await fetchLogins(gid);
+        const L = S.logins[gid] || {};
+        const login = (L.logins || [])[0];
+        let url = login?.url || task?.siteUrl || L.siteUrl;
+        if (!url) {
+          url = prompt(`Site address for ${task?.project?.name || 'this task'} (e.g. https://example.com.au) - remembered for next time`);
+          if (!url) return;
+          if (!/^https?:\/\//.test(url)) url = `https://${url.trim()}`;
+          await api('POST', '/api/asana/site-url', { project: L.task?.projectGid || task?.project?.gid, url }).catch(() => {});
+        }
+        const base = url.replace(/\/(wp-admin|wp-login\.php).*$/, '').replace(/\/+$/, '');
+        const upload = `${base}/wp-admin/plugin-install.php?tab=upload`;
+        const a = document.createElement('a');
+        a.href = 'https://github.com/wisnuub/claude-connector/releases/latest/download/claude-connector.zip';
+        a.rel = 'noopener';
+        document.body.appendChild(a); a.click(); a.remove();
+        if (login) await signIn(upload, login.user, login.pass);
+        else window.open(upload, '_blank', 'noopener');
+        toast('claude-connector.zip is downloading. On the page that opened: choose the file, Install Now, then Activate - it lands on Connect on this Mac.');
+      } catch (e) { toast(`Could not open the upload page: ${e.message}`); }
+      finally { t.disabled = false; t.textContent = 'Install connector'; }
       return;
     }
     case 'log-in': {

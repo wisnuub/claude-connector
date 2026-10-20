@@ -3,7 +3,7 @@
  * Plugin Name:  Claude Connector
  * Plugin URI:   https://github.com/wisnuub/claude-connector
  * Description:  Secure REST API bridge for Claude AI - ACF sync, cache purge, file management, database queries, post CRUD, plugin/theme control, maintenance updates with rollback, and more.
- * Version:      1.8.13
+ * Version:      1.8.14
  * Author:       Wisnuub
  * Author URI:   https://wisnuub.github.io
  * License:      GPL-2.0-or-later
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'CLAUDE_CONNECTOR_VERSION', '1.8.13' );
+define( 'CLAUDE_CONNECTOR_VERSION', '1.8.14' );
 define( 'CLAUDE_CONNECTOR_NS',      'claude/v1' );
 define( 'CLAUDE_CONNECTOR_GH_REPO', 'wisnuub/claude-connector' );
 
@@ -557,6 +557,9 @@ function claude_settings_page() {
     ?>
     <div class="wrap">
         <h1>Claude Connector <span style="font-size:13px;font-weight:400;color:#666;">v<?php echo esc_html( CLAUDE_CONNECTOR_VERSION ); ?></span></h1>
+        <?php if ( isset( $_GET['welcome'] ) ) : // phpcs:ignore ?>
+        <div class="notice notice-success"><p><strong>Claude Connector is active.</strong> Press <strong>Connect on this Mac</strong> below to add this site to the Site Maintenance dashboard.</p></div>
+        <?php endif; ?>
         <table class="form-table" role="presentation">
             <tr>
                 <th>API Key</th>
@@ -6557,7 +6560,20 @@ function claude_activate() {
     require_once ABSPATH . 'wp-admin/includes/upgrade.php';
     dbDelta( $sql );
 
+    // Activated by hand in wp-admin (not WP-CLI or the API): go straight to the
+    // settings page, where Connect on this Mac is.
+    if ( is_admin() && ! ( defined( 'WP_CLI' ) && WP_CLI ) && ! wp_doing_ajax() ) {
+        update_option( 'claude_connector_activation_redirect', 1, false );
+    }
 }
+
+add_action( 'admin_init', function () {
+    if ( ! get_option( 'claude_connector_activation_redirect' ) ) return;
+    delete_option( 'claude_connector_activation_redirect' );
+    if ( wp_doing_ajax() || is_network_admin() || isset( $_GET['activate-multi'] ) || ! current_user_can( 'manage_options' ) ) return; // phpcs:ignore
+    wp_safe_redirect( admin_url( 'options-general.php?page=claude-connector&welcome=1' ) );
+    exit;
+} );
 
 register_deactivation_hook( __FILE__, function () {
     // Clean up any relay cron left over from earlier versions.
