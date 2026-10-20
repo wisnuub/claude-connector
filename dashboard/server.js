@@ -356,6 +356,7 @@ async function api(req, res, url) {
       case 'mailtest': return send(res, 200, jobs.startMailTest({ sites }));
       case 'security': return send(res, 200, jobs.startSecurityScan({ sites }));
       case 'diviforms': return send(res, 200, jobs.startDiviFormsCheck({ sites }));
+      case 'theme-delete': return send(res, 200, jobs.startThemeDelete({ sites, stylesheets: (body.stylesheets || []).map(String).filter(Boolean) }));
       default: return send(res, 400, { message: `Unknown job type ${body.type}` });
     }
   }

@@ -405,18 +405,32 @@ function pluginsTab(site) {
     </table></div>`;
 }
 
+// WordPress's default themes, newest first; one is worth keeping as a fallback.
+const DEFAULT_THEMES = ['twentytwentyfive', 'twentytwentyfour', 'twentytwentythree', 'twentytwentytwo', 'twentytwentyone', 'twentytwenty', 'twentynineteen', 'twentyseventeen', 'twentysixteen', 'twentyfifteen', 'twentyfourteen', 'twentythirteen', 'twentytwelve', 'twentyeleven', 'twentyten'];
+const defaultRank = ss => { const i = DEFAULT_THEMES.indexOf(ss); return i >= 0 ? i : ss.startsWith('twenty') ? -1 : Infinity; };
+
+/** Themes nothing uses, minus the newest default theme kept as a fallback (unless the active theme is one). */
+function unusedThemes(ov) {
+  const unused = ov.themes.filter(t => !t.active && !t.in_use);
+  const activeIsDefault = ov.themes.some(t => (t.active || t.in_use) && defaultRank(t.stylesheet) !== Infinity);
+  const keep = activeIsDefault ? null : [...unused].filter(t => defaultRank(t.stylesheet) !== Infinity).sort((a, b) => defaultRank(a.stylesheet) - defaultRank(b.stylesheet))[0] || null;
+  return { remove: unused.filter(t => t !== keep), keep };
+}
+
 function themesTab(site) {
   const ov = site.overview;
   const withUpd = ov.themes.filter(t => t.update && t.update.package && !isHeld(site, `theme:${t.stylesheet}`));
+  const { remove, keep } = unusedThemes(ov);
   return `
-    <div class="bar"><button class="btn sm primary" data-action="themes-update-all" ${withUpd.length ? '' : 'disabled'}>Update all themes (${withUpd.length})</button></div>
+    <div class="bar"><button class="btn sm primary" data-action="themes-update-all" ${withUpd.length ? '' : 'disabled'}>Update all themes (${withUpd.length})</button>
+      <button class="btn sm ghost danger" data-action="themes-delete-unused" ${remove.length ? '' : 'disabled'} title="${h(keep ? `Keeps ${keep.name} as the fallback WordPress uses if the active theme breaks` : 'Themes that are neither active nor the parent of the active theme')}">Delete unused themes (${remove.length})</button></div>
     <div class="tablewrap"><table class="list">
       <thead><tr><th>Theme</th><th>Version</th><th>Update</th><th></th></tr></thead>
       <tbody>${ov.themes.map(t => `<tr data-theme="${h(t.stylesheet)}">
         <td class="pname"><b>${h(t.name)}</b>${isHeld(site, `theme:${t.stylesheet}`) ? '<span class="tag accent">held</span>' : ''}${t.active ? '<span class="tag accent">active</span>' : t.in_use ? '<span class="tag accent">parent of active</span>' : ''}${t.parent ? `<span class="tag">child of ${h(t.parent)}</span>` : ''}<code>${h(t.stylesheet)}</code></td>
         <td>${h(t.version || '-')}</td>
         <td>${t.update ? `<span class="ver-arrow">→ ${h(t.update.version)}</span>${!t.update.package ? '<span class="tag warn">licence</span>' : ''}` : '<span class="faint">-</span>'}</td>
-        <td class="acts">${t.update && t.update.package ? '<button class="btn sm" data-action="theme-update">Update</button>' : ''}${t.update || isHeld(site, `theme:${t.stylesheet}`) ? `<button class="btn sm ghost" data-action="theme-hold">${isHeld(site, `theme:${t.stylesheet}`) ? 'Release' : 'Hold'}</button>` : ''}</td>
+        <td class="acts">${t.update && t.update.package ? '<button class="btn sm" data-action="theme-update">Update</button>' : ''}${t.update || isHeld(site, `theme:${t.stylesheet}`) ? `<button class="btn sm ghost" data-action="theme-hold">${isHeld(site, `theme:${t.stylesheet}`) ? 'Release' : 'Hold'}</button>` : ''}${!t.active && !t.in_use ? '<button class="btn sm ghost danger" data-action="theme-delete">Delete</button>' : ''}</td>
       </tr>`).join('')}</tbody>
     </table></div>`;
 }
@@ -1596,6 +1610,20 @@ document.addEventListener('click', async (ev) => {
       await load();
       toast(`${site.name} removed`);
       return;
+    }
+    case 'theme-delete': {
+      const ss = t.closest('[data-theme]').dataset.theme;
+      const th = site.overview.themes.find(x => x.stylesheet === ss);
+      const { keep } = unusedThemes(site.overview);
+      const lastDefault = keep && keep.stylesheet === ss;
+      if (!confirm(`Delete the theme “${th?.name || ss}” from ${site.name}?\n\nIts files are removed from the server (not moved to quarantine).${lastDefault ? '\n\nIt is the only default WordPress theme left - WordPress falls back to it if the active theme breaks.' : ''}`)) return;
+      return startJob({ type: 'theme-delete', sites: [site.id], stylesheets: [ss] });
+    }
+    case 'themes-delete-unused': {
+      const { remove, keep } = unusedThemes(site.overview);
+      if (!remove.length) return;
+      if (!confirm(`Delete ${remove.length} unused theme${remove.length === 1 ? '' : 's'} from ${site.name}?\n\n${remove.map(x => `• ${x.name}`).join('\n')}\n\nTheir files are removed from the server.${keep ? `\n${keep.name} is kept as the fallback theme.` : ''}`)) return;
+      return startJob({ type: 'theme-delete', sites: [site.id], stylesheets: remove.map(x => x.stylesheet) });
     }
     case 'site-url': {
       S.editUrl = site.id;

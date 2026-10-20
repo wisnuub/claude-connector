@@ -486,6 +486,47 @@ export function startPluginAction({ sites, action, files, slug, version, activat
   });
 }
 
+// "1.8.12" >= "1.8.9": compares dotted versions numerically.
+const verAtLeast = (v, min) => {
+  const a = String(v || '0').split('.').map(Number), b = min.split('.').map(Number);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) { if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0); }
+  return true;
+};
+
+/**
+ * Deletes themes nothing uses. Connector 1.8.12+ does it with its own guards
+ * (not the active theme, its parent, or one another network site uses); older
+ * connectors go through WP-CLI - never their POST /themes, which would switch
+ * to the theme instead.
+ */
+export function startThemeDelete({ sites, stylesheets }) {
+  const what = stylesheets.length === 1 ? stylesheets[0] : `${stylesheets.length} themes`;
+  return startJob({ type: 'theme', title: `Delete ${what}${sites.length > 1 ? ` on ${sites.length} sites` : ''}`, sites }, async (ctx) => {
+    const ov = await refreshOverview(ctx.site.id, { recheck: false });
+    for (const ss of stylesheets) {
+      const t = ov.themes.find(x => x.stylesheet === ss);
+      const name = t?.name || ss;
+      if (!t) { ctx.step(`${name} is not installed here`, 'ok'); continue; }
+      if (t.active || t.in_use) { ctx.step(`${name} is in use on this site - not deleted`, 'warning'); continue; }
+      const st = ctx.step(`Deleting ${name}…`);
+      try {
+        if (verAtLeast(ov.plugin_version, '1.8.12')) {
+          const r = await ctx.api('POST', '/themes', { body: { action: 'delete', stylesheet: ss }, timeout: 120_000 });
+          st.set(r.health?.status === 'fatal' ? 'failed' : r.note ? 'warning' : 'ok', `${name} deleted`, r.note || r.health?.message || null, { kind: 'theme-delete', name, item: ss, from: r.version || t.version || null, result: 'updated' });
+        } else {
+          const r = await ctx.api('POST', '/wpcli', { body: { args: ['theme', 'delete', ss] }, timeout: 120_000 });
+          if (r.exit_code !== 0) throw new Error((r.stderr || r.stdout || 'WP-CLI failed').trim().split('\n').pop());
+          st.set('ok', `${name} deleted`, null, { kind: 'theme-delete', name, item: ss, from: t.version || null, result: 'updated' });
+        }
+      } catch (e) {
+        st.set('failed', `${name}: ${errInfo(e).message}`);
+      }
+    }
+    await refreshOverview(ctx.site.id, { recheck: false }).catch(() => {});
+    return null;
+  });
+}
+
 export function startRefresh({ sites }) {
   return startJob({ type: 'refresh', title: `Check ${sites.length} site${sites.length === 1 ? '' : 's'} for updates`, sites }, async (ctx) => {
     const st = ctx.step('Checking for updates…');

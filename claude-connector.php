@@ -535,7 +535,7 @@ function claude_settings_page() {
         array( 'GET',    '/divi/forms',               'Divi contact forms and their email Message Pattern: missing fields, placeholders matching no field' ),
         array( 'POST',   '/divi/forms/pattern',       'Set a Divi contact form\'s Message Pattern (previous one kept for undo)' ),
         array( 'GET',    '/themes',                   'List installed themes' ),
-        array( 'POST',   '/themes',                   'Switch active theme' ),
+        array( 'POST',   '/themes',                   'Switch active theme { stylesheet }, or delete an unused theme { action: "delete", stylesheet }' ),
         array( 'GET',    '/files?path=',              'List files in a wp-content subdirectory' ),
         array( 'GET',    '/files/read',               'Read a file\'s content' ),
         array( 'POST',   '/files',                    'Write (create or overwrite) a file — PHP lint + auto-backup' ),
@@ -2827,11 +2827,55 @@ function claude_themes_list() {
 function claude_themes_switch( $req ) {
     $stylesheet = sanitize_text_field( (string) $req->get_param( 'stylesheet' ) );
     if ( ! $stylesheet ) return new WP_Error( 'missing', 'Body must include "stylesheet".', array( 'status' => 400 ) );
+    if ( $req->get_param( 'action' ) === 'delete' ) return claude_themes_delete( $stylesheet );
     if ( ! wp_get_theme( $stylesheet )->exists() ) {
         return new WP_Error( 'not_found', "Theme '{$stylesheet}' not found.", array( 'status' => 404 ) );
     }
     switch_theme( $stylesheet );
     return new WP_REST_Response( array( 'active_theme' => get_stylesheet() ) );
+}
+
+/**
+ * POST /themes { action: "delete", stylesheet } - deletes an installed theme
+ * that nothing uses: never the active theme, the parent of the active (child)
+ * theme, or - on multisite - a theme any site in the network uses. Says so when
+ * no default (Twenty-something) theme would be left as a fallback.
+ */
+function claude_themes_delete( $stylesheet ) {
+    claude_maint_load();
+    $theme = wp_get_theme( $stylesheet );
+    if ( ! $theme->exists() ) return new WP_Error( 'not_found', "Theme '{$stylesheet}' is not installed.", array( 'status' => 404 ) );
+    $name = $theme->get( 'Name' );
+    if ( $stylesheet === get_stylesheet() ) {
+        return new WP_Error( 'in_use', "{$name} is the active theme - switch to another theme first.", array( 'status' => 409 ) );
+    }
+    if ( $stylesheet === get_template() ) {
+        return new WP_Error( 'in_use', "{$name} is the parent of the active theme (" . wp_get_theme()->get( 'Name' ) . ') - deleting it would break the site.', array( 'status' => 409 ) );
+    }
+    if ( is_multisite() ) {
+        foreach ( get_sites( array( 'number' => 0, 'fields' => 'ids' ) ) as $blog ) {
+            if ( in_array( $stylesheet, array( get_blog_option( $blog, 'stylesheet' ), get_blog_option( $blog, 'template' ) ), true ) ) {
+                return new WP_Error( 'in_use', "{$name} is used by " . get_home_url( $blog ) . ' in this network.', array( 'status' => 409 ) );
+            }
+        }
+    }
+    $fs = claude_maint_filesystem();
+    if ( is_wp_error( $fs ) ) return $fs;
+    $version = $theme->get( 'Version' );
+    ob_start();
+    $r = delete_theme( $stylesheet );
+    ob_end_clean();
+    if ( is_wp_error( $r ) ) return $r;
+    if ( ! $r ) return new WP_Error( 'delete_failed', "Could not delete {$name}.", array( 'status' => 500 ) );
+    wp_clean_themes_cache();
+    $defaults = array_filter( array_keys( wp_get_themes() ), function ( $t ) { return strpos( $t, 'twenty' ) === 0; } );
+    return new WP_REST_Response( array(
+        'deleted' => $stylesheet,
+        'name'    => $name,
+        'version' => $version,
+        'health'  => claude_loopback_health(),
+        'note'    => $defaults ? null : 'No default WordPress theme (Twenty-something) is installed now. WordPress falls back to one if the active theme breaks - consider keeping one.',
+    ) );
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
