@@ -65,6 +65,7 @@ function publicSite(s) {
     security: st.security || null,
     diviForms: st.diviForms || null,
     formTestQueued: st.formTestQueued || null,
+    asanaWaiting: !!st.asanaPending, // a run's Asana comment is waiting for this site's form test
     held: st.held || [],
     asana: st.asana || null,
     trustedAdmins: st.trustedAdmins || [],

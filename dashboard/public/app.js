@@ -255,8 +255,33 @@ function scheduleChip() {
     ? `Morning test: ${sc.what === 'all' ? 'all sites' : `${queued} queued`}${when ? ` · ${when}` : ''}`
     : `${queued} form test${queued === 1 ? '' : 's'} queued · schedule off`;
   if (!sc.enabled && !queued) return '';
-  return `<span class="pill ${sc.enabled ? 'accent' : 'warn'}" title="${h(info.last ? `Last scheduled run: ${new Date(info.last.at).toLocaleString()} - ${info.last.sites} site(s)${info.last.note ? ` (${info.last.note})` : ''}` : 'No scheduled run yet')}">${h(label)}</span>
-    ${queued ? '<button class="btn sm ghost" data-action="run-queue" title="Run the queued form tests now">Run queue now</button>' : ''}`;
+  return `<button type="button" class="pill ${sc.enabled ? 'accent' : 'warn'} pill-btn" data-action="open-queue" title="See and manage the queue and the schedule">${h(label)} ›</button>`;
+}
+
+/** The form test queue: which sites wait for the morning run, with Run now / Remove, and the schedule. */
+function renderQueue() {
+  const sc = S.settings?.schedule || {};
+  const info = S.schedule || {};
+  const queued = S.sites.filter(s => !s.hidden && s.formTestQueued).sort((a, b) => a.formTestQueued.localeCompare(b.formTestQueued));
+  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const when = info.next ? new Date(info.next).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : null;
+  $('#queue-body').innerHTML = `
+    <div class="notice ${sc.enabled ? '' : 'warn'}" style="margin:0 0 10px">
+      ${sc.enabled
+        ? `<b>Schedule on</b> - ${sc.what === 'all' ? 'every site' : 'the queued sites'} at ${h(sc.time || '')} on ${h((sc.days || []).map(d => days[d]).join(', ') || 'no days')}${when ? `. Next run: <b>${h(when)}</b>` : ''}.`
+        : '<b>Schedule off</b> - queued tests only run when you press Run now.'}
+      ${info.last ? `<br><span class="muted">Last scheduled run: ${h(new Date(info.last.at).toLocaleString())} - ${h(info.last.sites)} site(s)${info.last.note ? ` (${h(info.last.note)})` : ''}</span>` : ''}
+      <br><a href="#" data-action="queue-settings">${sc.enabled ? 'Change or turn off the schedule' : 'Turn on the schedule'} in Settings</a>
+    </div>
+    ${queued.length ? `<div class="tablewrap"><table class="list">
+      <thead><tr><th>Site</th><th>Queued</th><th></th></tr></thead>
+      <tbody>${queued.map(s => `<tr data-site="${h(s.id)}">
+        <td><b>${h(s.name)}</b>${agencies().length > 1 && agencyOf(s) ? ` <span class="tag">${h(agencyOf(s).label)}</span>` : ''}${s.asanaWaiting ? ' <span class="tag warn" title="The last run\'s Asana comment goes out with this form test. If you remove it, send the comment from the site\'s Asana &amp; login tab.">Asana comment waiting</span>' : ''}</td>
+        <td class="muted" title="${h(new Date(s.formTestQueued).toLocaleString())}">${h(ago(s.formTestQueued))}</td>
+        <td class="acts"><button type="button" class="btn sm" data-action="queue-run-one">Run now</button><button type="button" class="btn sm ghost danger" data-action="queue-remove">Remove</button></td>
+      </tr>`).join('')}</tbody></table></div>`
+      : '<p class="muted" style="margin:0">Nothing is queued. Sites are queued by <b>Queue form test</b>, and by <b>Update everything</b> when Settings › Updates says to leave the form test for the morning run.</p>'}`;
+  for (const b of document.querySelectorAll('#dlg-queue [data-action=queue-clear], #dlg-queue [data-action=run-queue]')) b.disabled = !queued.length;
 }
 
 const chevron = `<svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5L10.5 8 6 12.5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
@@ -1179,10 +1204,12 @@ function connect() {
   es.addEventListener('site', ev => {
     const s = JSON.parse(ev.data);
     const i = S.sites.findIndex(x => x.id === s.id);
+    const wasQueued = i >= 0 && !!S.sites[i].formTestQueued;
     if (i >= 0) S.sites[i] = s; else S.sites.push(s);
     delete S.history[s.id];
     renderStats();
     renderSite(s.id);
+    if (wasQueued !== !!s.formTestQueued) { if (S.view === 'sites') renderToolbar(); if ($('#dlg-queue').open) renderQueue(); }
   });
   es.addEventListener('schedule', ev => { S.schedule = JSON.parse(ev.data); renderToolbar(); });
   es.addEventListener('failures', ev => { S.failures = JSON.parse(ev.data); renderBanner(); if (S.view === 'log') loadLog(); });
@@ -1527,8 +1554,23 @@ document.addEventListener('click', async (ev) => {
     }
     case 'run-queue': {
       const ids = S.sites.filter(s => !s.hidden && s.formTestQueued).map(s => s.id);
+      if (!ids.length) return;
       return startJob({ type: 'formtest', sites: ids }, `Run the ${ids.length} queued form test(s) now? Each sends a real enquiry.`);
     }
+    case 'open-queue': renderQueue(); $('#dlg-queue').showModal(); return;
+    case 'queue-run-one': return startJob({ type: 'formtest', sites: [site.id] }, `Run the form test on ${site.name} now? It sends a real enquiry.`);
+    case 'queue-remove': {
+      if (site.asanaWaiting && !confirm(`Remove ${site.name} from the queue?\n\nThe last run's Asana comment was waiting for this form test - send it from the site's Asana & login tab.`)) return;
+      await api('POST', '/api/jobs', { type: 'queue-form', sites: [site.id], queued: false }).catch(e => toast(e.message));
+      return;
+    }
+    case 'queue-clear': {
+      const ids = S.sites.filter(s => !s.hidden && s.formTestQueued).map(s => s.id);
+      if (!ids.length || !confirm(`Remove all ${ids.length} site(s) from the form test queue?`)) return;
+      await api('POST', '/api/jobs', { type: 'queue-form', sites: ids, queued: false }).catch(e => toast(e.message));
+      return;
+    }
+    case 'queue-settings': $('#dlg-queue').close(); openSettings(); document.querySelector('#form-settings [name=scheduleEnabled]')?.scrollIntoView({ block: 'center' }); return;
     case 'bulk-form': return startJob({ type: 'formtest', sites: selectedIds() }, `Submit the contact form on ${selectedIds().length} site(s)? Each sends a real enquiry to that site's form recipients.`);
     case 'bulk-plugin': {
       const f = $('#form-plugin');
