@@ -187,7 +187,9 @@ Connect Asana under **Settings → Asana** with a personal access token (Asana: 
 
 "Update everything" runs the security check after updating, too (Settings → Updates), which is how the Asana comment knows a site was cleaned.
 
-A planted file that is not part of WordPress - including one outside `wp-content` (the root, `wp-admin`, `wp-includes`) - can be removed with **quarantine**: it is moved into a hidden folder, not deleted, so it can be restored. Genuine core files are refused (reinstall core to fix those - if WordPress's own reinstall cannot write somewhere, the connector restores the files one by one and names any folder the host has to fix), as are `wp-config.php` and anything outside the install. Claude in VS Code does this with `wp_quarantine_file`, after examining the file and with your agreement.
+Claude can **browse the whole site folder** - the site root (htdocs / `public_html`), `wp-admin` and `wp-includes`, not just `wp-content` - read-only with `wp_site_files`: folder listings mark everything that is not part of WordPress, and a planted file opens with its content and malware-pattern matches. `wp-config.php` is never read. Wordfence's firewall loader (`wordfence-waf.php`) is recognised by its content, so it is not flagged - but a file that only borrows the name is.
+
+A planted file that is not part of WordPress - including one outside `wp-content` (the root, `wp-admin`, `wp-includes`) - can be removed with **quarantine**, one file or a whole list at once: it is moved into a hidden folder, not deleted, so it can be restored. Genuine core files are refused (reinstall core to fix those - if WordPress's own reinstall cannot write somewhere, the connector restores the files one by one and names any folder the host has to fix), as are `wp-config.php` and anything outside the install. Claude in VS Code does this with `wp_quarantine_file`, after examining the file and with your agreement.
 
 Findings are leads, not proof. **Open in VS Code with Claude** writes them to `SECURITY-REPORT.md` in the site's workspace and opens it, with instructions for Claude to investigate each finding with the connector's MCP tools (including `wp_security_scan` to re-run the check), explain what it finds and propose a cleanup plan - and to change nothing until you agree to it.
 
@@ -725,6 +727,22 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 ---
 
 ## Changelog
+
+### 1.8.11 — Clean malware anywhere in the site folder
+
+**Added**
+
+- **Browse the whole site folder, read-only.** `GET /security/core-file?path=` (new MCP tool `wp_site_files`) now lists folders and opens files anywhere outside `wp-content` - the site root (htdocs / `public_html`), `wp-admin`, `wp-includes`. Listings mark every entry that is not part of WordPress, and PHP files that are not WordPress as suspicious, so planted files with random names can be found, not just the ones the scan flags. A planted file opens with its content, size, dates and malware-pattern matches, so it can be examined before it is removed. `wp-config.php` is never read.
+- **Quarantine several files at once:** `POST /security/quarantine {"paths": [...]}` (up to 50). Each file is checked on its own; the result lists what was moved and what was refused, and why.
+
+**Changed**
+
+- **Every dead end now points at the tool that works.** The file tools' "outside wp-content" refusal, a blocked `wp eval` / `wp core download`, and `wp core verify-checksums` output with "File should not exist" all name the right tool (browse, quarantine, or core reinstall). Before, Claude could conclude a planted file in `wp-admin` needed cPanel or SFTP.
+- The advice to restore core with `wp core download --force` (which the WP-CLI endpoint blocks) is replaced with the core reinstall tool.
+- **Wordfence's firewall loader (`wordfence-waf.php`) is no longer flagged** as an extra PHP file in the site root - when its content is the genuine loader. A file that only borrows the name is flagged **high**.
+- **Quarantine refuses the file PHP loads before every request** (`auto_prepend_file`) - removing it would take the whole site down - and explains the safe order: switch off Wordfence's Extended Protection, or remove the `auto_prepend_file` line first.
+
+**Verified** on a local WordPress 7.1.3 with the planted files from a real cleanup: the root and `wp-admin/network` listings marked them; they opened with their content and matches (including one with invalid UTF-8 bytes); four were quarantined in one call while the pre-loaded Wordfence loader, a core file and `wp-config.php` were refused with reasons; the genuine loader was not flagged and an impostor was flagged high; the `wp eval`, `wp core download`, `verify-checksums` and file-tool messages pointed at the right tools.
 
 ### 1.8.10 — Core reinstall that finishes, or says exactly why not
 

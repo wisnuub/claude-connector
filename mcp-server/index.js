@@ -152,7 +152,7 @@ async function safeCall(fn) {
 // Kept in step with CLAUDE_CONNECTOR_VERSION in claude-connector.php. The two
 // halves ship together, and a stale copy of this file silently hides whole
 // tools - which is much harder to notice than an outright error.
-const MCP_VERSION = '1.8.10';
+const MCP_VERSION = '1.8.11';
 
 const server = new McpServer({ name: 'claude-connector', version: MCP_VERSION });
 
@@ -404,13 +404,25 @@ server.tool('wp_security_scan',
   ({ site }) => safeCall(async () => ok(await api('GET', '/security/scan', null, null, site, 180_000)))
 );
 
+server.tool('wp_site_files',
+  'Browse the WordPress folder OUTSIDE wp-content - the site root (htdocs / public_html), wp-admin and wp-includes - '
+  + 'read-only; the file tools only reach wp-content. Give a folder (path "" = site root) to list it: every entry with size, '
+  + 'date and "wordpress": true/false (false = not part of WordPress; in wp-admin and wp-includes always worth a look, and '
+  + 'PHP files that are not WordPress are marked suspicious). Give a file to read it: a core file shows whether it differs '
+  + 'from the official copy; a file that is not part of WordPress comes back with its content, dates and malware-pattern '
+  + 'hits. Never wp-config.php. To remove planted files, after the user agrees: wp_quarantine_file with paths (reversible). '
+  + 'Modified or missing core files: wp_reinstall_core.',
+  { site: S, path: z.string().optional().describe('relative to the WordPress root, e.g. "" (root), "wp-admin/network" or "wplog.php"') },
+  ({ site, path }) => safeCall(async () => ok(await api('GET', '/security/core-file', { path: path || '' }, null, site)))
+);
+
 server.tool('wp_core_file_diff',
-  'Read a WordPress core file (wp-admin, wp-includes or a root core file) and see exactly what differs from the official '
-  + 'copy for the site\'s WordPress version - for the "core files that differ" findings of wp_security_scan, since the file '
-  + 'tools only reach wp-content. Read-only, and only for files in wordpress.org\'s checksum list (never wp-config.php). '
-  + 'In the diff, "<" lines are the official file and ">" lines are the site\'s. content:true also returns the whole file. '
-  + 'To restore core, the usual fix is wp_wpcli ["core","download","--skip-content","--force","--version=<same version>"] '
-  + '- only after the user agrees.',
+  'Read any file OUTSIDE wp-content (site root, wp-admin, wp-includes), read-only - the file tools only reach wp-content. '
+  + 'For a WordPress core file it shows exactly what differs from the official copy for the site\'s version ("<" lines are '
+  + 'the official file, ">" the site\'s; content:true also returns the whole file). For a file that is NOT part of WordPress '
+  + '(core:false - a planted file the scan or `wp core verify-checksums` flagged as "should not exist") it returns the '
+  + 'content, size, dates and malware-pattern hits (wp_site_files does the same and also lists folders). Never wp-config.php. '
+  + 'Fixes, after the user agrees: modified or missing core files -> wp_reinstall_core; planted files -> wp_quarantine_file.',
   { site: S, path: z.string().describe('e.g. wp-includes/version.php'), content: z.boolean().optional() },
   ({ site, path, content }) => safeCall(async () => ok(await api('GET', '/security/core-file', { path, ...(content ? { content: '1' } : {}) }, null, site)))
 );
@@ -431,14 +443,17 @@ server.tool('wp_reinstall_core',
 );
 
 server.tool('wp_quarantine_file',
-  'Move ONE added (non-core) file out of the live site into quarantine - including files OUTSIDE wp-content (site root, '
+  'Move added (non-core) files out of the live site into quarantine - one (path) or several at once (paths, up to 50) - '
+  + 'including files OUTSIDE wp-content (site root, '
   + 'wp-admin, wp-includes) that the file tools cannot reach, which is where root-path malware hides. The file is moved to '
   + 'wp-content/uploads/.claude-quarantine (not deleted), so it can be restored. Refused for genuine WordPress core files '
   + '(fix those by reinstalling core), wp-config.php and other config files. path is relative to the WordPress root, e.g. '
-  + '"wp-admin/js/widgets/radio.php". Only quarantine files you have examined (wp_core_file_diff / wp_files_read) and the '
-  + 'user has agreed to remove.',
-  { site: S, path: z.string() },
-  ({ site, path }) => safeCall(async () => ok(await api('POST', '/security/quarantine', null, { path }, site)))
+  + '"wp-admin/js/widgets/radio.php". Only quarantine files you have examined (wp_site_files lists and reads anything outside '
+  + 'wp-content; wp_files_read inside it) and the user has agreed to remove. With paths, each file is checked on its own: '
+  + 'the result lists what was moved and what was refused, and why. If quarantined files come back later, something is '
+  + 're-creating them (a backdoor elsewhere, a cron job, or stolen hosting/FTP passwords) - re-run wp_security_scan.',
+  { site: S, path: z.string().optional(), paths: z.array(z.string()).max(50).optional() },
+  ({ site, path, paths }) => safeCall(async () => ok(await api('POST', '/security/quarantine', null, paths ? { paths } : { path }, site)))
 );
 
 server.tool('wp_quarantine_list',
@@ -492,14 +507,14 @@ server.tool('wp_themes_switch', 'Switch the active WordPress theme', {
 );
 
 // Files - list
-server.tool('wp_files_list', 'List files in a wp-content subdirectory', {
+server.tool('wp_files_list', 'List files in a wp-content subdirectory. Only wp-content - outside it (site root, wp-admin, wp-includes) use wp_site_files to list and read, and wp_quarantine_file / wp_reinstall_core to fix.', {
   site: S,
   path: z.string().describe('Path relative to wp-content, e.g. themes/mytheme'),
 }, ({ site, path }) => safeCall(async () => ok(await api('GET', '/files', { path }, null, site)))
 );
 
 // Files - read
-server.tool('wp_files_read', "Read a file's content from within wp-content", {
+server.tool('wp_files_read', "Read a file's content from within wp-content. Only wp-content - outside it (site root, wp-admin, wp-includes) use wp_site_files to list and read, and wp_quarantine_file / wp_reinstall_core to fix.", {
   site: S,
   path: z.string().describe('Path relative to wp-content, e.g. themes/mytheme/functions.php'),
 }, ({ site, path }) => safeCall(async () => ok(await api('GET', '/files/read', { path }, null, site)))
@@ -550,7 +565,7 @@ server.tool('wp_files_fetch',
 );
 
 // Files - delete
-server.tool('wp_files_delete', 'Delete a file or empty directory from wp-content', {
+server.tool('wp_files_delete', 'Delete a file or empty directory from wp-content. Only wp-content - outside it (site root, wp-admin, wp-includes) use wp_site_files to list and read, and wp_quarantine_file / wp_reinstall_core to fix.', {
   site: S,
   path: z.string().describe('Path relative to wp-content'),
 }, ({ site, path }) => safeCall(async () => ok(await api('DELETE', '/files', { path }, null, site)))

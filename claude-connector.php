@@ -3,7 +3,7 @@
  * Plugin Name:  Claude Connector
  * Plugin URI:   https://github.com/wisnuub/claude-connector
  * Description:  Secure REST API bridge for Claude AI - ACF sync, cache purge, file management, database queries, post CRUD, plugin/theme control, maintenance updates with rollback, and more.
- * Version:      1.8.10
+ * Version:      1.8.11
  * Author:       Wisnuub
  * Author URI:   https://wisnuub.github.io
  * License:      GPL-2.0-or-later
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'CLAUDE_CONNECTOR_VERSION', '1.8.10' );
+define( 'CLAUDE_CONNECTOR_VERSION', '1.8.11' );
 define( 'CLAUDE_CONNECTOR_NS',      'claude/v1' );
 define( 'CLAUDE_CONNECTOR_GH_REPO', 'wisnuub/claude-connector' );
 
@@ -527,9 +527,9 @@ function claude_settings_page() {
         array( 'GET',    '/maintenance/forms',        'Pages with a contact form (Divi, CF7, Gravity, WPForms, Elementor...)' ),
         array( 'POST',   '/maintenance/test-email',   'Send a wp_mail() test and report the mailer in use' ),
         array( 'GET',    '/security/scan',            'Read-only security check: core/plugin checksums, PHP in uploads, malware patterns, new admins, redirects' ),
-        array( 'GET',    '/security/core-file?path=', 'A WordPress core file and its diff against the official copy (core files only, read-only)' ),
+        array( 'GET',    '/security/core-file?path=', 'Read a file or list a folder outside wp-content (path empty = site root): core files with their diff against the official copy, planted files with malware hits - read-only, never wp-config.php' ),
         array( 'POST',   '/security/reinstall-core',  'Restore all core files to the official same-version copy (fixes modified/missing core; wp-content untouched)' ),
-        array( 'POST',   '/security/quarantine',      'Move one added (non-core) file out of the live site into quarantine - incl. outside wp-content; reversible' ),
+        array( 'POST',   '/security/quarantine',      'Move added (non-core) files out of the live site into quarantine - { path } or { paths: [...] }, incl. outside wp-content; reversible' ),
         array( 'GET',    '/security/quarantine',      'List quarantined files' ),
         array( 'POST',   '/security/restore',         'Put a quarantined file back' ),
         array( 'GET',    '/divi/forms',               'Divi contact forms and their email Message Pattern: missing fields, placeholders matching no field' ),
@@ -3698,7 +3698,11 @@ function claude_security_quarantine_allowed( $abs, $sums ) {
         }
     }
     if ( is_array( $sums ) && isset( $sums[ $rel ] ) ) {
-        return array( 'is_core', "{$rel} is a genuine WordPress core file. If it was modified, restore it by reinstalling core (wp core download --skip-content --force), do not delete it." );
+        return array( 'is_core', "{$rel} is a genuine WordPress core file. If it was modified, restore it with POST /security/reinstall-core (MCP wp_reinstall_core) - do not delete it." );
+    }
+    if ( $real === claude_security_prepend_file() ) {
+        $what = claude_security_wordfence_waf( $real ) === true ? "It is Wordfence's firewall loader - turn off the firewall's Extended Protection in Wordfence > Firewall first if you want it gone." : 'Remove the auto_prepend_file line that points to it (usually in .user.ini or php.ini in the site root - the host can do this) first, then quarantine it.';
+        return array( 'protected', "{$rel} is loaded by PHP before every request (auto_prepend_file). Removing it now would take the whole site down. {$what}" );
     }
     if ( strpos( $real, wp_normalize_path( claude_security_quarantine_dir() ) ) === 0 ) {
         return array( 'already_quarantined', 'This file is already in quarantine.' );
@@ -3711,38 +3715,65 @@ function claude_security_quarantine_allowed( $abs, $sums ) {
 }
 
 /**
- * POST /security/quarantine { path } - move one added (non-core) file out of the
- * live site into quarantine. Reversible via /security/restore. For malware the
- * security scan found outside wp-content (root, wp-admin, wp-includes) that the
- * file tools cannot reach.
+ * POST /security/quarantine { path } or { paths: [...] } - move added (non-core)
+ * files out of the live site into quarantine. Reversible via /security/restore.
+ * For malware the security scan found outside wp-content (root, wp-admin,
+ * wp-includes) that the file tools cannot reach. With paths, each file is
+ * checked on its own and the result lists what was moved and what was refused.
  */
 function claude_security_quarantine( $req ) {
     require_once ABSPATH . 'wp-admin/includes/admin.php';
-    $input = ltrim( wp_normalize_path( (string) $req->get_param( 'path' ) ), '/' );
-    if ( $input === '' ) return new WP_Error( 'missing', 'Give the path of the file to quarantine, relative to the WordPress root (e.g. wp-admin/js/widgets/radio.php).', array( 'status' => 400 ) );
+    $paths = $req->get_param( 'paths' );
+    $batch = is_array( $paths );
+    $list  = $batch ? $paths : array( $req->get_param( 'path' ) );
+    $list  = array_values( array_filter( array_map( function ( $p ) { return ltrim( wp_normalize_path( (string) $p ), '/' ); }, $list ), 'strlen' ) );
+    if ( ! $list ) return new WP_Error( 'missing', 'Give the path of the file to quarantine (path), or several (paths), relative to the WordPress root - e.g. wp-admin/js/widgets/radio.php.', array( 'status' => 400 ) );
+    if ( count( $list ) > 50 ) return new WP_Error( 'too_many', 'At most 50 files per call.', array( 'status' => 400 ) );
 
-    $abs  = wp_normalize_path( ABSPATH ) . '/' . $input;
     $ver  = get_bloginfo( 'version' );
     $sums = get_core_checksums( $ver, get_locale() ) ?: get_core_checksums( $ver, 'en_US' );
     if ( ! is_array( $sums ) || ! $sums ) {
         return new WP_Error( 'no_checksums', "Could not fetch wordpress.org's checksums for WordPress {$ver}, so a core file cannot be told from a planted one - not quarantining anything.", array( 'status' => 502 ) );
     }
+    if ( ! $batch ) {
+        $r = claude_security_quarantine_one( $list[0], $sums );
+        return is_wp_error( $r ) ? $r : new WP_REST_Response( $r );
+    }
+    $moved = $refused = array();
+    foreach ( array_unique( $list ) as $p ) {
+        $r = claude_security_quarantine_one( $p, $sums );
+        if ( is_wp_error( $r ) ) $refused[] = array( 'path' => $p, 'code' => $r->get_error_code(), 'message' => $r->get_error_message() );
+        else $moved[] = $r;
+    }
+    return new WP_REST_Response( array(
+        'quarantined' => $moved,
+        'refused'     => $refused,
+        'note'        => count( $moved ) . ' moved into wp-content/uploads/.claude-quarantine, ' . count( $refused ) . ' refused. The site no longer loads or serves the moved files; each can be put back with POST /security/restore {"id": ...}.',
+    ) );
+}
+
+/** Quarantines one file. @return array|WP_Error */
+function claude_security_quarantine_one( $input, $sums ) {
+    $abs     = wp_normalize_path( ABSPATH ) . '/' . $input;
     $allowed = claude_security_quarantine_allowed( $abs, $sums );
     if ( $allowed !== true ) {
         return new WP_Error( $allowed[0], $allowed[1], array( 'status' => $allowed[0] === 'not_found' ? 404 : 403 ) );
     }
 
-    $real   = realpath( $abs );
+    $real    = realpath( $abs );
     $rel     = ltrim( substr( wp_normalize_path( $real ), strlen( wp_normalize_path( realpath( ABSPATH ) ) ) ), '/' );
     $id      = gmdate( 'Ymd-His' ) . '-' . substr( md5( $rel . microtime() ), 0, 8 );
     $dest    = claude_security_quarantine_dir() . '/' . $id . '.quarantined';
     $size    = filesize( $real );
     $md5     = md5_file( $real );
     $preview = substr( (string) file_get_contents( $real, false, null, 0, 4 * KB_IN_BYTES ), 0, 2000 );
+    $preview = function_exists( 'mb_convert_encoding' ) ? mb_convert_encoding( $preview, 'UTF-8', 'UTF-8' ) : wp_check_invalid_utf8( $preview, true );
 
     if ( ! @rename( $real, $dest ) ) { // phpcs:ignore
         if ( ! @copy( $real, $dest ) || ! @unlink( $real ) ) { // phpcs:ignore
-            return new WP_Error( 'move_failed', "Could not move {$rel} - the web server user may not have permission to change that folder. Ask your host to remove it.", array( 'status' => 500 ) );
+            @unlink( $dest ); // phpcs:ignore
+            $why = claude_core_write_problem( dirname( $real ) );
+            return new WP_Error( 'move_failed', "Could not move {$rel}: {$why['reason']}.", array( 'status' => 500, 'blocked_by' => $why ) );
         }
     }
     if ( substr( $rel, -4 ) === '.php' && function_exists( 'wp_opcache_invalidate' ) ) wp_opcache_invalidate( $real, true );
@@ -3751,14 +3782,14 @@ function claude_security_quarantine( $req ) {
     $manifest[ $id ] = array( 'original' => $rel, 'size' => $size, 'md5' => $md5, 'at' => gmdate( 'c' ), 'by' => wp_get_current_user()->user_login ?: null, 'restored' => false );
     @file_put_contents( $mf_file, wp_json_encode( $manifest, JSON_PRETTY_PRINT ) ); // phpcs:ignore
 
-    return new WP_REST_Response( array(
+    return array(
         'quarantined' => $rel,
         'id'          => $id,
         'size'        => $size,
         'md5'         => $md5,
         'preview'     => $preview,
         'note'        => 'Moved out of the live site into wp-content/uploads/.claude-quarantine. The site no longer loads or serves it. Put it back with POST /security/restore {"id":"' . $id . '"} if needed.',
-    ) );
+    );
 }
 
 /** GET /security/quarantine - what is currently in quarantine. */
@@ -3914,6 +3945,14 @@ function claude_security_reinstall_core() {
 }
 
 /**
+ * The file tools' refusal for a path outside wp-content, pointing at the tools
+ * that do reach the site root, wp-admin and wp-includes.
+ */
+function claude_outside_wp_content() {
+    return new WP_Error( 'forbidden', 'Path is outside wp-content - the file tools only reach wp-content. Outside it (site root, wp-admin, wp-includes): list folders and read files with GET /security/core-file?path= (MCP wp_site_files), restore WordPress core files with POST /security/reinstall-core (wp_reinstall_core), and move planted files that are not part of WordPress out of the site with POST /security/quarantine {"paths": [...]} (wp_quarantine_file).', array( 'status' => 403 ) );
+}
+
+/**
  * Core reinstall fallback: copy every missing or modified core file from the
  * official package one at a time, so one unwritable folder does not stop the
  * rest. Each file goes to a temporary name in its folder and is then renamed
@@ -4054,9 +4093,10 @@ function claude_cc_opcache_flush() {
 
 /**
  * GET /security/core-file?path=wp-includes/x.php - a WordPress core file and
- * what differs from the official copy for this version. Read-only, and only
- * for files in wordpress.org's checksum list - never wp-config.php or anything
- * else outside core.
+ * what differs from the official copy for this version; or, for a file that is
+ * NOT part of WordPress (a planted file in the root, wp-admin or wp-includes),
+ * its content and malware-pattern hits, so it can be examined before it is
+ * quarantined. Read-only, inside the WordPress folder only, never wp-config.php.
  */
 function claude_security_core_file( $req ) {
     require_once ABSPATH . 'wp-admin/includes/admin.php';
@@ -4066,15 +4106,17 @@ function claude_security_core_file( $req ) {
     if ( ! is_array( $sums ) || ! $sums ) {
         return new WP_Error( 'no_checksums', "Could not fetch wordpress.org's checksums for WordPress {$ver}.", array( 'status' => 502 ) );
     }
-    if ( $path === '' || strpos( $path, 'wp-content/' ) === 0 || ! isset( $sums[ $path ] ) ) {
-        return new WP_Error( 'not_core', 'Only WordPress core files listed in wordpress.org\'s checksums can be read here. Files in wp-content: use /files/read.', array( 'status' => 403 ) );
+    if ( in_array( $path, array( '', '.' ), true ) ) return claude_security_list_dir( realpath( ABSPATH ), $sums );
+    if ( strpos( $path, 'wp-content/' ) === 0 || $path === 'wp-content' ) {
+        return new WP_Error( 'in_wp_content', 'Files in wp-content: use /files/read (MCP wp_files_read).', array( 'status' => 400 ) );
     }
     $abs  = ABSPATH . $path;
     $real = realpath( $abs );
-    if ( $real === false ) return new WP_REST_Response( array( 'path' => $path, 'version' => $ver, 'exists' => false ) );
-    if ( strpos( wp_normalize_path( $real ), wp_normalize_path( realpath( ABSPATH ) ) ) !== 0 ) {
+    if ( $real === false ) return new WP_REST_Response( array( 'path' => $path, 'version' => $ver, 'exists' => false, 'core' => isset( $sums[ $path ] ) ) );
+    if ( strpos( wp_normalize_path( $real ), wp_normalize_path( realpath( ABSPATH ) ) . '/' ) !== 0 ) {
         return new WP_Error( 'forbidden', 'Path is outside the WordPress folder.', array( 'status' => 403 ) );
     }
+    if ( ! isset( $sums[ $path ] ) ) return claude_security_other_file( $real, $ver );
     $local    = (string) file_get_contents( $real, false, null, 0, 2 * MB_IN_BYTES );
     $modified = md5( $local ) !== $sums[ $path ];
     $out      = array(
@@ -4103,6 +4145,123 @@ function claude_security_core_file( $req ) {
     }
     if ( rest_sanitize_boolean( $req->get_param( 'content' ) ) ) $out['content'] = substr( $local, 0, 400 * KB_IN_BYTES );
     return new WP_REST_Response( $out );
+}
+
+/**
+ * A file inside the WordPress folder that is not part of WordPress core, read-only.
+ */
+function claude_security_other_file( $real, $ver ) {
+    $rel = ltrim( substr( wp_normalize_path( $real ), strlen( wp_normalize_path( realpath( ABSPATH ) ) ) ), '/' );
+    if ( strtolower( basename( $rel ) ) === 'wp-config.php' ) {
+        return new WP_Error( 'protected', 'wp-config.php holds the database password and is never read through the connector.', array( 'status' => 403 ) );
+    }
+    if ( is_dir( $real ) ) {
+        $ver  = get_bloginfo( 'version' );
+        $sums = get_core_checksums( $ver, get_locale() ) ?: get_core_checksums( $ver, 'en_US' );
+        return claude_security_list_dir( $real, is_array( $sums ) ? $sums : array() );
+    }
+    $size = filesize( $real );
+    $raw  = (string) file_get_contents( $real, false, null, 0, 400 * KB_IN_BYTES );
+    // Malware often carries bytes that are not valid UTF-8, which would break the JSON response.
+    $text = function_exists( 'mb_convert_encoding' ) ? mb_convert_encoding( $raw, 'UTF-8', 'UTF-8' ) : wp_check_invalid_utf8( $raw, true );
+    return new WP_REST_Response( array(
+        'path'             => $rel,
+        'version'          => $ver,
+        'exists'           => true,
+        'core'             => false,
+        'size'             => $size,
+        'modified_at'      => wp_date( 'Y-m-d H:i:s', filemtime( $real ) ),
+        'md5'              => md5_file( $real ),
+        'malware_patterns' => claude_security_scan_file( $real, claude_security_patterns() ),
+        'content'          => $text,
+        'truncated'        => $size > strlen( $raw ),
+        'invalid_utf8'     => $text !== $raw,
+        'note'             => "Not part of WordPress {$ver}: wordpress.org's checksums have no file at this path. If it is malicious, or has no reason to be here, and the user agrees, move it out of the site with POST /security/quarantine (MCP wp_quarantine_file) - it can be put back.",
+    ) );
+}
+
+/**
+ * Whether a file is Wordfence's genuine firewall loader (wordfence-waf.php in
+ * the site root): a few lines that only include Wordfence's own
+ * waf/bootstrap.php. Malware sometimes borrows the name, so the content is
+ * checked, not just the filename.
+ *
+ * @return bool|null  true genuine, false named like it but not genuine, null not that file.
+ */
+function claude_security_wordfence_waf( $abs ) {
+    if ( strtolower( basename( $abs ) ) !== 'wordfence-waf.php' ) return null;
+    $size = (int) @filesize( $abs ); // phpcs:ignore
+    if ( ! $size || $size > 4 * KB_IN_BYTES ) return false;
+    $code = (string) @file_get_contents( $abs ); // phpcs:ignore
+    if ( strpos( $code, 'wordfence/waf/bootstrap.php' ) === false ) return false;
+    if ( preg_match( '/\$_(?:GET|POST|REQUEST|COOKIE|SERVER|FILES)|\b(?:eval|assert|base64_decode|gzinflate|str_rot13|system|exec|shell_exec|passthru|popen|proc_open|create_function|curl_exec|file_get_contents|fopen)\s*\(|\\\\x[0-9a-f]{2}/i', $code ) ) return false;
+    preg_match_all( '/\b(?:include|require)(?:_once)?\b\s*\(?\s*([^;]+);/i', $code, $m );
+    if ( ! $m[1] ) return false;
+    foreach ( $m[1] as $target ) {
+        if ( strpos( $target, 'wordfence/waf/bootstrap.php' ) === false ) return false;
+    }
+    return true;
+}
+
+/**
+ * The file PHP loads before every request (auto_prepend_file), resolved, or ''.
+ * Removing it takes the whole site down, so it is never quarantined.
+ */
+function claude_security_prepend_file() {
+    $f = (string) ini_get( 'auto_prepend_file' );
+    if ( $f === '' ) return '';
+    $r = realpath( $f ) ?: realpath( ABSPATH . $f );
+    return $r ? wp_normalize_path( $r ) : '';
+}
+
+/**
+ * A folder outside wp-content, read-only: each entry with its size and date,
+ * and whether it is part of WordPress - so planted files with random names can
+ * be found, not only the ones the scan flagged.
+ */
+function claude_security_list_dir( $real, $sums ) {
+    $root  = wp_normalize_path( realpath( ABSPATH ) );
+    $rel   = ltrim( substr( wp_normalize_path( $real ), strlen( $root ) ), '/' );
+    $pre   = $rel === '' ? '' : $rel . '/';
+    $dirs  = array();
+    foreach ( array_keys( $sums ) as $f ) {
+        for ( $d = dirname( $f ); $d !== '.' && $d !== ''; $d = dirname( $d ) ) $dirs[ $d ] = true;
+    }
+    $items = array();
+    foreach ( (array) @scandir( $real ) as $name ) { // phpcs:ignore
+        if ( $name === '.' || $name === '..' || $name === false ) continue;
+        $path   = $pre . $name;
+        $abs    = $real . '/' . $name;
+        $is_dir = is_dir( $abs );
+        $item   = array(
+            'name'     => $name . ( $is_dir ? '/' : '' ),
+            'type'     => $is_dir ? 'folder' : 'file',
+            'modified' => wp_date( 'Y-m-d H:i', (int) @filemtime( $abs ) ), // phpcs:ignore
+        );
+        if ( ! $is_dir ) $item['size'] = (int) @filesize( $abs ); // phpcs:ignore
+        if ( $path === 'wp-content' ) {
+            $item['note'] = 'use the file tools';
+        } elseif ( $is_dir ) {
+            $item['wordpress'] = isset( $dirs[ $path ] );
+        } else {
+            $item['wordpress'] = isset( $sums[ $path ] );
+            $wf = claude_security_wordfence_waf( $abs );
+            if ( $wf === true ) $item['known'] = 'Wordfence firewall loader (genuine)';
+            elseif ( $wf === false ) $item['warning'] = 'named like Wordfence\'s firewall loader, but its content is not Wordfence\'s';
+            if ( wp_normalize_path( $abs ) === claude_security_prepend_file() ) $item['loaded_before_every_request'] = true;
+            if ( ! $item['wordpress'] && $wf !== true && preg_match( '/\.(php\d?|phtml|phar|inc|ico)$/i', $name ) && ! in_array( $path, array( 'wp-config.php' ), true ) ) $item['suspicious'] = true;
+        }
+        $items[] = $item;
+        if ( count( $items ) >= 2000 ) break;
+    }
+    usort( $items, function ( $a, $b ) { return strcmp( $a['type'], $b['type'] ) ?: strcasecmp( $a['name'], $b['name'] ); } );
+    $odd = array_values( array_filter( $items, function ( $i ) { return isset( $i['wordpress'] ) && ! $i['wordpress']; } ) );
+    return new WP_REST_Response( array(
+        'path'          => $rel === '' ? '(site root)' : $rel,
+        'items'         => $items,
+        'not_wordpress' => count( $odd ),
+        'note'          => 'Read-only listing. "wordpress": false means the path is not part of WordPress ' . get_bloginfo( 'version' ) . ' - in wp-admin and wp-includes that is always worth a look; in the site root, config, verification and host files are normal. Open a file by passing its path; move planted files out with POST /security/quarantine {"paths": [...]}.',
+    ) );
 }
 
 /** Patterns that are rare in honest code and common in malware. */
@@ -4217,11 +4376,16 @@ function claude_security_scan() {
         }
         if ( $extra ) $add( 'high', 'core', 'PHP files in wp-admin / wp-includes that are not part of WordPress', $extra, 'A favourite hiding place for backdoors.' );
         // Unexpected PHP files next to wp-config.php.
-        $root = array();
+        $root = $fake = array();
         foreach ( (array) glob( ABSPATH . '*.php' ) as $f ) {
             $rel = claude_security_rel( $f );
-            if ( ! isset( $known[ $rel ] ) && ! in_array( $rel, array( 'wp-config.php', 'wp-config-sample.php' ), true ) ) $root[] = array( 'path' => $rel, 'detail' => 'modified ' . wp_date( 'Y-m-d H:i', filemtime( $f ) ) );
+            if ( isset( $known[ $rel ] ) || in_array( $rel, array( 'wp-config.php', 'wp-config-sample.php' ), true ) ) continue;
+            $wf = claude_security_wordfence_waf( $f );
+            if ( $wf === true ) continue; // Wordfence's firewall loader
+            if ( $wf === false ) { $fake[] = array( 'path' => $rel, 'detail' => 'modified ' . wp_date( 'Y-m-d H:i', filemtime( $f ) ) . ' - named like Wordfence\'s firewall loader, but the content is not Wordfence\'s' ); continue; }
+            $root[] = array( 'path' => $rel, 'detail' => 'modified ' . wp_date( 'Y-m-d H:i', filemtime( $f ) ) );
         }
+        if ( $fake ) $add( 'high', 'core', 'A file posing as Wordfence\'s firewall loader', $fake, 'Genuine wordfence-waf.php only includes wp-content/plugins/wordfence/waf/bootstrap.php. Malware borrows the name because people trust it. It may be loaded before every request (auto_prepend_file in .user.ini), so check that before removing it.' );
         if ( $root ) $add( 'medium', 'core', 'Extra PHP files in the site root', $root, 'Some are legitimate (host or cache tools); unknown ones are worth opening.' );
     } else {
         $add( 'info', 'core', 'Could not fetch WordPress checksums - core files were not compared', array(), "WordPress {$wp_version} / " . get_locale() );
@@ -4843,7 +5007,7 @@ function claude_verify_php_write( $path, $rel, $previous ) {
 
 function claude_files_list( $req ) {
     $path = claude_safe_path( sanitize_text_field( (string) $req->get_param( 'path' ) ) );
-    if ( ! $path )           return new WP_Error( 'forbidden', 'Path is outside wp-content.',  array( 'status' => 403 ) );
+    if ( ! $path )           return claude_outside_wp_content();
     if ( ! is_dir( $path ) ) return new WP_Error( 'not_dir',   'Path is not a directory.',      array( 'status' => 400 ) );
     $items = array();
     foreach ( scandir( $path ) as $entry ) {
@@ -4863,7 +5027,7 @@ function claude_files_list( $req ) {
 function claude_files_read( $req ) {
     $rel  = sanitize_text_field( (string) $req->get_param( 'path' ) );
     $path = claude_safe_path( $rel );
-    if ( ! $path )            return new WP_Error( 'forbidden', 'Path is outside wp-content.', array( 'status' => 403 ) );
+    if ( ! $path )            return claude_outside_wp_content();
     if ( ! is_file( $path ) ) return new WP_Error( 'not_found', 'File not found.',             array( 'status' => 404 ) );
     return new WP_REST_Response( array( 'path' => $rel, 'size' => filesize( $path ), 'content' => file_get_contents( $path ) ) ); // phpcs:ignore
 }
@@ -4887,7 +5051,7 @@ function claude_files_write( $req ) {
         return new WP_Error( 'missing', 'Body must include "path" and either "content" or "content_b64".', array( 'status' => 400 ) );
     }
     $path = claude_safe_path( $rel );
-    if ( ! $path ) return new WP_Error( 'forbidden', 'Path is outside wp-content.', array( 'status' => 403 ) );
+    if ( ! $path ) return claude_outside_wp_content();
 
     // PHP syntax check before write - prevents a bad edit from white-screening the site.
     $lint_error = claude_php_lint( $content, $rel );
@@ -4938,7 +5102,7 @@ function claude_files_fetch( $req ) {
 
     $path = claude_safe_path( $rel );
     if ( ! $path ) {
-        return new WP_Error( 'forbidden', 'Path is outside wp-content.', array( 'status' => 403 ) );
+        return claude_outside_wp_content();
     }
 
     require_once ABSPATH . 'wp-admin/includes/file.php';
@@ -5014,7 +5178,7 @@ function claude_files_stage( $req ) {
     }
 
     $path = claude_safe_path( $rel );
-    if ( ! $path ) return new WP_Error( 'forbidden', 'Path is outside wp-content.', array( 'status' => 403 ) );
+    if ( ! $path ) return claude_outside_wp_content();
 
     $key = 'claude_stage_' . md5( $rel ) . '_' . $chunk_index;
     set_transient( $key, $content_b64, HOUR_IN_SECONDS );
@@ -5041,7 +5205,7 @@ function claude_files_commit( $req ) {
     }
 
     $path = claude_safe_path( $rel );
-    if ( ! $path ) return new WP_Error( 'forbidden', 'Path is outside wp-content.', array( 'status' => 403 ) );
+    if ( ! $path ) return claude_outside_wp_content();
 
     $content_b64 = '';
     for ( $i = 0; $i < $chunk_total; $i++ ) {
@@ -5098,7 +5262,7 @@ function claude_files_commit( $req ) {
 function claude_files_delete( $req ) {
     $rel  = sanitize_text_field( (string) $req->get_param( 'path' ) );
     $path = claude_safe_path( $rel );
-    if ( ! $path )              return new WP_Error( 'forbidden', 'Path is outside wp-content.', array( 'status' => 403 ) );
+    if ( ! $path )              return claude_outside_wp_content();
     if ( ! file_exists( $path ) ) return new WP_Error( 'not_found', 'File not found.',           array( 'status' => 404 ) );
     $ok = is_dir( $path ) ? rmdir( $path ) : unlink( $path );
     if ( ! $ok ) return new WP_Error( 'delete_failed', 'Could not delete.', array( 'status' => 500 ) );
@@ -5561,8 +5725,9 @@ function claude_wpcli( $req ) {
     // - package         : installs untrusted WP-CLI packages from the internet.
     // To run any of these locally, use your own terminal.
     $blocked_top = array( 'shell', 'server', 'eval', 'eval-file', 'package' );
+    $cleanup = ' For malware cleanup use the security tools instead: GET /security/scan, list folders and read files outside wp-content with GET /security/core-file?path= (MCP wp_site_files), move planted files out with POST /security/quarantine (wp_quarantine_file), restore core with POST /security/reinstall-core (wp_reinstall_core).';
     if ( in_array( strtolower( $args[0] ), $blocked_top, true ) ) {
-        return new WP_Error( 'blocked', "wp {$args[0]} is not allowed via this endpoint.", array( 'status' => 400 ) );
+        return new WP_Error( 'blocked', "wp {$args[0]} is not allowed via this endpoint." . ( in_array( strtolower( $args[0] ), array( 'eval', 'eval-file' ), true ) ? $cleanup : '' ), array( 'status' => 400 ) );
     }
 
     // Block dangerous sub-command + sub-subcommand combinations.
@@ -5573,10 +5738,15 @@ function claude_wpcli( $req ) {
     $top = strtolower( $args[0] );
     $sub = isset( $args[1] ) ? strtolower( $args[1] ) : '';
     if ( isset( $blocked_sub[ $top ] ) && in_array( $sub, $blocked_sub[ $top ], true ) ) {
-        return new WP_Error( 'blocked', "wp {$top} {$sub} is not allowed via this endpoint.", array( 'status' => 400 ) );
+        $instead = $top === 'core' ? ' To restore the core files of the installed version use POST /security/reinstall-core (MCP wp_reinstall_core); WordPress updates run through the maintenance endpoints.' : '';
+        return new WP_Error( 'blocked', "wp {$top} {$sub} is not allowed via this endpoint.{$instead}", array( 'status' => 400 ) );
     }
 
-    return new WP_REST_Response( claude_wpcli_run( $args ) );
+    $out = claude_wpcli_run( $args );
+    if ( $top === 'core' && $sub === 'verify-checksums' && preg_match( '/should not exist|doesn\'t verify|File doesn/i', $out['stdout'] . $out['stderr'] ) ) {
+        $out['hint'] = 'Files that "should not exist" are not part of WordPress: read one with GET /security/core-file?path= (MCP wp_site_files), and with the user\'s agreement move them out of the site with POST /security/quarantine {"paths": [...]} (wp_quarantine_file) - reversible. Files that don\'t verify or are missing: POST /security/reinstall-core (wp_reinstall_core).';
+    }
+    return new WP_REST_Response( $out );
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
