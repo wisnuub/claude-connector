@@ -188,6 +188,18 @@
     </form>
   </dialog>
 
+  <!-- Plugin zip before Install connector -->
+  <dialog id="dlg-zip">
+    <form method="dialog">
+      <div class="dh"><h3>Claude Connector zip</h3></div>
+      <div class="db">
+        <p data-msg style="margin:0 0 10px"></p>
+        <label class="check"><input type="checkbox" name="have"> <span>I already have the latest Claude Connector zip<span data-vtext></span> - don't ask again until a new version is out</span></label>
+      </div>
+      <div class="df"><button class="btn" value="cancel">Cancel</button><span class="grow"></span><button class="btn" value="skip">Continue without downloading</button><button class="btn primary" value="download" data-dl>Download</button></div>
+    </form>
+  </dialog>
+
   <!-- Form test queue -->
   <dialog id="dlg-queue">
     <form method="dialog">

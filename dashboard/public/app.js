@@ -847,6 +847,43 @@ function loginUrlFor(url) {
   return u.toString();
 }
 
+/**
+ * Makes sure you have the latest plugin zip before Install connector: asks only
+ * when a newer release is out than the one you last downloaded or said you have
+ * (or, when GitHub cannot be reached, once a month).
+ * @returns {Promise<'downloaded'|'have'|null>} null when cancelled.
+ */
+async function ensureConnectorZip() {
+  const latest = await api('GET', '/api/connector/latest').catch(() => ({}));
+  const have = latest.have;
+  const current = latest.version ? have?.version === latest.version : !!have?.at && thisMonth(have.at);
+  if (current) return 'have';
+  const d = $('#dlg-zip');
+  const v = latest.version ? `v${latest.version}` : '';
+  $('[data-msg]', d).innerHTML = latest.version
+    ? `The latest Claude Connector is <b>${h(v)}</b>${latest.published ? ` (released ${h(new Date(latest.published).toLocaleDateString())})` : ''}.${have?.version ? ` You last downloaded v${h(have.version)}.` : ''} Install it from the latest zip.`
+    : 'Could not check GitHub for the latest version. Download the latest zip unless you already have it.';
+  $('[data-vtext]', d).textContent = v ? ` (${v})` : '';
+  $('[data-dl]', d).textContent = `Download ${v || 'latest'}`;
+  d.querySelector('[name=have]').checked = false;
+  d.returnValue = '';
+  d.showModal();
+  const choice = await new Promise(r => d.addEventListener('close', () => r(d.returnValue), { once: true }));
+  if (choice === 'download') {
+    const a = document.createElement('a');
+    a.href = latest.zip || 'https://github.com/wisnuub/claude-connector/releases/latest/download/claude-connector.zip';
+    a.rel = 'noopener';
+    document.body.appendChild(a); a.click(); a.remove();
+    await api('POST', '/api/connector/have', { version: latest.version || '' }).catch(() => {});
+    return 'downloaded';
+  }
+  if (choice === 'skip') {
+    if (d.querySelector('[name=have]').checked) await api('POST', '/api/connector/have', { version: latest.version || '' }).catch(() => {});
+    return 'have';
+  }
+  return null;
+}
+
 async function signIn(url, user, pass) {
   if ((S.settings.loginMode || 'tab') === 'tab') {
     if (await extensionRuntime()) {
@@ -1564,13 +1601,11 @@ document.addEventListener('click', async (ev) => {
         }
         const base = url.replace(/\/(wp-admin|wp-login\.php).*$/, '').replace(/\/+$/, '');
         const upload = `${base}/wp-admin/plugin-install.php?tab=upload`;
-        const a = document.createElement('a');
-        a.href = 'https://github.com/wisnuub/claude-connector/releases/latest/download/claude-connector.zip';
-        a.rel = 'noopener';
-        document.body.appendChild(a); a.click(); a.remove();
+        const got = await ensureConnectorZip();
+        if (!got) return;
         if (login) await signIn(upload, login.user, login.pass);
         else window.open(upload, '_blank', 'noopener');
-        toast('claude-connector.zip is downloading. On the page that opened: choose the file, Install Now, then Activate - it lands on Connect on this Mac.');
+        toast(`${got === 'downloaded' ? 'claude-connector.zip is downloading. ' : ''}On the page that opened: choose claude-connector.zip, Install Now, then Activate - it lands on Connect on this Mac.`);
       } catch (e) { toast(`Could not open the upload page: ${e.message}`); }
       finally { t.disabled = false; t.textContent = 'Install connector'; }
       return;

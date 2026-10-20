@@ -145,6 +145,26 @@ const pollAsana = () => asana.myTasks({ refresh: true }).catch(() => {});
 setTimeout(pollAsana, 20_000);
 setInterval(pollAsana, 30 * 60_000);
 
+let latestRelease = null;
+
+/** The newest Claude Connector release on GitHub: version, date and zip. */
+async function latestConnectorRelease() {
+  const repo = 'wisnuub/claude-connector';
+  try {
+    const r = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'site-maintenance-dashboard' }, signal: AbortSignal.timeout(10_000) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.message || `HTTP ${r.status}`);
+    return { version: String(j.tag_name || '').replace(/^v/, '') || null, published: j.published_at || null, zip: (j.assets || []).find(a => a.name === 'claude-connector.zip')?.browser_download_url || null };
+  } catch (e) {
+    // The API allows 60 requests an hour per address without a login; the release
+    // page's redirect to the newest tag does not count against that.
+    const r = await fetch(`https://github.com/${repo}/releases/latest`, { redirect: 'manual', signal: AbortSignal.timeout(10_000) });
+    const tag = (r.headers.get('location') || '').match(/\/tag\/v?([\d.]+)$/)?.[1];
+    if (!tag) throw e;
+    return { version: tag, published: null, zip: `https://github.com/${repo}/releases/download/v${tag}/claude-connector.zip` };
+  }
+}
+
 async function api(req, res, url) {
   const p = url.pathname;
   const m = req.method;
@@ -178,6 +198,17 @@ async function api(req, res, url) {
     return send(res, 200, (d.plugins || []).map(x => ({ slug: x.slug, name: x.name.replace(/&#\d+;|&amp;/g, s => s === '&amp;' ? '&' : String.fromCharCode(parseInt(s.slice(2), 10))), version: x.version, installs: x.active_installs, rating: x.rating, short: x.short_description })));
   }
 
+  if (m === 'GET' && p === '/api/connector/latest') {
+    // The newest Claude Connector release (cached for an hour), and which zip you have.
+    if (!latestRelease || Date.now() - latestRelease.at > 3_600_000) {
+      try {
+        latestRelease = { at: Date.now(), ...(await latestConnectorRelease()) };
+      } catch (e) {
+        latestRelease = { at: Date.now() - 3_000_000, version: null, error: e.message }; // retry in ~10 minutes
+      }
+    }
+    return send(res, 200, { ...latestRelease, have: store.getMeta().connectorZip || null });
+  }
   if (m === 'GET' && p === '/api/asana/status') return send(res, 200, await asana.status());
   if (m === 'GET' && p === '/api/asana/tasks') {
     try { return send(res, 200, await asana.myTasks({ refresh: url.searchParams.get('refresh') === '1' })); }
@@ -295,6 +326,11 @@ async function api(req, res, url) {
     if (site && body.agencyId) store.patchSiteState(site.id, { agencyId: body.agencyId });
     rescanSites();
     return send(res, 200, { ...r, siteId: site?.id || null });
+  }
+  if (p === '/api/connector/have') {
+    // The plugin zip version you have on this computer, so Install connector only asks again for a newer one.
+    store.patchMeta({ connectorZip: { version: String(body.version || '').replace(/[^\d.]/g, '') || null, at: new Date().toISOString() } });
+    return send(res, 200, { ok: true });
   }
   if (p === '/api/sites/seen') { newSites.clear(); return send(res, 200, { ok: true }); }
   if (p === '/api/sites/meta') {
