@@ -457,6 +457,7 @@ function claude_settings_page() {
         $custom_wp = sanitize_text_field( wp_unslash( $_POST['claude_wpcli_path'] ?? '' ) );
         update_option( 'claude_wpcli_path', $custom_wp, false );
         update_option( 'claude_connector_user_id', (int) ( $_POST['claude_connector_user_id'] ?? 0 ), false );
+        update_option( 'claude_trusted_admins', claude_trusted_clean( sanitize_textarea_field( wp_unslash( $_POST['claude_trusted_admins'] ?? '' ) ) ), false );
         echo '<div class="notice notice-success"><p><strong>Settings saved.</strong></p></div>';
     }
 
@@ -529,6 +530,7 @@ function claude_settings_page() {
         array( 'GET',    '/security/scan',            'Read-only security check: core/plugin checksums, PHP in uploads, malware patterns, new admins, redirects' ),
         array( 'GET',    '/security/core-file?path=', 'Read a file or list a folder outside wp-content (path empty = site root): core files with their diff against the official copy, planted files with malware hits - read-only, never wp-config.php' ),
         array( 'POST',   '/security/reinstall-core',  'Restore all core files to the official same-version copy (fixes modified/missing core; wp-content untouched)' ),
+        array( 'GET',    '/security/trusted-admins',  'Administrator emails the security check trusts (POST { emails: [...] } to set; "@domain.com" for a domain)' ),
         array( 'POST',   '/security/quarantine',      'Move added (non-core) files out of the live site into quarantine - { path } or { paths: [...] }, incl. outside wp-content; reversible' ),
         array( 'GET',    '/security/quarantine',      'List quarantined files' ),
         array( 'POST',   '/security/restore',         'Put a quarantined file back' ),
@@ -645,6 +647,18 @@ function claude_settings_page() {
                             the <code>unfiltered_html</code> capability - which silently destroys
                             builder layouts on write. This also sets the author of posts the connector
                             creates, and is what appears in the access log.
+                        </p>
+                    </td>
+                </tr>
+                <tr>
+                    <th>Trusted administrator emails</th>
+                    <td>
+                        <textarea name="claude_trusted_admins" rows="4" style="width:420px;font-family:monospace;" placeholder="you@youragency.com&#10;owner@client.com&#10;@youragency.com"><?php echo esc_textarea( implode( "\n", claude_trusted_admins() ) ); ?></textarea>
+                        <p class="description">
+                            One per line. The security check trusts administrators with these emails whatever their
+                            username, and flags every other administrator. <code>@domain.com</code> trusts a whole domain,
+                            but still flags accounts created in the last 30 days - anyone with admin access can create an
+                            address at your domain. The Site Maintenance dashboard keeps this list in sync.
                         </p>
                     </td>
                 </tr>
@@ -919,6 +933,7 @@ add_action( 'rest_api_init', function () {
     register_rest_route( $ns, '/security/scan',          array( 'methods' => 'GET',  'callback' => 'claude_security_scan',    'permission_callback' => $a ) );
     register_rest_route( $ns, '/security/core-file',     array( 'methods' => 'GET',  'callback' => 'claude_security_core_file', 'permission_callback' => $a ) );
     register_rest_route( $ns, '/security/reinstall-core', array( 'methods' => 'POST', 'callback' => 'claude_security_reinstall_core', 'permission_callback' => $a ) );
+    register_rest_route( $ns, '/security/trusted-admins', array( 'methods' => array( 'GET', 'POST' ), 'callback' => 'claude_security_trusted_admins', 'permission_callback' => $a ) );
     register_rest_route( $ns, '/security/quarantine',    array(
         array( 'methods' => 'GET',  'callback' => 'claude_security_quarantine_list', 'permission_callback' => $a ),
         array( 'methods' => 'POST', 'callback' => 'claude_security_quarantine',      'permission_callback' => $a ),
@@ -4258,6 +4273,40 @@ function claude_security_prepend_file() {
     return $r ? wp_normalize_path( $r ) : '';
 }
 
+/** The administrator emails the security check trusts (see the settings page). */
+function claude_trusted_admins() {
+    return array_values( array_filter( (array) get_option( 'claude_trusted_admins', array() ), 'is_string' ) );
+}
+
+/** "x@y.com" and "@domain.com" entries from a list or text, lower-cased and de-duplicated. */
+function claude_trusted_clean( $list ) {
+    $items = is_array( $list ) ? $list : preg_split( '/[\s,;]+/', (string) $list );
+    $out   = array();
+    foreach ( $items as $e ) {
+        $e = strtolower( trim( (string) $e ) );
+        if ( preg_match( '/<([^>]+)>/', $e, $m ) ) $e = trim( $m[1] );
+        if ( ( is_email( $e ) || preg_match( '/^@[a-z0-9.-]+\.[a-z]{2,}$/', $e ) ) && ! in_array( $e, $out, true ) ) $out[] = $e;
+    }
+    return array_slice( $out, 0, 200 );
+}
+
+/** 'email' when the address is on the list, 'domain' when only its domain is, else null. */
+function claude_trusted_match( $email, $list ) {
+    $e = strtolower( trim( (string) $email ) );
+    if ( $e === '' ) return null;
+    if ( in_array( $e, $list, true ) ) return 'email';
+    $at = strrchr( $e, '@' );
+    return ( $at && in_array( $at, $list, true ) ) ? 'domain' : null;
+}
+
+/** GET / POST /security/trusted-admins { emails: [...] } - the trusted administrator emails. */
+function claude_security_trusted_admins( $req ) {
+    if ( $req->get_method() === 'POST' ) {
+        update_option( 'claude_trusted_admins', claude_trusted_clean( $req->get_param( 'emails' ) ), false );
+    }
+    return new WP_REST_Response( array( 'emails' => claude_trusted_admins() ) );
+}
+
 /**
  * A folder outside wp-content, read-only: each entry with its size and date,
  * and whether it is part of WordPress - so planted files with random names can
@@ -4370,7 +4419,7 @@ function claude_security_rel( $path ) {
     return ltrim( str_replace( wp_normalize_path( ABSPATH ), '', wp_normalize_path( $path ) ), '/' );
 }
 
-function claude_security_scan() {
+function claude_security_scan( $req = null ) {
     require_once ABSPATH . 'wp-admin/includes/admin.php';
     @set_time_limit( 180 ); // phpcs:ignore
     $started  = microtime( true );
@@ -4524,27 +4573,40 @@ function claude_security_scan() {
     usort( $recent, function ( $a, $b ) { return $b['t'] - $a['t']; } );
     if ( $recent ) $add( 'low', 'files', 'PHP files changed in the last 7 days', array_map( function ( $r ) { unset( $r['t'] ); return $r; }, $recent ), 'Updates change files too - compare against what was updated.' );
 
-    // 8. Administrator accounts, with reasons any look out of place.
+    // 8. Administrator accounts, with reasons any look out of place. With a
+    //    trusted list (sent by the dashboard, else the site's own), an admin is
+    //    judged by its email - the username is ignored - and any other admin is flagged.
+    $tp      = $req instanceof WP_REST_Request ? $req->get_param( 'trusted' ) : null;
+    $trusted = $tp !== null ? claude_trusted_clean( $tp ) : claude_trusted_admins();
     $site_domain = preg_replace( '/^www\./', '', strtolower( (string) parse_url( home_url(), PHP_URL_HOST ) ) );
     $admins = $suspicious = array();
     foreach ( get_users( array( 'role' => 'administrator', 'orderby' => 'registered', 'order' => 'DESC', 'number' => 100 ) ) as $u ) {
         $reasons = array();
         $reg     = strtotime( $u->user_registered );
-        if ( $reg > time() - 30 * DAY_IN_SECONDS ) $reasons[] = 'created in the last 30 days';
-        if ( preg_match( '/^[a-f0-9]{10,}$/i', $u->user_login ) || preg_match( '/^[a-z]{2,}\d{3,}$/i', $u->user_login ) ) $reasons[] = 'username looks machine-generated';
-        if ( preg_match( '/^(?:admin|administrator|wpadmin|support|root|test|user|backup|seo|manager)\d+$/i', $u->user_login ) ) $reasons[] = 'username is a common attacker pattern';
-        $email_domain = strtolower( (string) substr( strrchr( (string) $u->user_email, '@' ), 1 ) );
-        if ( $email_domain && $site_domain && $email_domain !== $site_domain && strpos( $site_domain, $email_domain ) === false && ! in_array( $email_domain, array( 'gmail.com', 'outlook.com', 'hotmail.com', 'yahoo.com', 'yahoo.com.au', 'icloud.com', 'bigpond.com' ), true ) ) $reasons[] = "email on another domain ({$email_domain})";
+        $new     = $reg > time() - 30 * DAY_IN_SECONDS;
+        $trust   = $trusted ? claude_trusted_match( $u->user_email, $trusted ) : null;
+        if ( $trust === 'domain' ) {
+            if ( $new ) $reasons[] = 'created in the last 30 days - trusted by its domain only, so check it is a real colleague';
+        } elseif ( $trust !== 'email' ) {
+            if ( $trusted ) $reasons[] = 'email is not on the trusted list';
+            if ( $new ) $reasons[] = 'created in the last 30 days';
+            if ( preg_match( '/^[a-f0-9]{10,}$/i', $u->user_login ) || preg_match( '/^[a-z]{2,}\d{3,}$/i', $u->user_login ) ) $reasons[] = 'username looks machine-generated';
+            if ( preg_match( '/^(?:admin|administrator|wpadmin|support|root|test|user|backup|seo|manager)\d+$/i', $u->user_login ) ) $reasons[] = 'username is a common attacker pattern';
+            $email_domain = strtolower( (string) substr( strrchr( (string) $u->user_email, '@' ), 1 ) );
+            if ( ! $trusted && $email_domain && $site_domain && $email_domain !== $site_domain && strpos( $site_domain, $email_domain ) === false && ! in_array( $email_domain, array( 'gmail.com', 'outlook.com', 'hotmail.com', 'yahoo.com', 'yahoo.com.au', 'icloud.com', 'bigpond.com' ), true ) ) $reasons[] = "email on another domain ({$email_domain})";
+        }
         $entry = array(
             'path'       => $u->user_login,
-            'detail'     => $u->user_email . ' · registered ' . wp_date( 'Y-m-d', $reg ) . ' · ' . count_user_posts( $u->ID ) . ' posts · display "' . $u->display_name . '"' . ( $reasons ? ' · ' . implode( '; ', $reasons ) : '' ),
+            'email'      => strtolower( (string) $u->user_email ),
+            'detail'     => $u->user_email . ' · registered ' . wp_date( 'Y-m-d', $reg ) . ' · ' . count_user_posts( $u->ID ) . ' posts · display "' . $u->display_name . '"' . ( $trust ? ' · trusted' . ( $trust === 'domain' ? ' (by domain)' : '' ) : '' ) . ( $reasons ? ' · ' . implode( '; ', $reasons ) : '' ),
+            'trusted'    => $trust,
             'suspicious' => ! empty( $reasons ),
         );
         $admins[] = $entry;
         if ( $reasons ) $suspicious[] = $entry;
     }
-    if ( $suspicious ) $add( 'medium', 'users', 'Administrator accounts that look out of place', $suspicious, 'Attackers add or rename an admin account to keep access. Check each with whoever manages the site; remove any not meant to be there.' );
-    $add( 'info', 'users', 'All administrator accounts', $admins, 'Review the full list - an attacker account can also look ordinary.' );
+    if ( $suspicious ) $add( 'medium', 'users', $trusted ? 'Administrator accounts not on the trusted list' : 'Administrator accounts that look out of place', $suspicious, $trusted ? 'These administrators\' emails are not on the trusted list. Check each with whoever manages the site; remove any not meant to be there, or add a genuine one to the trusted emails.' : 'Attackers add or rename an admin account to keep access. Check each with whoever manages the site; remove any not meant to be there. Tip: set trusted administrator emails, and every admin with another email is flagged.' );
+    $add( 'info', 'users', 'All administrator accounts', $admins, $trusted ? count( $trusted ) . ' trusted email' . ( count( $trusted ) === 1 ? '' : 's' ) . '/domain' . ( count( $trusted ) === 1 ? '' : 's' ) . ' set.' : 'Review the full list - an attacker account can also look ordinary.' );
 
     // 9. .htaccess redirects and PHP settings that pull in other files.
     $ht = array();

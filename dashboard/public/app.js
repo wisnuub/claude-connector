@@ -523,6 +523,15 @@ function formsTab(site) {
 
 const SEV_CLS = { high: 'bad', medium: 'warn', low: '', info: '' };
 
+/** Trust / untrust an administrator's email for this site (agency-wide ones are set in Settings). */
+function trustButton(site, email) {
+  const agencyList = agencyOf(site)?.trustedAdmins || [];
+  const domain = email.slice(email.indexOf('@'));
+  if (agencyList.includes(email) || agencyList.includes(domain)) return ` <span class="tag ok" title="Trusted for every ${h(agencyOf(site)?.label || '')} site - change it in Settings › Agencies">trusted (agency)</span>`;
+  if ((site.trustedAdmins || []).includes(email)) return ` <button class="btn sm ghost" data-action="untrust-admin" data-email="${h(email)}">Untrust</button>`;
+  return ` <button class="btn sm ghost" data-action="trust-admin" data-email="${h(email)}" title="Trust this administrator on this site - it will not be flagged again">Trust this email</button>`;
+}
+
 function securityTab(site) {
   const sc = site.security;
   const run = running(site.id);
@@ -538,7 +547,7 @@ function securityTab(site) {
     <details class="card sec ${SEV_CLS[f.severity] || ''}" ${f.severity === 'high' ? 'open' : ''} style="margin-top:8px">
       <summary><span class="pill ${SEV_CLS[f.severity] || ''}">${h(f.severity)}</span> <b>${h(f.title)}</b> <span class="muted">(${h(f.count)})</span></summary>
       ${f.note ? `<p class="hint" style="margin:6px 0">${h(f.note)}</p>` : ''}
-      <ul class="sec-items">${(f.items || []).map(i => `<li><code>${h(i.path)}</code>${i.detail ? ` <span class="muted">${h(i.detail)}</span>` : ''}${(i.hits || []).map(x => `<div class="sec-hit">${h(x.label)}, line ${h(x.line)}: <code>${h(x.snippet)}</code></div>`).join('')}</li>`).join('')}
+      <ul class="sec-items">${(f.items || []).map(i => `<li><code>${h(i.path)}</code>${i.detail ? ` <span class="muted">${h(i.detail)}</span>` : ''}${f.category === 'users' && i.email ? trustButton(site, i.email) : ''}${(i.hits || []).map(x => `<div class="sec-hit">${h(x.label)}, line ${h(x.line)}: <code>${h(x.snippet)}</code></div>`).join('')}</li>`).join('')}
       ${f.count > (f.items || []).length ? `<li class="muted">… and ${f.count - f.items.length} more</li>` : ''}</ul>
     </details>`).join('');
   return `${head}
@@ -1225,6 +1234,10 @@ function renderAgencyEditor() {
       <label class="field">Company<input type="text" data-k="company" value="${h(a.company)}"></label>
       <label class="field full">Subject<input type="text" data-k="subject" value="${h(a.subject)}"></label>
       <label class="field full">Message<textarea data-k="message" rows="3">${h(a.message)}</textarea></label>
+      <label class="field full">Trusted administrator emails
+        <textarea data-trusted rows="3" placeholder="One per line - you@youragency.com, or @youragency.com for the whole domain">${h((a.trustedAdmins || []).join('\n'))}</textarea>
+        <span class="hint">The security check trusts administrators with these emails on this agency's sites, whatever their username, and flags every other administrator. A whole @domain still flags accounts created in the last 30 days. A client's own emails can be trusted per site from its Security tab.</span>
+      </label>
       <label class="field full">Dropdowns and radio buttons no rule covers
         <select data-k="choices">
           <option value="first" ${a.choices !== 'random' ? 'selected' : ''}>Pick the first real option</option>
@@ -1259,6 +1272,8 @@ function readAgencyForm() {
   const a = draft.agencies.find(x => x.id === draftAgency);
   if (!a) return;
   for (const el of document.querySelectorAll('[data-agency-form] [data-k]')) a[el.dataset.k] = el.value;
+  const tr = document.querySelector('[data-agency-form] [data-trusted]');
+  if (tr) a.trustedAdmins = tr.value.split(/[\n,;]+/).map(x => x.trim()).filter(Boolean);
   a.rules = [...document.querySelectorAll('#rules [data-rule]')].map(row => ({ match: $('[data-r=match]', row).value, value: $('[data-r=value]', row).value }));
 }
 
@@ -1635,6 +1650,16 @@ document.addEventListener('click', async (ev) => {
       await api('DELETE', `/api/sites/${encodeURIComponent(site.id)}${hard ? '?hard=1' : ''}`).catch(e => toast(e.message));
       await load();
       toast(`${site.name} removed`);
+      return;
+    }
+    case 'trust-admin':
+    case 'untrust-admin': {
+      const email = t.dataset.email;
+      if (t.dataset.action === 'trust-admin' && !confirm(`Trust ${email} as an administrator of ${site.name}?\n\nOnly do this for an account you know is genuine - the security check stops flagging it.`)) return;
+      try {
+        await api('POST', `/api/sites/${encodeURIComponent(site.id)}/trusted`, t.dataset.action === 'trust-admin' ? { add: email } : { remove: email });
+        toast('Saved - run the security check again to update the results');
+      } catch (e) { toast(e.message); }
       return;
     }
     case 'theme-delete': {

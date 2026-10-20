@@ -67,6 +67,7 @@ function publicSite(s) {
     formTestQueued: st.formTestQueued || null,
     held: st.held || [],
     asana: st.asana || null,
+    trustedAdmins: st.trustedAdmins || [],
   };
 }
 
@@ -317,6 +318,22 @@ async function api(req, res, url) {
     const forms = await call(site, 'GET', '/divi/forms', { timeout: 60_000 }).catch(() => null);
     if (forms) { store.patchSiteState(site.id, { diviForms: { ...forms, at: new Date().toISOString() } }); broadcast('site', publicSite(site)); }
     return send(res, 200, r);
+  }
+  if ((mm = p.match(/^\/api\/sites\/([\w-]+)\/trusted$/))) {
+    // { add: email } / { remove: email } - this site's own trusted administrator emails
+    // (the agency's list is in Settings). Used by the next security check.
+    const site = store.getSite(mm[1]);
+    if (!site) return send(res, 404, { message: 'Unknown site' });
+    let list = store.siteState(site.id).trustedAdmins || [];
+    if (body.add) {
+      const add = store.cleanTrusted([body.add]);
+      if (!add.length) return send(res, 400, { message: 'That is not an email address or @domain.' });
+      list = store.cleanTrusted([...list, ...add]);
+    }
+    if (body.remove) list = list.filter(e => e !== String(body.remove).trim().toLowerCase());
+    store.patchSiteState(site.id, { trustedAdmins: list });
+    broadcast('site', publicSite(site));
+    return send(res, 200, { trustedAdmins: list });
   }
   if ((mm = p.match(/^\/api\/sites\/([\w-]+)\/asana-comment$/))) {
     // POST { text } sends it to the site's Asana task; POST {} returns a draft.

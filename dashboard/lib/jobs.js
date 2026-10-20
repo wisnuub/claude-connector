@@ -252,11 +252,25 @@ async function healthStep(ctx, title = 'Site health') {
  * The read-only security check as a step of a run. "Cleaned" means the
  * previous check had warning signs and this one has none.
  */
+/**
+ * The trusted administrator emails for a site - its agency's list plus its
+ * own - saved on the site too (so Claude's scans in VS Code use the same list)
+ * and sent with the scan. With no list here, the site's own list is used.
+ */
+async function trustedParams(ctx) {
+  const st = siteState(ctx.site.id);
+  const list = [...new Set([...(agencyFor(ctx.site.id).trustedAdmins || []), ...(st.trustedAdmins || [])])];
+  if (!list.length && !st.trustedPushed) return null;
+  await ctx.api('POST', '/security/trusted-admins', { body: { emails: list }, timeout: 30_000 }).catch(() => {});
+  patchSiteState(ctx.site.id, { trustedPushed: list.length > 0 });
+  return { trusted: list.join(',') };
+}
+
 async function securityStep(ctx) {
   const prev = siteState(ctx.site.id).security?.summary?.high || 0;
   const st = ctx.step('Security check…');
   try {
-    const scan = await ctx.api('GET', '/security/scan', { timeout: 240_000 });
+    const scan = await ctx.api('GET', '/security/scan', { params: await trustedParams(ctx), timeout: 240_000 });
     patchSiteState(ctx.site.id, { security: { ...scan, at: new Date().toISOString() } });
     const high = scan.summary?.high || 0;
     const cleaned = prev > 0 && high === 0;
@@ -594,7 +608,7 @@ export function startSecurityScan({ sites }) {
     const st = ctx.step('Running the security check (core and plugin checksums, malware patterns, uploads, admins)…');
     let scan;
     try {
-      scan = await ctx.api('GET', '/security/scan', { timeout: 240_000 });
+      scan = await ctx.api('GET', '/security/scan', { params: await trustedParams(ctx), timeout: 240_000 });
     } catch (e) {
       const i = errInfo(e);
       st.set('failed', i.code === 'rest_no_route' ? 'Security check needs Claude Connector 1.8.2 or newer on this site' : `Security check: ${i.message}`, null, { kind: 'security', result: 'failed' });
