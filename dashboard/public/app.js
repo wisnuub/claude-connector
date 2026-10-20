@@ -2,6 +2,8 @@
 
 const S = {
   version: '',
+  editUrl: null,            // site id whose address is being edited inline
+  urlDraft: '',
   sites: [],
   settings: null,
   jobs: new Map(),
@@ -189,6 +191,7 @@ function visibleSites() {
     if (S.agency !== 'all' && agencyOf(s)?.id !== S.agency) return false;
     if (S.filter === 'updates' && !counts(s).total) return false;
     if (S.filter === 'issues' && !issue(s)) return false;
+    if (S.filter === 'asana' && !asanaTodo().has(s.id)) return false;
     return true;
   });
 }
@@ -220,8 +223,8 @@ function renderToolbar() {
   $('#toolbar').innerHTML = `
     <input type="checkbox" data-action="select-all" ${allSel ? 'checked' : ''} aria-label="Select all shown sites">
     <span class="count">${n ? `${n} selected` : `${vis.length} shown`}</span>
-    <button class="btn sm" data-action="bulk-check" ${dis} title="Read-only: updates, health, security and Divi forms - changes nothing">Check everything</button>
-    <button class="btn primary sm" data-action="bulk-maintain" ${dis}>Update everything</button>
+    <button class="btn sm" data-action="bulk-check" ${dis} title="Read-only: updates, health, security and Divi forms - changes nothing">${ICON.refresh}Check everything</button>
+    <button class="btn primary sm" data-action="bulk-maintain" ${dis}>${ICON.download}Update everything</button>
     <span class="sep"></span>
     <button class="btn sm" data-action="bulk-form" ${dis}>Form test now</button>
     <button class="btn sm" data-action="bulk-queue" ${dis} title="Add to the morning form-test run">Queue form test</button>
@@ -236,7 +239,7 @@ function renderToolbar() {
       ${agencies().map(a => `<option value="${h(a.id)}" ${S.agency === a.id ? 'selected' : ''}>${h(a.label)}</option>`).join('')}
     </select>` : ''}
     <div class="seg" role="group" aria-label="Filter">
-      ${[['all', 'All'], ['updates', 'Updates'], ['issues', 'Issues']].map(([k, l]) => `<button data-action="filter" data-v="${k}" class="${S.filter === k ? 'on' : ''}">${l}</button>`).join('')}
+      ${[['all', 'All'], ['updates', 'Updates'], ['issues', 'Issues'], ...(S.asana?.connected ? [['asana', `Asana to-do${S.tasks?.tasks ? ` (${asanaTodo().size})` : ''}`]] : [])].map(([k, l]) => `<button data-action="filter" data-v="${k}" class="${S.filter === k ? 'on' : ''}" ${k === 'asana' ? 'title="Sites whose “WordPress update” task is still open in Asana - each drops off once it is ticked complete there, or once you comment that the updates are done"' : ''}>${l}</button>`).join('')}
     </div>
     <input type="search" id="q" placeholder="Search sites" value="${h(S.q)}" data-action="search-sites">`;
   if (focused) { const q = $('#q'); q.focus(); q.setSelectionRange(q.value.length, q.value.length); }
@@ -303,7 +306,7 @@ function siteRow(site) {
   <section class="site ${open ? 'open' : ''} ${S.selected.has(site.id) ? 'selected' : ''}" data-site="${h(site.id)}">
     <div class="row" data-action="toggle-site">
       <input type="checkbox" data-action="select-site" ${S.selected.has(site.id) ? 'checked' : ''} aria-label="Select ${h(site.name)}">
-      <div class="name">${chevron}<div class="title"><b>${h(site.name)}${S.newSites.has(site.id) ? ' <span class="tag accent">New</span>' : ''}</b><a href="${h(site.url)}" target="_blank" rel="noopener" data-stop>${h(site.url.replace(/^https?:\/\//, ''))}</a></div></div>
+      <div class="name">${chevron}<div class="title"><b>${h(site.name)}${S.newSites.has(site.id) ? ' <span class="tag accent">New</span>' : ''}${asanaTodo().has(site.id) ? ' <span class="tag warn" title="Its “WordPress update” task is open in Asana">Asana to-do</span>' : ''}</b>${addrBlock(site)}</div></div>
       <div class="cells">
         <div class="cell"><small>WordPress</small>${wp}</div>
         <div class="cell"><small>PHP</small>${php ? `<span class="pill ${php.cls}" title="${h(php.title)}">${h(ov.php_version)}</span>` : '<span class="faint">-</span>'}</div>
@@ -313,9 +316,9 @@ function siteRow(site) {
         <div class="cell"><small>Last run</small>${lastRunCell(site)}</div>
       </div>
       <div class="row-actions">
-        <button class="btn sm" data-action="site-check" data-stop ${run ? 'disabled' : ''} title="Read-only check: updates, health, security, Divi forms">Check</button>
-        <button class="btn sm ${c.total ? 'primary' : ''}" data-action="site-maintain" data-stop ${run ? 'disabled' : ''}>Update all</button>
-        <a class="btn sm ghost" href="${h(site.url)}/wp-admin/" target="_blank" rel="noopener" data-stop title="Open wp-admin">WP</a>
+        <button class="btn sm icon" data-action="site-check" data-stop ${run ? 'disabled' : ''} title="Check - read-only: updates, health, security, Divi forms" aria-label="Check ${h(site.name)}">${ICON.refresh}</button>
+        <button class="btn sm ${c.total ? 'primary' : ''}" data-action="site-maintain" data-stop ${run ? 'disabled' : ''} title="Update WordPress, plugins and themes">${ICON.download}Update</button>
+        <a class="btn sm ghost icon" href="${h(site.url)}/wp-admin/" target="_blank" rel="noopener" data-stop title="Login on WP" aria-label="Login on WP - ${h(site.name)}">${ICON.wp}</a>
       </div>
       ${run ? `<div class="progress"><span class="spin"></span><span>${h(run.label)}</span></div>` : ''}
     </div>
@@ -427,7 +430,7 @@ function manageCard(site) {
         ${ov ? `<dt>Connector</dt><dd>${h(ov.plugin_version)}</dd><dt>File writes</dt><dd>${h(ov.filesystem.method)}${ov.filesystem.file_mods ? '' : ' (blocked)'}</dd>` : ''}
         <dt>Found in</dt><dd>${h(site.source)}</dd></dl>
       <div class="bar" style="margin:10px 0 0">
-        <button class="btn sm" data-action="site-url">Change URL…</button>
+        <button class="btn sm" data-action="site-url">Edit address</button>
         <button class="btn sm ghost" data-action="site-check">Re-check</button>
         ${site.source !== 'manual' ? '<button class="btn sm ghost" data-action="site-hide">Hide from dashboard</button>' : ''}
         <button class="btn sm ghost danger" data-action="site-delete">${site.source === 'manual' ? 'Remove site' : 'Delete site'}</button>
@@ -592,6 +595,42 @@ function groupHeader(ag, sites) {
   </div>`;
 }
 
+const ICON = {
+  refresh: '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 0 1-9.6 3.7M2.5 8a5.5 5.5 0 0 1 9.6-3.7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M12.6 1.8v2.8H9.8M3.4 14.2v-2.8h2.8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  download: '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M8 2.5v7.5M4.8 7.2 8 10.4l3.2-3.2M2.5 11.5V13a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-1.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  wp: '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><circle cx="8" cy="8" r="6.75" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M3.9 5.6 6 11.2 8 6.6l2 4.6 2.1-5.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+};
+
+const PEN = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M11.1 1.9a1.5 1.5 0 0 1 2.1 0l.9.9a1.5 1.5 0 0 1 0 2.1L5.6 13.4l-3.4.8.8-3.4z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M9.8 3.2l3 3" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>';
+
+/** The site's address under its name, with a pen to edit it in place. */
+function addrBlock(site) {
+  if (S.editUrl === site.id) {
+    return `<div class="addr-edit" data-stop>
+      <input type="url" data-url-input value="${h(S.urlDraft)}" aria-label="Website address for ${h(site.name)}" spellcheck="false" autocomplete="off">
+      <button class="btn sm primary" data-action="save-url" data-stop>Save</button>
+      <button class="btn sm ghost" data-action="cancel-url" data-stop>Cancel</button>
+    </div>`;
+  }
+  return `<div class="addr"><a href="${h(site.url)}" target="_blank" rel="noopener" data-stop>${h(site.url.replace(/^https?:\/\//, ''))}</a><button class="pen" data-action="site-url" data-stop title="Edit website address" aria-label="Edit website address for ${h(site.name)}">${PEN}</button></div>`;
+}
+
+function focusUrl() {
+  const i = document.querySelector('[data-url-input]');
+  if (i && document.activeElement !== i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); }
+}
+
+async function saveUrl(site) {
+  const url = (S.urlDraft || '').trim();
+  if (!url || url === site.url) { S.editUrl = null; renderSites(); return; }
+  try {
+    await api('POST', `/api/sites/${encodeURIComponent(site.id)}/url`, { url });
+    S.editUrl = null;
+    toast('Address changed - press Check to re-scan the site');
+    await load();
+  } catch (e) { toast(e.message); focusUrl(); }
+}
+
 function renderSites() {
   const el = $('#sites');
   const all = S.sites.filter(s => !s.hidden);
@@ -599,8 +638,15 @@ function renderSites() {
     el.innerHTML = `<div class="empty"><h2>No sites yet</h2><p>Sites set up with the one-click installer in <code>~/claude-sites</code> appear here automatically.<br>Or add one by hand with its API key.</p><button class="btn primary" data-action="add-site">Add site</button></div>`;
     return;
   }
+  if (S.filter === 'asana' && !S.tasks?.tasks) { el.innerHTML = '<div class="empty"><p class="muted">Loading your Asana tasks…</p></div>'; return; }
+  if (S.filter === 'asana' && S.tasks.error) { el.innerHTML = `<div class="empty"><h2>Could not read Asana</h2><p>${h(S.tasks.error)}</p></div>`; return; }
   const vis = visibleSites();
-  if (!vis.length) { el.innerHTML = '<div class="empty"><h2>No sites match</h2><p>Change the filter or search.</p></div>'; return; }
+  if (!vis.length) {
+    el.innerHTML = S.filter === 'asana'
+      ? '<div class="empty"><h2>Nothing to do in Asana</h2><p>No site has an open “WordPress update” task that still needs the updates.</p></div>'
+      : '<div class="empty"><h2>No sites match</h2><p>Change the filter or search.</p></div>';
+    return;
+  }
   // Group by agency once there is more than one, in settings order.
   if (agencies().length > 1) {
     el.innerHTML = agencies().map(ag => {
@@ -611,6 +657,7 @@ function renderSites() {
   } else {
     el.innerHTML = vis.map(siteRow).join('');
   }
+  if (S.editUrl) focusUrl();
 }
 
 /** Re-render one site, unless the user is typing inside it (then on blur). */
@@ -619,7 +666,7 @@ function renderSite(id) {
   const el = document.querySelector(`[data-site="${CSS.escape(id)}"]`);
   const site = S.sites.find(s => s.id === id);
   if (!el || !site) return;
-  if (el.contains(document.activeElement) && document.activeElement.matches('input[type=search], input[type=text], select')) {
+  if (el.contains(document.activeElement) && document.activeElement.matches('input[type=search], input[type=text], input[type=url], select')) {
     pendingSites.add(id);
     return;
   }
@@ -747,7 +794,7 @@ async function loadTasks(refresh = false) {
   try { S.tasks = await api('GET', `/api/asana/tasks${refresh ? '?refresh=1' : ''}`); }
   catch (e) { S.tasks = { error: e.message, tasks: [] }; }
   if (S.view === 'tasks') renderTasks();
-  for (const id of S.open) renderSite(id);
+  else if (S.view === 'sites') { renderToolbar(); renderSites(); }
 }
 
 function minutes(m) {
@@ -924,6 +971,9 @@ function renderTasks() {
   if (focused) { const i = $('#tq'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }
 }
 
+/** Sites with an open "WordPress update" task in Asana (see wpUpdateTasks). */
+function asanaTodo() { return new Set(wpUpdateTasks().map(t => t.siteId)); }
+
 /** Open "WordPress update(s)" tasks whose site is on the dashboard - one per site. */
 function wpUpdateTasks() {
   const seen = new Set();
@@ -1069,6 +1119,7 @@ async function load() {
   S.sitesDir = d.sitesDir || '';
   for (const j of d.jobs) S.jobs.set(j.id, j);
   renderAll();
+  if (!S.asana) loadAsana().then(() => { if (S.asana?.connected && !S.tasks) loadTasks(); else renderToolbar(); });
 }
 
 function connect() {
@@ -1258,7 +1309,10 @@ document.addEventListener('click', async (ev) => {
       const ag = agencies().find(x => x.id === g);
       return openReview(ids, `Update everything for ${ag.label} (${ids.length} site${ids.length === 1 ? '' : 's'})`);
     }
-    case 'filter': S.filter = t.dataset.v; renderToolbar(); renderSites(); return;
+    case 'filter':
+      S.filter = t.dataset.v;
+      if (S.filter === 'asana' && !S.tasks) loadTasks();
+      renderToolbar(); renderSites(); return;
     case 'scan-sites': {
       const dir = $('#form-settings').elements.sitesDir.value.trim();
       t.disabled = true;
@@ -1544,15 +1598,16 @@ document.addEventListener('click', async (ev) => {
       return;
     }
     case 'site-url': {
-      const url = prompt(`New address for ${site.name} (e.g. https://redsquaretraffic.com.au)`, site.url);
-      if (!url || url.trim() === site.url) return;
-      try {
-        await api('POST', `/api/sites/${encodeURIComponent(site.id)}/url`, { url: url.trim() });
-        toast('Address changed - press Check to re-scan the site');
-        await load();
-      } catch (e) { toast(e.message); }
+      S.editUrl = site.id;
+      S.urlDraft = site.url;
+      renderSites();
+      document.querySelector(`[data-site="${CSS.escape(site.id)}"]`)?.scrollIntoView({ block: 'nearest' });
+      focusUrl();
+      document.querySelector('[data-url-input]')?.select();
       return;
     }
+    case 'save-url': return saveUrl(site);
+    case 'cancel-url': S.editUrl = null; renderSites(); return;
 
     case 'select-plugin': {
       const sel = S.pluginSel[site.id] || (S.pluginSel[site.id] = new Set());
@@ -1746,8 +1801,16 @@ document.addEventListener('change', async (ev) => {
   if (t.dataset.k === 'label' || t.dataset.k === 'color') { readAgencyForm(); const keep = document.activeElement; renderAgencyEditor(); keep?.focus?.(); }
 });
 
+document.addEventListener('keydown', (ev) => {
+  const t = ev.target;
+  if (!t.matches?.('[data-url-input]')) return;
+  if (ev.key === 'Enter') { ev.preventDefault(); saveUrl(siteOf(t)); }
+  if (ev.key === 'Escape') { ev.preventDefault(); S.editUrl = null; renderSites(); }
+});
+
 document.addEventListener('input', (ev) => {
   const t = ev.target;
+  if (t.matches('[data-url-input]')) { S.urlDraft = t.value; return; }
   if (t.dataset.draft && S.drafts[t.dataset.draft]) { S.drafts[t.dataset.draft].text = t.value; return; }
   if (t.dataset.action === 'search-sites') { S.q = t.value; renderSites(); renderToolbar(); return; }
   if (t.dataset.action === 'search-tasks') { S.tasksQ = t.value; renderTasks(); return; }

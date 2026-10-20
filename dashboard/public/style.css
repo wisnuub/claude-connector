@@ -318,3 +318,15 @@ details.sec.bad { border-color: color-mix(in srgb, var(--bad) 35%, var(--line));
 .sec-items li { margin: 3px 0; overflow-wrap: anywhere; }
 .sec-hit { color: var(--muted); font-size: 12px; margin: 2px 0 0 8px; }
 .sec-hit code { color: var(--bad); }
+
+/* Site address with an inline editor */
+.row .title .addr { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.row .title .addr a { min-width: 0; }
+.pen { flex: none; border: 0; background: none; color: var(--muted); padding: 3px; border-radius: 5px; cursor: pointer; line-height: 0; opacity: .6; }
+.row:hover .pen, .pen:focus-visible { opacity: 1; }
+.pen:hover { color: var(--accent); background: var(--panel-2); }
+.addr-edit { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.addr-edit input { flex: 1; min-width: 200px; height: 28px; font-size: 13px; }
+/* Icon-only buttons */
+.btn.icon { padding: 0 7px; }
+.btn.sm.icon { width: 28px; justify-content: center; padding: 0; }
