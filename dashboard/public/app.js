@@ -124,11 +124,18 @@ function renderReview({ fresh = false } = {}) {
   // Redraws (Hold, the major-updates box) must not undo the user's ticks.
   // Only ticks the user could change count - a just-released item comes back ticked.
   const keep = fresh ? new Map() : new Map([...document.querySelectorAll('#review-body input[data-rv]:not(:disabled)')].map(b => [`${b.dataset.rv}|${b.dataset.key}`, b.checked]));
+  const keepInc = fresh ? new Map() : new Map([...document.querySelectorAll('#review-body input[data-rv-include]')].map(b => [b.dataset.rvInclude, b.checked]));
   const major = f.elements.allowMajorCore.checked;
   const sites = reviewIds.map(id => S.sites.find(s => s.id === id)).filter(Boolean);
   $('#review-body').innerHTML = sites.map(site => {
     const rows = reviewItems(site);
-    const head = `<div class="rv-h"><b>${h(site.name)}</b>${rows?.length ? `<button type="button" class="btn sm ghost" data-action="rv-all" data-site="${h(site.id)}">All</button><button type="button" class="btn sm ghost" data-action="rv-none" data-site="${h(site.id)}">None</button>` : ''}</div>`;
+    // Handle with care: included only when ticked, unless it is the only site being updated.
+    const include = site.careful ? keepInc.get(site.id) ?? sites.length === 1 : true;
+    const careful = site.careful ? `<div class="notice warn" style="margin:4px 0 6px"><label class="check"><input type="checkbox" data-rv-include="${h(site.id)}" ${include ? 'checked' : ''}> <span><b>Handle with care</b>${site.careful.note ? ` - ${h(site.careful.note)}` : ''}${sites.length > 1 ? ' - tick to include this site' : ''}</span></label></div>` : '';
+    const head = `<div class="rv-h"><b>${h(site.name)}</b>${rows?.length && include ? `<button type="button" class="btn sm ghost" data-action="rv-all" data-site="${h(site.id)}">All</button><button type="button" class="btn sm ghost" data-action="rv-none" data-site="${h(site.id)}">None</button>` : ''}</div>${careful}`;
+    if (!include) return `<div class="rv">${head}<p class="hint">Left out of this run.</p></div>`;
+    const woo = site.overview?.woocommerce;
+    const wooRisk = r => woo?.overrides && (r.key === 'plugin:woocommerce/woocommerce.php' || (r.key.startsWith('theme:') && site.overview.themes.some(t => `theme:${t.stylesheet}` === r.key && (t.active || t.in_use))));
     if (!rows) return `<div class="rv">${head}<p class="hint">Not checked yet - everything found when the run starts will be updated.</p></div>`;
     if (!rows.length) return `<div class="rv">${head}<p class="hint">Up to date - the run will only check health${f.elements.formTest.value !== 'off' ? ' and the form' : ''}.</p></div>`;
     return `<div class="rv">${head}<ul class="rv-list">${rows.map(r => {
@@ -136,7 +143,8 @@ function renderReview({ fresh = false } = {}) {
       const majorOnly = r.key === 'core' && r.major && !major;
       const disabled = !!r.blocked || held || majorOnly;
       const to = r.key === 'core' && major && r.majorTo ? r.majorTo : r.to;
-      const note = held ? '<span class="tag accent">held</span>' : r.blocked ? `<span class="tag warn">${h(r.blocked)}</span>` : majorOnly ? '<span class="tag">major - tick "Include major WordPress updates"</span>' : '';
+      const note = (held ? '<span class="tag accent">held</span>' : r.blocked ? `<span class="tag warn">${h(r.blocked)}</span>` : majorOnly ? '<span class="tag">major - tick "Include major WordPress updates"</span>' : '')
+        + (wooRisk(r) ? ` <span class="tag warn" title="The theme overrides WooCommerce templates. The shop, cart and checkout are loaded after this update and it is rolled back if they break.">theme overrides ${woo.overrides} Woo template${woo.overrides === 1 ? '' : 's'}${woo.outdated ? `, ${woo.outdated} outdated` : ''}</span>` : '');
       return `<li class="${disabled ? 'off' : ''}">
         <label class="check"><input type="checkbox" data-rv="${h(site.id)}" data-key="${h(r.key)}" ${disabled ? 'disabled' : keep.get(`${site.id}|${r.key}`) === false ? '' : 'checked'}>
           <span><span class="faint">${h(r.kind)}</span> ${h(r.name)}${r.from || to ? ` <span class="muted">${h(r.from)} → <b class="ver-arrow">${h(to)}</b></span>` : ''} ${note}${r.self ? ' <span class="faint">(runs last)</span>' : ''}</span></label>
@@ -147,11 +155,20 @@ function renderReview({ fresh = false } = {}) {
   updateReviewCount();
 }
 
+/** The review's sites minus "Handle with care" ones left unticked. */
+function reviewSites() {
+  const left = new Set([...document.querySelectorAll('#review-body input[data-rv-include]')].filter(b => !b.checked).map(b => b.dataset.rvInclude));
+  return reviewIds.filter(id => !left.has(id));
+}
+
 function updateReviewCount() {
   const boxes = [...document.querySelectorAll('#review-body input[data-rv]')];
   const n = boxes.filter(b => b.checked).length;
-  const unchecked = reviewIds.filter(id => !S.sites.find(s => s.id === id)?.overview).length;
-  $('#form-review [data-action=run-review]').textContent = `Update ${n} item${n === 1 ? '' : 's'}${unchecked ? ` + ${unchecked} unchecked site${unchecked === 1 ? '' : 's'}` : ''} on ${reviewIds.length} site${reviewIds.length === 1 ? '' : 's'}`;
+  const ids = reviewSites();
+  const unchecked = ids.filter(id => !S.sites.find(s => s.id === id)?.overview).length;
+  const btn = $('#form-review [data-action=run-review]');
+  btn.textContent = `Update ${n} item${n === 1 ? '' : 's'}${unchecked ? ` + ${unchecked} unchecked site${unchecked === 1 ? '' : 's'}` : ''} on ${ids.length} site${ids.length === 1 ? '' : 's'}`;
+  btn.disabled = !ids.length;
 }
 
 function openReview(ids, title) {
@@ -331,7 +348,7 @@ function siteRow(site) {
   <section class="site ${open ? 'open' : ''} ${S.selected.has(site.id) ? 'selected' : ''}" data-site="${h(site.id)}">
     <div class="row" data-action="toggle-site">
       <input type="checkbox" data-action="select-site" ${S.selected.has(site.id) ? 'checked' : ''} aria-label="Select ${h(site.name)}">
-      <div class="name">${chevron}<div class="title"><b>${h(site.name)}${S.newSites.has(site.id) ? ' <span class="tag accent">New</span>' : ''}${asanaTodo().has(site.id) ? ' <span class="tag warn" title="Its “WordPress update” task is open in Asana">Asana to-do</span>' : ''}</b>${addrBlock(site)}</div></div>
+      <div class="name">${chevron}<div class="title"><b>${h(site.name)}${S.newSites.has(site.id) ? ' <span class="tag accent">New</span>' : ''}${asanaTodo().has(site.id) ? ' <span class="tag warn" title="Its “WordPress update” task is open in Asana">Asana to-do</span>' : ''}${site.careful ? ` <span class="tag bad" title="${h(site.careful.note || 'Handle with care')}">Careful</span>` : ''}${wooTag(site)}</b>${addrBlock(site)}</div></div>
       <div class="cells">
         <div class="cell"><small>WordPress</small>${wp}</div>
         <div class="cell"><small>PHP</small>${php ? `<span class="pill ${php.cls}" title="${h(php.title)}">${h(ov.php_version)}</span>` : '<span class="faint">-</span>'}</div>
@@ -468,6 +485,11 @@ function manageCard(site) {
         <dt>Connection</dt><dd>${h(site.mode)}</dd>
         ${ov ? `<dt>Connector</dt><dd>${h(ov.plugin_version)}</dd><dt>File writes</dt><dd>${h(ov.filesystem.method)}${ov.filesystem.file_mods ? '' : ' (blocked)'}</dd>` : ''}
         <dt>Found in</dt><dd>${h(site.source)}</dd></dl>
+      <div class="careful-box" style="margin-top:10px">
+        <label class="check"><input type="checkbox" data-careful ${site.careful ? 'checked' : ''}> <span><b>Handle with care</b> - leave out of "Update everything" across sites unless ticked, and show this note before updating</span></label>
+        <div class="bar" style="margin:6px 0 0"><input type="text" data-careful-note value="${h(site.careful?.note || '')}" placeholder="Why, e.g. custom WooCommerce templates - check the shop and checkout first" style="flex:1"><button class="btn sm" data-action="save-careful">Save</button></div>
+        ${ov?.woocommerce?.overrides ? `<p class="hint" style="margin:6px 0 0">The theme overrides ${ov.woocommerce.overrides} WooCommerce template${ov.woocommerce.overrides === 1 ? '' : 's'}${ov.woocommerce.outdated ? ` - <b>${ov.woocommerce.outdated} outdated</b> (${h(ov.woocommerce.files.filter(f => f.outdated).slice(0, 4).map(f => f.file.split('/').slice(-2).join('/')).join(', '))}${ov.woocommerce.outdated > 4 ? ', …' : ''})` : ''}. WooCommerce and theme updates are checked on the shop, cart and checkout and rolled back if they break${site.careful ? '' : ' - consider marking this site Handle with care'}.</p>` : ''}
+      </div>
       <div class="bar" style="margin:10px 0 0">
         <button class="btn sm" data-action="site-url">Edit address</button>
         <button class="btn sm ghost" data-action="site-check">Re-check</button>
@@ -665,6 +687,13 @@ const ICON = {
   download: '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M8 2.5v7.5M4.8 7.2 8 10.4l3.2-3.2M2.5 11.5V13a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-1.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   wp: '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><circle cx="8" cy="8" r="6.75" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M3.9 5.6 6 11.2 8 6.6l2 4.6 2.1-5.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>',
 };
+
+/** A tag when the theme overrides WooCommerce templates - a WooCommerce or theme update can break the shop. */
+function wooTag(site) {
+  const w = site.overview?.woocommerce;
+  if (!w?.overrides) return '';
+  return ` <span class="tag ${w.outdated ? 'warn' : ''}" title="${h(`The theme overrides ${w.overrides} WooCommerce template${w.overrides === 1 ? '' : 's'}${w.outdated ? `, ${w.outdated} outdated` : ''}. After WooCommerce or theme updates the shop, cart and checkout are loaded too, and the update is rolled back if they break.`)}">Woo templates${w.outdated ? ` (${w.outdated} outdated)` : ''}</span>`;
+}
 
 const PEN = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M11.1 1.9a1.5 1.5 0 0 1 2.1 0l.9.9a1.5 1.5 0 0 1 0 2.1L5.6 13.4l-3.4.8.8-3.4z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M9.8 3.2l3 3" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>';
 
@@ -907,9 +936,12 @@ function asanaTab(site) {
   if (!S.asana.connected) return `<div class="notice">Connect Asana in <a href="#" data-action="settings">Settings</a> to see this site's task, post results to it and read its WordPress login.</div>`;
   if (!S.tasks) { loadTasks(); return '<p class="muted">Loading your tasks…</p>'; }
   const link = site.asana;
-  const mine = (S.tasks.tasks || []).filter(t => t.siteId === site.id);
-  const others = (S.tasks.tasks || []).filter(t => t.siteId !== site.id);
-  const opt = t => `<option value="${h(t.gid)}" ${link?.taskGid === t.gid ? 'selected' : ''}>${h(t.project?.name ? `${t.project.name} › ` : '')}${h(t.name)}</option>`;
+  const has = t => (t.siteIds || [t.siteId]).includes(site.id);
+  const mine = (S.tasks.tasks || []).filter(has);
+  const others = (S.tasks.tasks || []).filter(t => !has(t));
+  const alsoFor = t => (t.siteIds || []).filter(id => id !== site.id).map(id => S.sites.find(x => x.id === id)?.name || id);
+  const opt = t => `<option value="${h(t.gid)}" ${link?.taskGid === t.gid ? 'selected' : ''}>${h(t.project?.name ? `${t.project.name} › ` : '')}${h(t.name)}${alsoFor(t).length ? ` (also: ${h(alsoFor(t).join(', '))})` : ''}</option>`;
+  const sharedWith = link ? alsoFor((S.tasks.tasks || []).find(t => t.gid === link.taskGid) || {}) : [];
   return `<div class="grid2">
     <div class="card"><h4>Asana task</h4>
       <label class="field">Results of each run are posted to
@@ -920,7 +952,8 @@ function asanaTab(site) {
           ${link && !(S.tasks.tasks || []).some(t => t.gid === link.taskGid) ? `<option value="${h(link.taskGid)}" selected>${h(link.taskName)} (not in my tasks)</option>` : ''}
         </select>
       </label>
-      ${link ? `<p class="hint" style="margin-top:8px">${link.auto ? 'Matched by project name. ' : ''}<a href="${h(link.url)}" target="_blank" rel="noopener">Open in Asana ↗</a>${S.settings.asana.postResults ? '' : ' · posting results is off in Settings'}</p>` : '<p class="hint" style="margin-top:8px">No task matched this site by project name - pick one.</p>'}
+      ${link ? `<p class="hint" style="margin-top:8px">${link.auto ? 'Matched by project name. ' : ''}<a href="${h(link.url)}" target="_blank" rel="noopener">Open in Asana ↗</a>${S.settings.asana.postResults ? '' : ' · posting results is off in Settings'}</p>` : '<p class="hint" style="margin-top:8px">No task matched this site by project name - pick one. A task can be shared: pick the same task on each site it covers.</p>'}
+      ${sharedWith.length ? `<p class="hint">Shared with ${h(sharedWith.join(', '))} - each site's comment starts with its name, and each site counts as done only once its own updates are.</p>` : ''}
     </div>
     <div class="card"><h4>Last WordPress update</h4>${taskStatusCard(site)}</div>
     <div class="card" style="grid-column:1/-1"><h4>Comment for Asana</h4>${commentCard(site)}</div>
@@ -981,12 +1014,24 @@ async function loadDraft(id) {
   renderSite(id);
 }
 
+const thisMonth = at => { const d = new Date(at), n = new Date(); return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth(); };
+
 /** "Updates done" commented in the current calendar month. */
-const doneThisMonth = t => {
-  if (!t.lastDone?.at) return false;
-  const d = new Date(t.lastDone.at), n = new Date();
-  return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth();
-};
+const doneThisMonth = t => !!t.lastDone?.at && thisMonth(t.lastDone.at);
+
+/**
+ * Whether one site's updates are done this month. On a task several sites
+ * share, the task's latest "done" comment may be about another site, so it
+ * counts only when it names this site - or this site posted its own.
+ */
+function siteDoneThisMonth(siteId, t) {
+  const ids = t.siteIds || [t.siteId];
+  if (ids.length < 2) return doneThisMonth(t);
+  const site = S.sites.find(s => s.id === siteId);
+  if (!site) return false;
+  if (site.asanaDone?.taskGid === t.gid && thisMonth(site.asanaDone.at)) return true;
+  return doneThisMonth(t) && (t.lastDone.text || '').toLowerCase().includes(site.name.toLowerCase());
+}
 
 function renderTasks() {
   const el = $('#view-tasks');
@@ -1028,7 +1073,7 @@ function renderTasks() {
         <tbody>${list.map(t => `<tr data-gid="${h(t.gid)}">
           <td><a href="${h(t.url)}" target="_blank" rel="noopener">${h(t.name)}</a>${doneThisMonth(t) ? ` <span class="tag accent" title="${h(`${t.lastDone.text}${t.lastDone.by ? ` - ${t.lastDone.by}` : ''}`)}">✓ updated ${h(new Date(t.lastDone.at).toLocaleDateString('en-AU', { day: 'numeric', month: 'short' }))}</span>` : ''}</td>
           <td>${agTag(t.agency)}${h(t.project?.name || '')}</td>
-          <td>${t.siteId ? `<a href="#" data-action="goto-site" data-site="${h(t.siteId)}">${h(t.siteName)}</a>`
+          <td>${t.siteId ? (t.siteIds || [t.siteId]).map(id => `<a href="#" data-action="goto-site" data-site="${h(id)}">${h(S.sites.find(x => x.id === id)?.name || id)}</a>`).join(' + ')
             : `<span class="tag" title="Log in works on any site. Updates, form tests and the security check need Claude Connector installed and connected: install it from wp-admin, then click Connect on this Mac on its settings page.">Not connected</span>${t.siteUrl ? ` <a href="${h(t.siteUrl)}" target="_blank" rel="noopener" class="faint">${h(t.siteUrl.replace(/^https?:\/\//, '').replace(/\/wp-(admin|login\.php).*$/, ''))}</a>` : ''}`}</td>
           <td class="hide-sm">${t.due ? `<span class="${t.due < new Date().toISOString().slice(0, 10) ? 'ver-arrow' : ''}">${h(new Date(t.due + 'T00:00').toLocaleDateString())}</span>` : ''}</td>
           <td class="hide-sm">${h(minutes(t.minutes))}</td>
@@ -1044,8 +1089,17 @@ function asanaTodo() { return new Set(wpUpdateTasks().map(t => t.siteId)); }
 
 /** Open "WordPress update(s)" tasks whose site is on the dashboard - one per site. */
 function wpUpdateTasks() {
-  const seen = new Set();
-  return (S.tasks?.tasks || []).filter(t => /^\s*wordpress\s+updates?\s*$/i.test(t.name) && t.siteId && !doneThisMonth(t) && !seen.has(t.siteId) && seen.add(t.siteId));
+  const seen = new Set(), out = [];
+  for (const t of S.tasks?.tasks || []) {
+    if (!/^\s*wordpress\s+updates?\s*$/i.test(t.name)) continue;
+    // One entry per site - a task shared by several sites gives one for each still to do.
+    for (const id of t.siteIds || (t.siteId ? [t.siteId] : [])) {
+      if (seen.has(id) || siteDoneThisMonth(id, t)) continue;
+      seen.add(id);
+      out.push({ ...t, siteId: id });
+    }
+  }
+  return out;
 }
 
 function renderAsanaSettings() {
@@ -1444,7 +1498,7 @@ document.addEventListener('click', async (ev) => {
       // Results go to these tasks: link each site to its WordPress update task first.
       for (const t of list) {
         const site = S.sites.find(s => s.id === t.siteId);
-        if (site?.asana?.taskGid !== t.gid) await api('POST', '/api/asana/link', { site: t.siteId, task: { gid: t.gid, name: t.name, url: t.url, project: t.project } }).catch(() => {});
+        if (site?.asana?.taskGid !== t.gid) await api('POST', '/api/asana/link', { site: t.siteId, task: { gid: t.gid, name: t.name, url: t.url, project: t.project, agency: t.agency } }).catch(() => {});
       }
       return openReview(list.map(t => t.siteId), `WordPress update tasks - ${list.length} site${list.length === 1 ? '' : 's'}`);
     }
@@ -1610,8 +1664,10 @@ document.addEventListener('click', async (ev) => {
       for (const b of document.querySelectorAll('#review-body input[data-rv]')) {
         if (!b.checked && !b.disabled) (exclude[b.dataset.rv] ||= []).push(b.dataset.key);
       }
+      const ids = reviewSites();
       $('#dlg-review').close();
-      return startJob({ type: 'maintain', sites: reviewIds, exclude, formTest: f.elements.formTest.value, allowMajorCore: f.elements.allowMajorCore.checked });
+      if (!ids.length) return;
+      return startJob({ type: 'maintain', sites: ids, exclude, formTest: f.elements.formTest.value, allowMajorCore: f.elements.allowMajorCore.checked });
     }
     case 'plugin-hold': case 'theme-hold': {
       const key = a === 'plugin-hold' ? `plugin:${t.closest('[data-file]').dataset.file}` : `theme:${t.closest('[data-theme]').dataset.theme}`;
@@ -1716,6 +1772,15 @@ document.addEventListener('click', async (ev) => {
         toast(`${r.trustedAdmins.length} trusted email${r.trustedAdmins.length === 1 ? '' : 's'} saved${r.rejected.length ? ` - not an email, left out: ${r.rejected.join(', ')}` : ''}. Run the security check again to update the results.`);
       } catch (e) { toast(e.message); }
       t.disabled = false;
+      return;
+    }
+    case 'save-careful': {
+      const box = t.closest('.careful-box');
+      const on = $('[data-careful]', box).checked;
+      try {
+        await api('POST', '/api/sites/meta', { sites: [site.id], careful: on ? { note: $('[data-careful-note]', box).value } : null });
+        toast(on ? 'Marked Handle with care' : 'No longer marked Handle with care');
+      } catch (e) { toast(e.message); }
       return;
     }
     case 'trust-admin':
@@ -1935,12 +2000,14 @@ document.addEventListener('change', async (ev) => {
   const site = siteOf(t);
   if (a === 'agency-filter') { S.agency = t.value; if (S.view === 'log') renderLog(); else { renderToolbar(); renderSites(); } }
   if (t.dataset.rv) updateReviewCount();
+  if (t.dataset.rvInclude) renderReview();
   if (t.form?.id === 'form-review' && (t.name === 'allowMajorCore' || t.name === 'formTest')) renderReview();
   if (a === 'show-done') { S.showDone = t.checked; renderTasks(); return; }
   if (a === 'asana-link') {
     const task = (S.tasks?.tasks || []).find(x => x.gid === t.value);
-    await api('POST', '/api/asana/link', { site: site.id, task: task ? { gid: task.gid, name: task.name, url: task.url, project: task.project } : null }).catch(e => toast(e.message));
+    await api('POST', '/api/asana/link', { site: site.id, task: task ? { gid: task.gid, name: task.name, url: task.url, project: task.project, agency: task.agency } : null }).catch(e => toast(e.message));
     delete S.taskStatus[site.id];
+    loadTasks(); // the task now lists this site too
   }
   if (a === 'log-days') { S.logDays = Number(t.value); S.log = null; renderLog(); }
   if (a === 'site-agency') { await api('POST', '/api/sites/meta', { sites: [site.id], agencyId: t.value }).catch(e => toast(e.message)); if (agencies().length > 1) { await load(); } }

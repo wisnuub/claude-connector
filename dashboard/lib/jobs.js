@@ -219,7 +219,7 @@ async function updateStep(ctx, type, item, name, extra = {}) {
     const done = { result: 'updated', from: r.from ?? meta.from, to: r.to ?? meta.to };
     if (h === 'unverified') st.set('warning', `${label(r)}${ver} - updated, but the site could not be checked from the inside`, r.health.message, done);
     else if (h === 'fatal') st.set('failed', `${label(r)}${ver} - updated, and the site now shows a fatal error`, r.health.message, { ...done, result: 'failed' });
-    else st.set('ok', `${label(r)}${ver}`, null, done);
+    else st.set('ok', `${label(r)}${ver}${r.shop_checked ? ` · shop, cart and checkout checked (${r.shop_checked} pages)` : ''}`, null, done);
     return r;
   } catch (e) {
     const i = errInfo(e);

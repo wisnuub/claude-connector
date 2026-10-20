@@ -732,6 +732,19 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 
 ## Changelog
 
+### 1.8.13 — Safer updates for WooCommerce stores; Handle with care; shared Asana tasks
+
+**Added**
+
+- **Updates check the store too.** After updating WooCommerce, a WooCommerce add-on, or the active theme on a WooCommerce site, the connector also loads the shop, cart, checkout, My Account and a product - not just the homepage and wp-admin - and rolls the update back if any of them fails. A theme that overrides WooCommerce's templates (custom cart or checkout pages) can break there while the homepage still works.
+- **WooCommerce template report.** The site overview lists the theme's copies of WooCommerce templates and which are outdated, with WooCommerce's own comparison (as in WooCommerce → Status). The dashboard tags such a site *Woo templates (n outdated)* and marks its WooCommerce and theme updates.
+- **Handle with care** (dashboard, a site's WordPress & server tab): a flag with a note - for example *custom WooCommerce templates, check the shop first*. Such a site is left out of *Update everything* across several sites unless ticked in the review, and the note is shown when it is updated on its own.
+- **Form test queue window** - the queue/schedule chip opens a list of the queued sites with Run now / Remove, Run all now, Clear queue and the schedule's state.
+- **One Asana task for several sites**: link the same task on each site it covers. Each site's comment starts with its name, each site gets its own *Update requested* / *Update done* in its history, and each site counts as done only once its own updates are.
+- **Several trusted admin emails per site at once** in the Security tab.
+
+**Verified** on a local WordPress with WooCommerce 9.8.5 on the Storefront theme, launched, whose theme carried an outdated `cart/cart-empty.php` that fails on WooCommerce 10+: updating to 11.2.1 left the homepage and wp-admin working but broke the cart - the connector caught it on the cart page and put 9.8.5 back; the site was healthy afterwards. (Stores in WooCommerce's *Coming soon* mode show visitors a placeholder, so their pages cannot be checked this way.)
+
 ### 1.8.12 — Restore .htaccess, trusted admin emails, delete themes; Asana per agency
 
 **Added**

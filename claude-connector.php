@@ -3,7 +3,7 @@
  * Plugin Name:  Claude Connector
  * Plugin URI:   https://github.com/wisnuub/claude-connector
  * Description:  Secure REST API bridge for Claude AI - ACF sync, cache purge, file management, database queries, post CRUD, plugin/theme control, maintenance updates with rollback, and more.
- * Version:      1.8.12
+ * Version:      1.8.13
  * Author:       Wisnuub
  * Author URI:   https://wisnuub.github.io
  * License:      GPL-2.0-or-later
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'CLAUDE_CONNECTOR_VERSION', '1.8.12' );
+define( 'CLAUDE_CONNECTOR_VERSION', '1.8.13' );
 define( 'CLAUDE_CONNECTOR_NS',      'claude/v1' );
 define( 'CLAUDE_CONNECTOR_GH_REPO', 'wisnuub/claude-connector' );
 
@@ -3087,6 +3087,7 @@ function claude_maint_overview( $req ) {
         // visitor "Briefly unavailable for scheduled maintenance" indefinitely.
         'stuck_maintenance' => file_exists( $maintenance_file ) && filemtime( $maintenance_file ) < time() - 10 * MINUTE_IN_SECONDS,
         'last_checked'   => isset( $plugin_updates->last_checked ) ? gmdate( 'c', $plugin_updates->last_checked ) : null,
+        'woocommerce'    => claude_wc_templates(),
     ) );
 }
 
@@ -3232,9 +3233,9 @@ function claude_maint_run_upgrader( callable $fn, $skin ) {
  *
  * @return array|WP_Error  Response fields on success, WP_Error after a rollback.
  */
-function claude_maint_verify( $backup, $label, $from, $to, $check ) {
+function claude_maint_verify( $backup, $label, $from, $to, $check, $extra_urls = array() ) {
     claude_maint_opcache( $backup['src'] );
-    $health = $check ? claude_loopback_health() : array( 'status' => 'skipped', 'message' => 'Not active, so it cannot affect the site.' );
+    $health = $check ? claude_loopback_health( $extra_urls ) : array( 'status' => 'skipped', 'message' => 'Not active, so it cannot affect the site.' );
     if ( $health['status'] !== 'fatal' ) {
         claude_maint_backup_drop( $backup );
         return array( 'health' => $health );
@@ -3251,6 +3252,72 @@ function claude_maint_verify( $backup, $label, $from, $to, $check ) {
         'update_rolled_back',
         "{$label} {$to} broke the site, so {$from} was put back. Error: {$health['message']}",
         array( 'status' => 422, 'health' => $health, 'after_rollback' => claude_loopback_health(), 'from' => $from, 'to' => $to )
+    );
+}
+
+// ── WooCommerce stores ───────────────────────────────────────────────────────
+
+/**
+ * The store's own pages - shop, cart, checkout, account and one product -
+ * loaded after updates that can break a WooCommerce store (WooCommerce, its
+ * add-ons, the active theme), so a fatal there is rolled back like one on the
+ * homepage. Empty when WooCommerce is not active.
+ */
+function claude_wc_check_urls() {
+    if ( ! function_exists( 'wc_get_page_id' ) ) return array();
+    $urls = array();
+    foreach ( array( 'shop', 'cart', 'checkout', 'myaccount' ) as $page ) {
+        $id = wc_get_page_id( $page );
+        if ( $id > 0 && get_post_status( $id ) === 'publish' ) $urls[] = get_permalink( $id );
+    }
+    $product = get_posts( array( 'post_type' => 'product', 'post_status' => 'publish', 'numberposts' => 1, 'fields' => 'ids', 'orderby' => 'modified' ) );
+    if ( $product ) $urls[] = get_permalink( $product[0] );
+    return array_values( array_unique( array_filter( $urls ) ) );
+}
+
+/** WooCommerce itself, or a plugin built on it (an add-on or extension). */
+function claude_wc_related_plugin( $file ) {
+    if ( ! class_exists( 'WooCommerce' ) ) return false;
+    if ( preg_match( '/woo|wc[-_]/i', dirname( $file ) ) ) return true;
+    $h = get_file_data( WP_PLUGIN_DIR . '/' . $file, array( 'wc' => 'WC requires at least', 'needs' => 'Requires Plugins' ) );
+    return $h['wc'] !== '' || stripos( (string) $h['needs'], 'woocommerce' ) !== false;
+}
+
+/**
+ * The theme's copies of WooCommerce templates, and which are older than the
+ * installed WooCommerce's - the same comparison as WooCommerce > Status. A
+ * WooCommerce update can make more of them outdated, and an outdated
+ * template is a common cause of a broken shop or checkout.
+ */
+function claude_wc_templates() {
+    if ( ! class_exists( 'WooCommerce' ) || ! defined( 'WC_ABSPATH' ) ) return null;
+    if ( ! class_exists( 'WC_Admin_Status' ) ) include_once WC_ABSPATH . 'includes/admin/class-wc-admin-status.php';
+    if ( ! class_exists( 'WC_Admin_Status' ) ) return null;
+    $core  = WC()->plugin_path() . '/templates/';
+    $dirs  = array_unique( array( get_stylesheet_directory(), get_template_directory() ) );
+    $files = array();
+    foreach ( WC_Admin_Status::scan_template_files( $core ) as $file ) {
+        foreach ( $dirs as $dir ) {
+            foreach ( array( $dir . '/' . WC()->template_path() . $file, $dir . '/' . $file ) as $theme_file ) {
+                if ( ! file_exists( $theme_file ) ) continue;
+                $core_v  = WC_Admin_Status::get_file_version( $core . $file );
+                $theme_v = WC_Admin_Status::get_file_version( $theme_file );
+                $files[] = array(
+                    'file'     => str_replace( wp_normalize_path( get_theme_root() ) . '/', '', wp_normalize_path( $theme_file ) ),
+                    'version'  => $theme_v ?: null,
+                    'core'     => $core_v ?: null,
+                    'outdated' => $core_v && ( ! $theme_v || version_compare( $theme_v, $core_v, '<' ) ),
+                );
+                continue 3;
+            }
+        }
+    }
+    $outdated = array_values( array_filter( $files, function ( $f ) { return $f['outdated']; } ) );
+    return array(
+        'version'   => WC()->version,
+        'overrides' => count( $files ),
+        'outdated'  => count( $outdated ),
+        'files'     => array_slice( array_merge( $outdated, array_filter( $files, function ( $f ) { return ! $f['outdated']; } ) ), 0, 100 ),
     );
 }
 
@@ -3304,9 +3371,10 @@ function claude_maint_update_plugin( $file ) {
         update_option( 'active_plugins', array_values( array_unique( $active ) ) );
     }
 
-    $verified = claude_maint_verify( $backup, $name, $from, $to, $was_active );
+    $shop     = $was_active && claude_wc_related_plugin( $file ) ? claude_wc_check_urls() : array();
+    $verified = claude_maint_verify( $backup, $name, $from, $to, $was_active, $shop );
     if ( is_wp_error( $verified ) ) return $verified;
-    return array_merge( array( 'status' => 'updated', 'item' => $file, 'name' => $name, 'from' => $from, 'to' => $to, 'messages' => $run['messages'] ), $verified );
+    return array_merge( array( 'status' => 'updated', 'item' => $file, 'name' => $name, 'from' => $from, 'to' => $to, 'messages' => $run['messages'], 'shop_checked' => count( $shop ) ), $verified );
 }
 
 function claude_maint_update_theme( $stylesheet ) {
@@ -3343,9 +3411,10 @@ function claude_maint_update_theme( $stylesheet ) {
     wp_clean_themes_cache();
     $to       = wp_get_theme( $stylesheet )->get( 'Version' ) ?: $offer['new_version'];
     $in_use   = $stylesheet === get_stylesheet() || $stylesheet === get_template();
-    $verified = claude_maint_verify( $backup, $name, $from, $to, $in_use );
+    $shop     = $in_use ? claude_wc_check_urls() : array(); // the theme may override WooCommerce's templates
+    $verified = claude_maint_verify( $backup, $name, $from, $to, $in_use, $shop );
     if ( is_wp_error( $verified ) ) return $verified;
-    return array_merge( array( 'status' => 'updated', 'item' => $stylesheet, 'name' => $name, 'from' => $from, 'to' => $to, 'messages' => $run['messages'] ), $verified );
+    return array_merge( array( 'status' => 'updated', 'item' => $stylesheet, 'name' => $name, 'from' => $from, 'to' => $to, 'messages' => $run['messages'], 'shop_checked' => count( $shop ) ), $verified );
 }
 
 function claude_maint_update_core( $allow_major ) {
@@ -3508,7 +3577,7 @@ function claude_maint_install_plugin( $req ) {
     $result = array( 'status' => 'installed', 'file' => $file, 'name' => $data['Name'], 'version' => $data['Version'], 'messages' => $run['messages'] );
 
     if ( $backup ) {
-        $verified = claude_maint_verify( $backup, $data['Name'], $from, $data['Version'], $was_active );
+        $verified = claude_maint_verify( $backup, $data['Name'], $from, $data['Version'], $was_active, $was_active && claude_wc_related_plugin( $file ) ? claude_wc_check_urls() : array() );
         if ( is_wp_error( $verified ) ) return $verified;
         $result = array_merge( $result, array( 'status' => 'replaced', 'from' => $from ), $verified );
     }
@@ -5199,7 +5268,7 @@ function claude_backup_file( $abs_path ) {
  *
  * @return array { status: ok|fatal|unverified, message?, url? }
  */
-function claude_loopback_health() {
+function claude_loopback_health( $extra_urls = array() ) {
     $key   = md5( wp_generate_password( 20, false ) );
     $nonce = wp_generate_password( 20, false );
     set_transient( 'scrape_key_' . $key, $nonce, 60 );
@@ -5223,7 +5292,7 @@ function claude_loopback_health() {
     $end    = "###### wp_scraping_result_end:{$key} ######";
     $result = array( 'status' => 'ok' );
 
-    foreach ( array( admin_url(), home_url( '/' ) ) as $url ) {
+    foreach ( array_merge( array( admin_url(), home_url( '/' ) ), (array) $extra_urls ) as $url ) {
         $r = wp_remote_get( add_query_arg( array( 'wp_scrape_key' => $key, 'wp_scrape_nonce' => $nonce ), $url ), $args );
         if ( is_wp_error( $r ) ) {
             $result = array( 'status' => 'unverified', 'url' => $url, 'message' => 'Could not load the site to check it: ' . $r->get_error_message() );

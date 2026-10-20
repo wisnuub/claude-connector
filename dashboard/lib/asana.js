@@ -212,18 +212,26 @@ async function trackRequests(tasks, fetched, tok) {
   const open = new Set();
   let changed = false;
   for (const t of tasks) {
-    if (!WP_UPDATE_TASK_RE.test(t.name) || !t.siteId) continue;
+    const ids = t.siteIds || (t.siteId ? [t.siteId] : []);
+    if (!WP_UPDATE_TASK_RE.test(t.name) || !ids.length) continue;
     open.add(t.gid);
-    if (seen[t.gid]) continue;
-    seen[t.gid] = { site: t.siteId, agency: t.agency, url: t.url, requestedAt: t.created || new Date().toISOString() };
-    changed = true;
-    asanaHistory(t.siteId, 'Update requested', seen[t.gid].requestedAt, `${t.project?.name ? `${t.project.name} › ` : ''}${t.name} - in Asana`, t.url, `asana:${t.gid}:requested`);
+    const rec = seen[t.gid] ||= { sites: [], agency: t.agency, url: t.url, requestedAt: t.created || new Date().toISOString() };
+    rec.sites ||= rec.site ? [rec.site] : []; // records from before tasks could be for several sites
+    delete rec.site;
+    // Every site on the task gets its "requested" - also one linked to it later.
+    for (const id of ids.filter(id => !rec.sites.includes(id))) {
+      rec.sites.push(id);
+      changed = true;
+      asanaHistory(id, 'Update requested', rec.requestedAt, `${t.project?.name ? `${t.project.name} › ` : ''}${t.name} - in Asana`, t.url, `asana:${t.gid}:${id}:requested`);
+    }
   }
   for (const [gid, rec] of Object.entries(seen)) {
     if (open.has(gid) || !fetched.has(rec.agency)) continue;
     try {
       const t = (await api('GET', `/tasks/${gid}`, { params: { opt_fields: 'completed,completed_at,completed_by.name' }, token: tok[rec.agency] })).data;
-      if (t.completed) asanaHistory(rec.site, 'Update done', t.completed_at || new Date().toISOString(), `ticked complete in Asana${t.completed_by?.name ? ` by ${t.completed_by.name}` : ''}`, rec.url, `asana:${gid}:done`);
+      if (t.completed) {
+        for (const id of rec.sites || [rec.site]) asanaHistory(id, 'Update done', t.completed_at || new Date().toISOString(), `ticked complete in Asana${t.completed_by?.name ? ` by ${t.completed_by.name}` : ''}`, rec.url, `asana:${gid}:${id}:done`);
+      }
     } catch (e) {
       if (e.status !== 403 && e.status !== 404) continue; // try again next time
     }
@@ -250,19 +258,24 @@ const hostOf = u => { try { return new URL(u).host.replace(/^www\./, '').toLower
 function withSites(tasks, errors = []) {
   const sites = listSites();
   const urls = getMeta().asanaSiteUrls || {};
+  // A task can be for several sites (each linked to it); siteId is the first, siteIds all of them.
+  const describe = (t, ids, known) => {
+    const list = ids.map(id => sites.find(s => s.id === id)).filter(Boolean);
+    return { ...t, siteId: list[0]?.id || null, siteIds: list.map(s => s.id), siteName: list.map(s => s.name).join(' + ') || null, siteUrl: list[0]?.url || known };
+  };
   const out = tasks.map(t => {
-    const linked = sites.find(s => siteState(s.id).asana?.taskGid === t.gid);
+    const linked = sites.filter(s => siteState(s.id).asana?.taskGid === t.gid);
     const known = t.project ? urls[t.project.gid] || null : null;
     const byHost = known ? sites.find(s => hostOf(s.url) === hostOf(known)) : null;
     // Match within the task's agency first, then across all sites.
     const own = sites.filter(s => agencyFor(s.id).id === t.agency);
-    const site = linked || byHost || (t.project ? matchSite(t.project.name, own) || matchSite(t.project.name, sites) : null);
-    return { ...t, siteId: site?.id || null, siteName: site?.name || null, linked: !!linked, siteUrl: site?.url || known };
+    const site = linked[0] || byHost || (t.project ? matchSite(t.project.name, own) || matchSite(t.project.name, sites) : null);
+    return { ...describe(t, [...new Set([...linked.map(s => s.id), ...(site ? [site.id] : [])])], known), linked: linked.length > 0 };
   });
   for (const s of sites) {
     if (siteState(s.id).asana?.taskGid) continue;
     // Prefer the "wordpress update" task when a project has several.
-    const mine = out.filter(t => t.siteId === s.id);
+    const mine = out.filter(t => t.siteIds.includes(s.id));
     const pick = mine.find(t => /wordpress|update/i.test(t.name)) || (mine.length === 1 ? mine[0] : null);
     if (pick) patchSiteState(s.id, { asana: { taskGid: pick.gid, taskName: pick.name, project: pick.project?.name || null, url: pick.url, agency: pick.agency || null, auto: true } });
   }
@@ -553,7 +566,15 @@ export async function postComment(siteId, { text, html }) {
   const link = siteState(siteId).asana;
   if (!link?.taskGid) throw new AsanaError(400, 'This site has no Asana task linked - pick one in its Asana & login tab.');
   const token = await tokenForTask(link.taskGid, link.agency);
+  // A task shared by several sites: say which site this comment is about.
+  const all = listSites({ includeHidden: true });
+  if (all.some(s => s.id !== siteId && siteState(s.id).asana?.taskGid === link.taskGid)) {
+    const name = all.find(s => s.id === siteId)?.name || siteId;
+    if (text) text = `${name}: ${text}`;
+    if (html) html = html.replace(/^<body>/, `<body><strong>${x(name)}</strong>\n`);
+  }
   await api('POST', `/tasks/${link.taskGid}/stories`, { body: html ? { html_text: html } : { text }, token });
+  if (html || DONE_RE.test(text || '')) patchSiteState(siteId, { asanaDone: { at: new Date().toISOString(), taskGid: link.taskGid } });
   // Count it as done straight away, without waiting for the next refresh.
   const cached = cache.tasks.find(t => t.gid === link.taskGid);
   if (cached && (html || DONE_RE.test(text || ''))) cached.lastDone = { at: new Date().toISOString(), by: 'dashboard', text: (text || 'Detailed log').split('\n')[0] };

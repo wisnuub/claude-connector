@@ -66,6 +66,8 @@ function publicSite(s) {
     diviForms: st.diviForms || null,
     formTestQueued: st.formTestQueued || null,
     asanaWaiting: !!st.asanaPending, // a run's Asana comment is waiting for this site's form test
+    asanaDone: st.asanaDone || null, // when this site last commented "updates done" on its task
+    careful: st.careful || null,
     held: st.held || [],
     asana: st.asana || null,
     trustedAdmins: st.trustedAdmins || [],
@@ -301,6 +303,9 @@ async function api(req, res, url) {
       const patch = {};
       if ('agencyId' in body) patch.agencyId = body.agencyId || null;
       if ('formUrl' in body) patch.formUrl = body.formUrl || null;
+      // Handle with care: { careful: { note } } or { careful: null }. Such a site is left out of
+      // multi-site "Update everything" unless it is ticked in the review.
+      if ('careful' in body) patch.careful = body.careful ? { note: String(body.careful.note || '').trim().slice(0, 300), at: new Date().toISOString() } : null;
       store.patchSiteState(id, patch);
       broadcast('site', publicSite(store.getSite(id)));
     }
