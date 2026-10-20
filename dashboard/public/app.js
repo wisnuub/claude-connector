@@ -523,6 +523,20 @@ function formsTab(site) {
 
 const SEV_CLS = { high: 'bad', medium: 'warn', low: '', info: '' };
 
+/** This site's own trusted administrator emails (several at once), next to its agency's list. */
+function trustedCard(site) {
+  const ag = agencyOf(site);
+  const mine = site.trustedAdmins || [];
+  const agList = ag?.trustedAdmins || [];
+  return `<details class="card" style="margin-top:8px" ${mine.length || agList.length ? '' : 'open'}>
+    <summary style="cursor:pointer"><b>Trusted admin emails</b> <span class="muted">· ${mine.length} for this site${agList.length ? ` + ${agList.length} for every ${h(ag.label)} site` : ''}</span></summary>
+    <p class="hint" style="margin:8px 0 6px">Administrators with these emails are never flagged, whatever their username; every other administrator is flagged. One per line - the client's staff, for example. <code>@domain.com</code> trusts a whole domain but still flags accounts created in the last 30 days.</p>
+    <textarea data-trusted-site rows="${Math.max(3, mine.length + 1)}" placeholder="owner@client.com&#10;office@client.com" style="width:100%">${h(mine.join('\n'))}</textarea>
+    <div class="bar" style="margin:6px 0 0"><button class="btn sm primary" data-action="save-trusted">Save</button>
+      ${agList.length ? `<span class="muted" style="font-size:12.5px">Also trusted for ${h(ag.label)}: ${h(agList.join(', '))} - <a href="#" data-action="settings">change in Settings</a></span>` : `<span class="muted" style="font-size:12.5px">Your own staff's emails go on the agency, in <a href="#" data-action="settings">Settings › Agencies</a>.</span>`}</div>
+  </details>`;
+}
+
 /** Trust / untrust an administrator's email for this site (agency-wide ones are set in Settings). */
 function trustButton(site, email) {
   const agencyList = agencyOf(site)?.trustedAdmins || [];
@@ -541,7 +555,7 @@ function securityTab(site) {
       <span class="grow"></span>
       ${sc ? `<span class="muted" style="font-size:12.5px">Checked ${h(ago(sc.at))} · ${h(sc.stats?.php_files_pattern_scanned ?? '?')} files scanned · ${h(sc.stats?.wporg_plugins_verified ?? 0)} plugins verified against wordpress.org</span>` : ''}
     </div>`;
-  if (!sc) return `${head}<p class="hint">Read-only: compares WordPress core and wordpress.org plugins with their published checksums, looks for PHP in uploads, known malware patterns, active plugins whose files are missing, new administrators, .htaccess redirects and scripts injected into posts and settings. Nothing on the site is changed.</p>`;
+  if (!sc) return `${head}${trustedCard(site)}<p class="hint">Read-only: compares WordPress core and wordpress.org plugins with their published checksums, looks for PHP in uploads, known malware patterns, active plugins whose files are missing, new administrators, .htaccess redirects and scripts injected into posts and settings. Nothing on the site is changed.</p>`;
   const s = sc.summary || {};
   const findings = (sc.findings || []).map(f => `
     <details class="card sec ${SEV_CLS[f.severity] || ''}" ${f.severity === 'high' ? 'open' : ''} style="margin-top:8px">
@@ -550,7 +564,7 @@ function securityTab(site) {
       <ul class="sec-items">${(f.items || []).map(i => `<li><code>${h(i.path)}</code>${i.detail ? ` <span class="muted">${h(i.detail)}</span>` : ''}${f.category === 'users' && i.email ? trustButton(site, i.email) : ''}${(i.hits || []).map(x => `<div class="sec-hit">${h(x.label)}, line ${h(x.line)}: <code>${h(x.snippet)}</code></div>`).join('')}</li>`).join('')}
       ${f.count > (f.items || []).length ? `<li class="muted">… and ${f.count - f.items.length} more</li>` : ''}</ul>
     </details>`).join('');
-  return `${head}
+  return `${head}${trustedCard(site)}
     <div class="notice ${s.high ? 'bad' : s.medium ? 'warn' : ''}" style="margin-top:8px">${s.high || s.medium
       ? `<b>${s.high} high · ${s.medium} medium</b> warning sign${s.high + s.medium === 1 ? '' : 's'}. These are leads, not proof - open the site in VS Code and let Claude look into each one before anything is changed.`
       : 'No warning signs found. The items below are for review.'}</div>
@@ -692,7 +706,7 @@ function renderSite(id) {
   const el = document.querySelector(`[data-site="${CSS.escape(id)}"]`);
   const site = S.sites.find(s => s.id === id);
   if (!el || !site) return;
-  if (el.contains(document.activeElement) && document.activeElement.matches('input[type=search], input[type=text], input[type=url], select')) {
+  if (el.contains(document.activeElement) && document.activeElement.matches('input[type=search], input[type=text], input[type=url], select, textarea')) {
     pendingSites.add(id);
     return;
   }
@@ -1650,6 +1664,16 @@ document.addEventListener('click', async (ev) => {
       await api('DELETE', `/api/sites/${encodeURIComponent(site.id)}${hard ? '?hard=1' : ''}`).catch(e => toast(e.message));
       await load();
       toast(`${site.name} removed`);
+      return;
+    }
+    case 'save-trusted': {
+      const box = t.closest('details').querySelector('[data-trusted-site]');
+      t.disabled = true;
+      try {
+        const r = await api('POST', `/api/sites/${encodeURIComponent(site.id)}/trusted`, { set: box.value });
+        toast(`${r.trustedAdmins.length} trusted email${r.trustedAdmins.length === 1 ? '' : 's'} saved${r.rejected.length ? ` - not an email, left out: ${r.rejected.join(', ')}` : ''}. Run the security check again to update the results.`);
+      } catch (e) { toast(e.message); }
+      t.disabled = false;
       return;
     }
     case 'trust-admin':
