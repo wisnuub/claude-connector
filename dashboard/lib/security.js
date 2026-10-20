@@ -35,6 +35,8 @@ export function reportMarkdown(site, scan) {
     '>    (several at once with `paths`; each is moved, not deleted, so it can be restored with `wp_quarantine_restore`).',
     '>    Files in wp-content can also be',
     '>    removed with the ordinary file tools.',
+    '>    For the site-root .htaccess, `wp_htaccess_review` shows each part and flags injected lines; with the user\'s',
+    '>    agreement `wp_htaccess_restore` regenerates WordPress\'s rules, drops the flagged parts and keeps a copy.',
     '> 3. Check the database findings with `wp_db_query` using `readonly: true`.',
     '> 4. Work out how the attacker got in where you can (an outdated plugin, a new admin account, an uploads backdoor).',
     '> 5. Write up what you found and a cleanup plan: what to delete or restore, in what order, and how to close the way',

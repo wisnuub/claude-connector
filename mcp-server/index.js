@@ -152,7 +152,7 @@ async function safeCall(fn) {
 // Kept in step with CLAUDE_CONNECTOR_VERSION in claude-connector.php. The two
 // halves ship together, and a stale copy of this file silently hides whole
 // tools - which is much harder to notice than an outright error.
-const MCP_VERSION = '1.8.11';
+const MCP_VERSION = '1.8.12';
 
 const server = new McpServer({ name: 'claude-connector', version: MCP_VERSION });
 
@@ -440,6 +440,28 @@ server.tool('wp_reinstall_core',
   + 'reason (wrong owner, or locked by the server). Give that list to the user to pass to the host, then run this again.',
   { site: S },
   ({ site }) => safeCall(async () => ok(await api('POST', '/security/reinstall-core', null, {}, site, 300_000)))
+);
+
+server.tool('wp_htaccess_review',
+  'Read the site-root .htaccess, read-only, split into segments: each "# BEGIN x … # END x" block (named, with the plugin or '
+  + 'host it belongs to when known - WordPress, Wordfence, LiteSpeed, WP Rocket, cPanel\'s PHP version, …) and each run of '
+  + 'loose lines. Lines typical of an injection are flagged with the reason: redirects to another site, rules that only '
+  + 'apply to search engines, search visitors or mobile visitors (cloaked spam redirects), PHP set to load an extra file '
+  + 'before every request (a genuine Wordfence/NinjaFirewall loader is not flagged), image or text files run as PHP. '
+  + 'Use for the ".htaccess rules that redirect elsewhere" finding of wp_security_scan.',
+  { site: S },
+  ({ site }) => safeCall(async () => ok(await api('GET', '/security/htaccess', null, null, site)))
+);
+
+server.tool('wp_htaccess_restore',
+  'Restore the site-root .htaccess - ONLY after wp_htaccess_review and after the user has agreed. WordPress regenerates its '
+  + 'own permalink block (lines injected inside it go), the segments in remove (default: the flagged ones) are dropped, and '
+  + 'everything else - caching and security plugin blocks, the host\'s PHP-version handler, custom rules - is kept. A copy of '
+  + 'the old file is saved in quarantine first (wp_quarantine_restore with backup_id puts it back), and if the site or a '
+  + 'page stops loading afterwards the old file is put back automatically. Pass expected_md5 from the review so a file '
+  + 'that changed since is not touched. Not for multisite.',
+  { site: S, remove: z.array(z.string()).optional().describe('segment ids from wp_htaccess_review, e.g. ["s4","s5"]'), expected_md5: z.string().optional() },
+  ({ site, remove, expected_md5 }) => safeCall(async () => ok(await api('POST', '/security/htaccess', null, { ...(remove ? { remove } : {}), ...(expected_md5 ? { expected_md5 } : {}) }, site, 120_000)))
 );
 
 server.tool('wp_quarantine_file',

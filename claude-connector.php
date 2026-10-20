@@ -3,7 +3,7 @@
  * Plugin Name:  Claude Connector
  * Plugin URI:   https://github.com/wisnuub/claude-connector
  * Description:  Secure REST API bridge for Claude AI - ACF sync, cache purge, file management, database queries, post CRUD, plugin/theme control, maintenance updates with rollback, and more.
- * Version:      1.8.11
+ * Version:      1.8.12
  * Author:       Wisnuub
  * Author URI:   https://wisnuub.github.io
  * License:      GPL-2.0-or-later
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'CLAUDE_CONNECTOR_VERSION', '1.8.11' );
+define( 'CLAUDE_CONNECTOR_VERSION', '1.8.12' );
 define( 'CLAUDE_CONNECTOR_NS',      'claude/v1' );
 define( 'CLAUDE_CONNECTOR_GH_REPO', 'wisnuub/claude-connector' );
 
@@ -530,6 +530,7 @@ function claude_settings_page() {
         array( 'GET',    '/security/scan',            'Read-only security check: core/plugin checksums, PHP in uploads, malware patterns, new admins, redirects' ),
         array( 'GET',    '/security/core-file?path=', 'Read a file or list a folder outside wp-content (path empty = site root): core files with their diff against the official copy, planted files with malware hits - read-only, never wp-config.php' ),
         array( 'POST',   '/security/reinstall-core',  'Restore all core files to the official same-version copy (fixes modified/missing core; wp-content untouched)' ),
+        array( 'GET',    '/security/htaccess',        'The site-root .htaccess as segments, with injected-looking lines flagged (POST { remove?: [ids] } restores WordPress\'s rules, keeps a copy, reverts if the site breaks)' ),
         array( 'GET',    '/security/trusted-admins',  'Administrator emails the security check trusts (POST { emails: [...] } to set; "@domain.com" for a domain)' ),
         array( 'POST',   '/security/quarantine',      'Move added (non-core) files out of the live site into quarantine - { path } or { paths: [...] }, incl. outside wp-content; reversible' ),
         array( 'GET',    '/security/quarantine',      'List quarantined files' ),
@@ -933,6 +934,7 @@ add_action( 'rest_api_init', function () {
     register_rest_route( $ns, '/security/scan',          array( 'methods' => 'GET',  'callback' => 'claude_security_scan',    'permission_callback' => $a ) );
     register_rest_route( $ns, '/security/core-file',     array( 'methods' => 'GET',  'callback' => 'claude_security_core_file', 'permission_callback' => $a ) );
     register_rest_route( $ns, '/security/reinstall-core', array( 'methods' => 'POST', 'callback' => 'claude_security_reinstall_core', 'permission_callback' => $a ) );
+    register_rest_route( $ns, '/security/htaccess', array( 'methods' => array( 'GET', 'POST' ), 'callback' => 'claude_security_htaccess', 'permission_callback' => $a ) );
     register_rest_route( $ns, '/security/trusted-admins', array( 'methods' => array( 'GET', 'POST' ), 'callback' => 'claude_security_trusted_admins', 'permission_callback' => $a ) );
     register_rest_route( $ns, '/security/quarantine',    array(
         array( 'methods' => 'GET',  'callback' => 'claude_security_quarantine_list', 'permission_callback' => $a ),
@@ -4142,6 +4144,207 @@ function claude_core_write_problem( $path ) {
     );
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+//  Site-root .htaccess: review it, and restore WordPress's standard rules
+//
+//  The file is read as segments - each "# BEGIN x ... # END x" block, and each
+//  run of loose lines between them. The WordPress block is always regenerated
+//  by WordPress itself; blocks from known plugins and hosts are kept; segments
+//  with lines typical of an injection are flagged. Restoring drops the flagged
+//  segments (or the ones chosen), keeps a copy of the old file in quarantine,
+//  checks the site and a real page afterwards, and puts the old file back if
+//  either breaks.
+// ──────────────────────────────────────────────────────────────────────────────
+
+/** A friendly name for a "# BEGIN x" block that a well-known plugin or host writes, or null. */
+function claude_htaccess_known( $name ) {
+    $n   = strtolower( (string) $name );
+    $map = array(
+        'wordpress' => 'WordPress permalinks', 'wordfence' => 'Wordfence', 'lscache' => 'LiteSpeed Cache', 'litespeed' => 'LiteSpeed',
+        'wp rocket' => 'WP Rocket', 'w3tc' => 'W3 Total Cache', 'supercache' => 'WP Super Cache', 'fastestcache' => 'WP Fastest Cache',
+        'really simple' => 'Really Simple Security', 'rlrssslreallysimplessl' => 'Really Simple Security', 'ithemes' => 'Solid Security',
+        'solid security' => 'Solid Security', 'aiowps' => 'All-In-One Security', 'all in one wp security' => 'All-In-One Security',
+        'bulletproof' => 'BulletProof Security', 'sucuri' => 'Sucuri', 'sg optimizer' => 'SiteGround Optimizer', 'sgo ' => 'SiteGround Optimizer',
+        'hummingbird' => 'Hummingbird', 'autoptimize' => 'Autoptimize', 'imagify' => 'Imagify', 'ewww' => 'EWWW Image Optimizer',
+        'shortpixel' => 'ShortPixel', 'webp express' => 'WebP Express', 'converter for media' => 'Converter for Media',
+        'cpanel-generated' => 'cPanel PHP version', 'ninjafirewall' => 'NinjaFirewall', 'malcare' => 'MalCare', 'wp-optimize' => 'WP-Optimize',
+        'breeze' => 'Breeze', 'nitropack' => 'NitroPack',
+    );
+    foreach ( $map as $k => $label ) {
+        if ( strpos( $n, $k ) !== false ) return $label;
+    }
+    return null;
+}
+
+/** Why a single .htaccess line looks like an injection, or null. */
+function claude_htaccess_line_flag( $line ) {
+    $l = trim( (string) $line );
+    if ( $l === '' || $l[0] === '#' ) return null;
+    $host = preg_quote( preg_replace( '/^www\./', '', strtolower( (string) parse_url( home_url(), PHP_URL_HOST ) ) ), '/' );
+    if ( preg_match( '/^(?:RewriteRule|Redirect(?:Match|Permanent|Temp)?|ErrorDocument)\b.*\bhttps?:\/\/(?!(?:www\.)?' . $host . '\b|%\{HTTP_HOST\}|%\{SERVER_NAME\})/i', $l ) ) {
+        return 'sends visitors to another site';
+    }
+    if ( preg_match( '/^RewriteCond\s+%\{HTTP_(?:USER_AGENT|REFERER)\}.*(?:google|bing|yahoo|baidu|yandex|duckduck|facebook|android|iphone|mobile)/i', $l ) ) {
+        return 'only applies to search engines, search visitors or mobile visitors - typical of spam redirects';
+    }
+    if ( preg_match( '/^php_value\s+auto_(?:prepend|append)_file\s+["\']?([^"\'\s]+)/i', $l, $m ) ) {
+        $target = $m[1];
+        if ( basename( $target ) === 'wordfence-waf.php' && claude_security_wordfence_waf( file_exists( $target ) ? $target : ABSPATH . 'wordfence-waf.php' ) === true ) return null;
+        if ( preg_match( '/(?:\.htninja|malcare-waf\.php)$/', $target ) ) return null;
+        return 'makes PHP load ' . $target . ' before every request';
+    }
+    if ( preg_match( '/^(?:AddHandler|AddType|SetHandler)\b.*(?:php|x-httpd)/i', $l ) && preg_match( '/\.(?:jpe?g|png|gif|ico|svg|webp|txt|css|js|pdf|zip)\b/i', $l ) ) {
+        return 'runs image or text files as PHP';
+    }
+    return null;
+}
+
+/** The file as segments: marker blocks, and runs of loose lines (split at blank lines). */
+function claude_htaccess_segments( $text ) {
+    $segs = array();
+    $cur  = null;
+    $flush = function () use ( &$segs, &$cur ) {
+        if ( $cur && trim( implode( '', $cur['lines'] ) ) !== '' ) $segs[] = $cur;
+        $cur = null;
+    };
+    foreach ( preg_split( '/\r\n|\r|\n/', (string) $text ) as $i => $line ) {
+        $in_block = $cur && $cur['kind'] === 'block';
+        if ( ! $in_block && preg_match( '/^\s*#\s*(?:php\s*--\s*)?BEGIN\s+(.+?)\s*$/i', $line, $m ) ) {
+            $flush();
+            $cur = array( 'kind' => 'block', 'name' => $m[1], 'start' => $i + 1, 'lines' => array( $line ) );
+            continue;
+        }
+        if ( $in_block ) {
+            $cur['lines'][] = $line;
+            if ( preg_match( '/^\s*#\s*(?:php\s*--\s*)?END\s+/i', $line ) ) $flush();
+            continue;
+        }
+        if ( trim( $line ) === '' ) { $flush(); continue; }
+        if ( ! $cur ) $cur = array( 'kind' => 'lines', 'name' => null, 'start' => $i + 1, 'lines' => array() );
+        $cur['lines'][] = $line;
+    }
+    $flush();
+    foreach ( $segs as $k => &$seg ) {
+        $seg['id']    = 's' . ( $k + 1 );
+        $seg['known'] = $seg['kind'] === 'block' ? claude_htaccess_known( $seg['name'] ) : null;
+        $seg['flags'] = array();
+        foreach ( $seg['lines'] as $j => $line ) {
+            $why = claude_htaccess_line_flag( $line );
+            if ( $why ) $seg['flags'][] = array( 'line' => $seg['start'] + $j, 'text' => trim( substr( $line, 0, 200 ) ), 'why' => $why );
+        }
+    }
+    unset( $seg );
+    return $segs;
+}
+
+/** Loads the most recently changed published page or post and returns its status code. */
+function claude_htaccess_probe() {
+    $p   = get_posts( array( 'numberposts' => 1, 'post_status' => 'publish', 'post_type' => array( 'page', 'post' ), 'orderby' => 'modified' ) );
+    $url = $p ? get_permalink( $p[0] ) : home_url( '/' );
+    $r   = wp_remote_get( $url, array( 'timeout' => 20, 'redirection' => 5, 'sslverify' => apply_filters( 'https_local_ssl_verify', false ), 'headers' => array( 'Cache-Control' => 'no-cache' ) ) );
+    return array( 'url' => $url, 'code' => is_wp_error( $r ) ? 0 : (int) wp_remote_retrieve_response_code( $r ) );
+}
+
+/**
+ * GET /security/htaccess - the site-root .htaccess as segments, with what each
+ * is and any line that looks injected. POST { remove?: [segment ids],
+ * expected_md5? } - restore it (see the section comment above).
+ */
+function claude_security_htaccess( $req ) {
+    if ( $req->get_method() === 'POST' ) return claude_security_htaccess_restore( $req );
+    $file = ABSPATH . '.htaccess';
+    if ( ! file_exists( $file ) ) {
+        return new WP_REST_Response( array( 'exists' => false, 'note' => 'This site has no .htaccess in its root. Sites on nginx do not use one.' ) );
+    }
+    $text = (string) file_get_contents( $file );
+    $segs = claude_htaccess_segments( $text );
+    return new WP_REST_Response( array(
+        'exists'     => true,
+        'size'       => strlen( $text ),
+        'modified'   => wp_date( 'Y-m-d H:i:s', filemtime( $file ) ),
+        'md5'        => md5( $text ),
+        'multisite'  => is_multisite(),
+        'segments'   => array_map( function ( $s ) {
+            return array( 'id' => $s['id'], 'kind' => $s['kind'], 'name' => $s['name'], 'known' => $s['known'], 'start_line' => $s['start'], 'text' => implode( "\n", $s['lines'] ), 'flags' => $s['flags'] );
+        }, $segs ),
+        'flagged'    => array_values( array_map( function ( $s ) { return $s['id']; }, array_filter( $segs, function ( $s ) { return $s['flags'] && strcasecmp( (string) $s['name'], 'WordPress' ) !== 0; } ) ) ),
+        'note'       => 'Restoring (POST) regenerates the WordPress block, removes the segments listed in "remove" (default: the flagged ones), keeps everything else, saves a copy of the current file in quarantine, and puts it back automatically if the site or a page stops loading.',
+    ) );
+}
+
+function claude_security_htaccess_restore( $req ) {
+    require_once ABSPATH . 'wp-admin/includes/admin.php';
+    global $wp_rewrite;
+    if ( is_multisite() ) {
+        return new WP_Error( 'multisite', 'A multisite network\'s .htaccess has its own rules - fix it by hand.', array( 'status' => 400 ) );
+    }
+    $file = ABSPATH . '.htaccess';
+    if ( ! file_exists( $file ) ) return new WP_Error( 'no_htaccess', 'This site has no .htaccess in its root.', array( 'status' => 404 ) );
+    $text = (string) file_get_contents( $file );
+    $want = (string) $req->get_param( 'expected_md5' );
+    if ( $want !== '' && $want !== md5( $text ) ) {
+        return new WP_Error( 'changed', '.htaccess changed since it was reviewed - review it again first.', array( 'status' => 409 ) );
+    }
+    $segs   = claude_htaccess_segments( $text );
+    $remove = $req->get_param( 'remove' );
+    $remove = is_array( $remove )
+        ? array_map( 'strval', $remove )
+        : array_values( array_map( function ( $s ) { return $s['id']; }, array_filter( $segs, function ( $s ) { return (bool) $s['flags']; } ) ) );
+
+    $out = $removed = $kept = array();
+    foreach ( $segs as $s ) {
+        if ( $s['kind'] === 'block' && strcasecmp( $s['name'], 'WordPress' ) === 0 ) {
+            $out[] = "# BEGIN WordPress\n# END WordPress"; // refilled by WordPress below
+            continue;
+        }
+        if ( in_array( $s['id'], $remove, true ) ) {
+            $removed[] = array( 'id' => $s['id'], 'name' => $s['name'] ?: 'loose lines from line ' . $s['start'], 'text' => implode( "\n", $s['lines'] ), 'flags' => $s['flags'] );
+            continue;
+        }
+        $out[]  = implode( "\n", $s['lines'] );
+        $kept[] = $s['known'] ?: ( $s['name'] ?: 'loose lines from line ' . $s['start'] );
+    }
+
+    // A copy of the current file, restorable like any quarantined file.
+    $id   = gmdate( 'Ymd-His' ) . '-' . substr( md5( '.htaccess' . microtime() ), 0, 8 );
+    $copy = claude_security_quarantine_dir() . '/' . $id . '.quarantined';
+    if ( ! @copy( $file, $copy ) ) return new WP_Error( 'backup_failed', 'Could not save a copy of .htaccess first, so nothing was changed.', array( 'status' => 500 ) ); // phpcs:ignore
+    list( $mf_file, $manifest ) = claude_security_manifest();
+    $manifest[ $id ] = array( 'original' => '.htaccess', 'size' => strlen( $text ), 'md5' => md5( $text ), 'at' => gmdate( 'c' ), 'by' => wp_get_current_user()->user_login ?: null, 'restored' => false, 'note' => 'copy saved before the .htaccess restore' );
+    @file_put_contents( $mf_file, wp_json_encode( $manifest, JSON_PRETTY_PRINT ) ); // phpcs:ignore
+
+    $before = claude_htaccess_probe();
+    $tmp    = $file . '.claude-tmp';
+    if ( @file_put_contents( $tmp, implode( "\n\n", $out ) . "\n" ) === false ) { // phpcs:ignore
+        return new WP_Error( 'write_failed', 'Could not write the new .htaccess - nothing was changed.', array( 'status' => 500, 'blocked_by' => claude_core_write_problem( ABSPATH ) ) );
+    }
+    $rules = $wp_rewrite->using_mod_rewrite_permalinks() ? explode( "\n", trim( $wp_rewrite->mod_rewrite_rules() ) ) : array();
+    insert_with_markers( $tmp, 'WordPress', $rules );
+    @chmod( $tmp, fileperms( $file ) & 0777 ); // phpcs:ignore
+    if ( ! @rename( $tmp, $file ) ) { // phpcs:ignore
+        @unlink( $tmp ); // phpcs:ignore
+        $why = claude_core_write_problem( $file );
+        return new WP_Error( 'write_failed', "Could not replace .htaccess: {$why['reason']}. Nothing was changed.", array( 'status' => 500, 'blocked_by' => $why ) );
+    }
+
+    $health = claude_loopback_health();
+    $after  = claude_htaccess_probe();
+    $ok     = function ( $c ) { return $c >= 200 && $c < 400; };
+    if ( $health['status'] === 'fatal' || ( $ok( $before['code'] ) && ! $ok( $after['code'] ) ) ) {
+        @file_put_contents( $file, $text ); // phpcs:ignore
+        return new WP_Error( 'reverted', 'The site or a page stopped loading with the new .htaccess, so the old one was put back. Nothing changed.', array( 'status' => 500, 'health' => $health, 'page_check' => array( 'url' => $before['url'], 'before' => $before['code'], 'after' => $after['code'] ) ) );
+    }
+    return new WP_REST_Response( array(
+        'removed'         => $removed,
+        'kept'            => $kept,
+        'wordpress_rules' => count( $rules ),
+        'backup_id'       => $id,
+        'health'          => $health,
+        'page_check'      => array( 'url' => $before['url'], 'before' => $before['code'], 'after' => $after['code'] ),
+        'note'            => count( $removed ) . ' segment' . ( count( $removed ) === 1 ? '' : 's' ) . ' removed and the WordPress rules regenerated; ' . count( $kept ) . ' kept. The old file is in quarantine - POST /security/restore {"id":"' . $id . '"} puts it back.',
+    ) );
+}
+
 /**
  * Fallback for older WordPress without wp_opcache_flush_after_update().
  */
@@ -4613,14 +4816,11 @@ function claude_security_scan( $req = null ) {
     foreach ( array( ABSPATH . '.htaccess', $uploads . '/.htaccess', WP_CONTENT_DIR . '/.htaccess' ) as $f ) {
         if ( ! is_readable( $f ) ) continue;
         foreach ( preg_split( '/\R/', (string) file_get_contents( $f ) ) as $i => $line ) {
-            $host = preg_quote( (string) parse_url( home_url(), PHP_URL_HOST ), '/' );
-            if ( preg_match( '/auto_(?:prepend|append)_file|php_value\s+(?:auto|include)/i', $line )
-                || ( preg_match( '/Rewrite(?:Rule|Cond).*https?:\/\//i', $line ) && ! preg_match( "/{$host}/i", $line ) ) ) {
-                $ht[] = array( 'path' => claude_security_rel( $f ), 'detail' => 'line ' . ( $i + 1 ) . ': ' . trim( substr( $line, 0, 200 ) ) );
-            }
+            $why = claude_htaccess_line_flag( $line );
+            if ( $why ) $ht[] = array( 'path' => claude_security_rel( $f ), 'detail' => 'line ' . ( $i + 1 ) . ': ' . trim( substr( $line, 0, 200 ) ) . ' - ' . $why );
         }
     }
-    if ( $ht ) $add( 'high', 'config', '.htaccess rules that redirect elsewhere or load extra PHP', $ht, 'Spam redirects (often only for search engines or mobile visitors) live here.' );
+    if ( $ht ) $add( 'high', 'config', '.htaccess rules that redirect elsewhere or load extra PHP', $ht, 'Spam redirects (often only for search engines or mobile visitors) live here. For the site-root .htaccess: review it with GET /security/htaccess (MCP wp_htaccess_review) and restore WordPress\'s rules with POST /security/htaccess (wp_htaccess_restore) - a copy is kept and it reverts itself if the site breaks.' );
 
     // 10. wp-config.php: code that does not belong in a config file. Only matching
     //     lines are reported - never the database password or keys.

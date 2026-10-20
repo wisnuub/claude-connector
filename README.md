@@ -161,9 +161,11 @@ When a site's last run failed, a red banner at the top lists it (and the first f
 
 ### Asana and WordPress logins
 
-Connect Asana under **Settings → Asana** with a personal access token (Asana: profile picture → Settings → Apps → Developer apps → Create new token). The token is kept in the macOS Keychain.
+Connect Asana under **Settings → Asana** with a personal access token (Asana: profile picture → Settings → Apps → Developer apps → Create new token). **Each agency can have its own Asana account and workspace**; tokens are kept in the macOS Keychain.
 
-- **Tasks** (top of the page) lists your incomplete Asana tasks in the chosen workspace, with project, matching site, due date and Actual time. Filter to tasks whose site is on the dashboard or not yet.
+- **Tasks** (top of the page) lists your incomplete Asana tasks from every connected agency's workspace, tagged with the agency, with project, matching site, due date and Actual time. Filter to tasks whose site is on the dashboard or not yet. Comments, logins and task status always use the Asana account of the agency the task belongs to.
+- **Asana to-do** (Sites view filter) shows only the sites whose *WordPress update* task is still open - each drops off once the task is ticked complete in Asana (or once you comment that the updates are done). Those sites carry an *Asana to-do* tag.
+- **History**: a site's History tab shows **Update requested** when its *WordPress update* task appears in Asana and **Update done** when it is ticked complete (and by whom). Asana is read every 30 minutes for this, even with the page closed.
 - **Which task belongs to which site** is matched by project name ("Eccentric Engineering" ↔ eccentricengineering.com.au), preferring the "wordpress update" task when a project has several. Change it in the site's **Asana & login** tab.
 - **Do WordPress updates** (Tasks view) takes every open task titled *WordPress update(s)* whose site is connected, links each site to that task and opens the update checklist for all of them.
 - **Done this month** - a WordPress update task whose comments include this month's "…update done" (or "no updates needed") is hidden from the Tasks view and skipped by Do WordPress updates; **Show done this month** brings them back, tagged with the date. Tasks are never marked complete from the dashboard - whoever signs the work off does that in Asana.
@@ -176,6 +178,8 @@ Connect Asana under **Settings → Asana** with a personal access token (Asana: 
   - When a security check comes before the login form, it waits and fills the form in once it appears. A captcha on the form is left to you: the username and password are filled in, you complete the captcha and press **Log In**. Two-factor codes are yours too.
 
 ### Security check
+
+**Trusted administrator emails**: set the emails of your own staff per agency (**Settings → Agencies**) and a client's own per site (**Trust this email** in the Security tab). The security check then judges administrators by their email, not their username: a trusted email is never flagged, and every other administrator is flagged as *not on the trusted list*. A whole `@domain` can be trusted too, but accounts created in the last 30 days are still flagged, since anyone with admin access can create an address at your domain. Each check saves the list on the site, so Claude's scans in VS Code use it too.
 
 **Security check** (per site in its **Security** tab, or for every selected site from the toolbar) runs a read-only scan on the site - nothing is changed - and lists warning signs by severity:
 
@@ -727,6 +731,21 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 ---
 
 ## Changelog
+
+### 1.8.12 — Restore .htaccess, trusted admin emails, delete themes; Asana per agency
+
+**Added**
+
+- **Restore the site-root `.htaccess`.** `GET /security/htaccess` (MCP `wp_htaccess_review`) splits the file into its blocks and loose lines, names the plugin or host each block belongs to, and flags lines typical of an injection: redirects to other sites, rules that only apply to search engines or visitors from them (cloaked spam redirects), PHP set to load an extra file first, images run as PHP. `POST /security/htaccess` (`wp_htaccess_restore`, only with your agreement) has WordPress regenerate its own block, drops the flagged parts (or the ones chosen), keeps everything else - caching and security plugin blocks, cPanel's PHP-version handler, custom rules - saves a copy of the old file in quarantine, and **puts the old file back by itself if the site or a page stops loading**.
+- **Trusted administrator emails** - see [Security check](#security-check). The plugin settings page and `GET/POST /security/trusted-admins` hold the site's list; a list sent with the scan takes precedence.
+- **Delete themes**: `POST /themes {"action": "delete", "stylesheet": …}` deletes a theme nothing uses - never the active theme, the parent of an active child theme, or (multisite) a theme another site uses. The dashboard's Themes tab has **Delete** per theme and **Delete unused themes** (keeping the newest default theme as WordPress's fallback).
+- **Dashboard**: each agency has its own Asana account and workspace; a site's history shows *Update requested* / *Update done* from its Asana task; an **Asana to-do** filter; a pen next to each site's address edits it in place; icon buttons (refresh = Check, download = Update, WordPress = Login on WP).
+
+**Fixed**
+
+- The security check no longer flags Wordfence's own `auto_prepend_file` line in `.htaccess` as high severity on sites using its Extended Protection (the loader is checked by content).
+
+**Verified** on a local WordPress behind Apache with PHP-FPM: an `.htaccess` with a LiteSpeed block, a Wordfence block, a planted PHP pre-load, a Googlebot-only spam redirect and spam rules injected into the WordPress block was reviewed and restored - the spam and pre-load went, the plugin blocks and custom rules stayed, Googlebot and visitors from Google got the real page again; the saved copy restored byte for byte; a restore that broke Apache (HTTP 500) was reverted automatically. Trusted emails, theme deletion (including the WP-CLI fallback for older connectors) and per-agency Asana (against a mock with two accounts) were tested end to end.
 
 ### 1.8.11 — Clean malware anywhere in the site folder
 
