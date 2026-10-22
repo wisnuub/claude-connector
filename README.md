@@ -179,6 +179,10 @@ Connect Asana under **Settings → Asana** with a personal access token (Asana: 
 
 ### Security check
 
+**Mark checked**: once you or Claude have reviewed a warning and it is fine, **Mark checked** on it (with an optional note) - it no longer counts towards the site's High / Medium warnings, Claude's security report leaves it out, and it is flagged again by itself if it changes (a file modified, a snippet edited). **Undo** brings it back.
+
+**Trusted widget domains**: scripts and iframes from well-known services (Google, YouTube, Facebook, LinkedIn, Jetpack, review, booking, chat and form widgets) are not flagged. For others you recognise, **Trust** on the warning - or **Settings → Updates → Trusted widget domains** - trusts that domain on every site. Shared storage anyone can upload to (Amazon S3, Google Cloud Storage, raw GitHub files, Netlify, Vercel…) can never be trusted as a whole.
+
 **Trusted administrator emails**: set the emails of your own staff per agency (**Settings → Agencies**) and a client's own per site (**Trust this email** in the Security tab). The security check then judges administrators by their email, not their username: a trusted email is never flagged, and every other administrator is flagged as *not on the trusted list*. A whole `@domain` can be trusted too, but accounts created in the last 30 days are still flagged, since anyone with admin access can create an address at your domain. Each check saves the list on the site, so Claude's scans in VS Code use it too.
 
 **Security check** (per site in its **Security** tab, or for every selected site from the toolbar) runs a read-only scan on the site - nothing is changed - and lists warning signs by severity:
@@ -731,6 +735,23 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 ---
 
 ## Changelog
+
+### 1.8.15 — Deeper security check; mark warnings checked; trusted widget domains
+
+**Added to the security check**
+
+- **Plugins hidden from the Plugins screen** - a plugin on disk that removes itself from WordPress's plugin list (and so from `wp plugin list`) is flagged high. This is how SEO-spam backdoors such as "WP Link Helper" survive and reinstall themselves.
+- **Accounts inserted straight into the database** - the same username on several accounts (WordPress never allows that) is flagged high with the user IDs, to remove them by ID. Administrators with no email address are flagged too, and every administrator now shows its user ID.
+- **Must-use plugins with random names** (`wp-1a2b3c4d5e6f.php`) - high; and **settings with random names** (`wp_<hex>`, `wlh_…`) where backdoors keep their configuration - medium.
+- **PHP files where WordPress never puts them** - loose in the plugins folder (not a plugin), in `languages` (WordPress's own `*.l10n.php` translations excepted), in `cgi-bin`, and malware matches in `wp-content/cache` - high. **Empty PHP files** left by a malware cleaner are listed separately (low), with their dates.
+- **More widget services recognised** - Google Tag Manager and Analytics, Jetpack (`wp.com`), LinkedIn, Hotjar, Microsoft Clarity, Crazy Egg, Podium, Font Awesome, Cliniko, MailerLite, Acuity, Calendly, Typeform, chat widgets, SiteMinder, Reviewability and more - with their subdomains. Files on Google Cloud Storage stay flagged: anyone can upload there.
+
+**Dashboard**
+
+- **Mark checked** / **Undo** on each warning item (and **Mark all checked** for a group), with an optional note. Checked items stop counting, are left out of Claude's report, and come back by themselves when the item changes.
+- **Trusted widget domains** (Settings, and **Trust** on a warning), sent with every scan and saved on each site for Claude's scans. Shared storage and hosting addresses are refused.
+
+**Verified** on a local WordPress with each case planted - a hidden active plugin, a random-named must-use plugin with `eval`, a duplicated username written into the database, random-named settings, PHP in the plugins folder, `languages` and `cgi-bin`, empty PHP files - all flagged, a genuine `.l10n.php` translation ignored; the Reviewability widget no longer flagged, an unknown domain flagged until trusted; marking an item checked lowered the High count, survived a re-scan, and the item came back when its file changed.
 
 ### 1.8.14 — Faster connector install on a new site
 

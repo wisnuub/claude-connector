@@ -3,7 +3,7 @@
  * Plugin Name:  Claude Connector
  * Plugin URI:   https://github.com/wisnuub/claude-connector
  * Description:  Secure REST API bridge for Claude AI - ACF sync, cache purge, file management, database queries, post CRUD, plugin/theme control, maintenance updates with rollback, and more.
- * Version:      1.8.14
+ * Version:      1.8.15
  * Author:       Wisnuub
  * Author URI:   https://wisnuub.github.io
  * License:      GPL-2.0-or-later
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'CLAUDE_CONNECTOR_VERSION', '1.8.14' );
+define( 'CLAUDE_CONNECTOR_VERSION', '1.8.15' );
 define( 'CLAUDE_CONNECTOR_NS',      'claude/v1' );
 define( 'CLAUDE_CONNECTOR_GH_REPO', 'wisnuub/claude-connector' );
 
@@ -531,6 +531,7 @@ function claude_settings_page() {
         array( 'GET',    '/security/core-file?path=', 'Read a file or list a folder outside wp-content (path empty = site root): core files with their diff against the official copy, planted files with malware hits - read-only, never wp-config.php' ),
         array( 'POST',   '/security/reinstall-core',  'Restore all core files to the official same-version copy (fixes modified/missing core; wp-content untouched)' ),
         array( 'GET',    '/security/htaccess',        'The site-root .htaccess as segments, with injected-looking lines flagged (POST { remove?: [ids] } restores WordPress\'s rules, keeps a copy, reverts if the site breaks)' ),
+        array( 'GET',    '/security/trusted-hosts',   'Widget / embed domains the security check trusts besides its built-in list (POST { hosts: [...] } to set)' ),
         array( 'GET',    '/security/trusted-admins',  'Administrator emails the security check trusts (POST { emails: [...] } to set; "@domain.com" for a domain)' ),
         array( 'POST',   '/security/quarantine',      'Move added (non-core) files out of the live site into quarantine - { path } or { paths: [...] }, incl. outside wp-content; reversible' ),
         array( 'GET',    '/security/quarantine',      'List quarantined files' ),
@@ -938,6 +939,7 @@ add_action( 'rest_api_init', function () {
     register_rest_route( $ns, '/security/core-file',     array( 'methods' => 'GET',  'callback' => 'claude_security_core_file', 'permission_callback' => $a ) );
     register_rest_route( $ns, '/security/reinstall-core', array( 'methods' => 'POST', 'callback' => 'claude_security_reinstall_core', 'permission_callback' => $a ) );
     register_rest_route( $ns, '/security/htaccess', array( 'methods' => array( 'GET', 'POST' ), 'callback' => 'claude_security_htaccess', 'permission_callback' => $a ) );
+    register_rest_route( $ns, '/security/trusted-hosts', array( 'methods' => array( 'GET', 'POST' ), 'callback' => 'claude_security_trusted_hosts', 'permission_callback' => $a ) );
     register_rest_route( $ns, '/security/trusted-admins', array( 'methods' => array( 'GET', 'POST' ), 'callback' => 'claude_security_trusted_admins', 'permission_callback' => $a ) );
     register_rest_route( $ns, '/security/quarantine',    array(
         array( 'methods' => 'GET',  'callback' => 'claude_security_quarantine_list', 'permission_callback' => $a ),
@@ -4548,6 +4550,34 @@ function claude_security_prepend_file() {
     return $r ? wp_normalize_path( $r ) : '';
 }
 
+/** Widget / embed domains the security check trusts on top of its built-in list. */
+function claude_trusted_hosts() {
+    return array_values( array_filter( (array) get_option( 'claude_trusted_hosts', array() ), 'is_string' ) );
+}
+
+/** "widget.example.com" entries from a list or text (a pasted URL is reduced to its host). */
+function claude_trusted_hosts_clean( $list ) {
+    $items = is_array( $list ) ? $list : preg_split( '/[\s,;]+/', (string) $list );
+    $out   = array();
+    foreach ( $items as $h ) {
+        $h = strtolower( trim( (string) $h ) );
+        if ( preg_match( '#^[a-z]+://([^/:]+)#', $h, $m ) ) $h = $m[1];
+        $h = preg_replace( '/^\*\.|\.$/', '', $h );
+        // Shared storage / hosting anyone can put files on is never trusted as a whole.
+        if ( preg_match( '/^(?:(?:s3(?:[.-][a-z0-9-]+)?\.)?amazonaws\.com|(?:storage\.|firebasestorage\.)?googleapis\.com|(?:raw\.|objects\.)?githubusercontent\.com|googleusercontent\.com|cloudfront\.net|github\.io|blob\.core\.windows\.net|r2\.dev|pages\.dev|workers\.dev|netlify\.app|vercel\.app|herokuapp\.com|web\.app|firebaseapp\.com|digitaloceanspaces\.com|backblazeb2\.com)$/', $h ) ) continue;
+        if ( preg_match( '/^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$/', $h ) && ! in_array( $h, $out, true ) ) $out[] = $h;
+    }
+    return array_slice( $out, 0, 300 );
+}
+
+/** GET / POST /security/trusted-hosts { hosts: [...] } - widget domains the security check trusts. */
+function claude_security_trusted_hosts( $req ) {
+    if ( $req->get_method() === 'POST' ) {
+        update_option( 'claude_trusted_hosts', claude_trusted_hosts_clean( $req->get_param( 'hosts' ) ), false );
+    }
+    return new WP_REST_Response( array( 'hosts' => claude_trusted_hosts() ) );
+}
+
 /** The administrator emails the security check trusts (see the settings page). */
 function claude_trusted_admins() {
     return array_values( array_filter( (array) get_option( 'claude_trusted_admins', array() ), 'is_string' ) );
@@ -4720,6 +4750,17 @@ function claude_security_scan( $req = null ) {
     }
     if ( $recent ) $add( 'info', 'plugins', 'Recently deactivated plugins', $recent );
 
+    // 1b. Plugins that hide themselves. The Plugins screen and `wp plugin list` both
+    //     show get_plugins() after the all_plugins filter; a plugin removed by that
+    //     filter is on disk but invisible - how SEO-spam backdoors survive.
+    $all_plugins = get_plugins();
+    $listed      = apply_filters( 'all_plugins', $all_plugins );
+    $hidden      = array();
+    foreach ( array_diff_key( $all_plugins, is_array( $listed ) ? $listed : array() ) as $file => $data ) {
+        $hidden[] = array( 'path' => "wp-content/plugins/{$file}", 'detail' => trim( "{$data['Name']} {$data['Version']}" ) . ( $data['Author'] ? '' : ', no author' ) . ( is_plugin_active( $file ) ? ' - ACTIVE' : '' ) . ' - hidden from the Plugins screen and WP-CLI' );
+    }
+    if ( $hidden ) $add( 'high', 'plugins', 'Plugins hidden from the Plugins screen', $hidden, 'A plugin that removes itself from the plugin list is how SEO-spam backdoors such as "WP Link Helper" survive. A few white-label tools hide plugins on purpose - check what each one is before acting. Hidden plugins often reinstall themselves: look for must-use plugins and settings with random names too.' );
+
     // 2. WordPress core against wordpress.org's checksums.
     $sums = get_core_checksums( $wp_version, get_locale() ) ?: get_core_checksums( $wp_version, 'en_US' );
     if ( is_array( $sums ) && $sums ) {
@@ -4802,6 +4843,42 @@ function claude_security_scan( $req = null ) {
     }
     if ( $in_up ) $add( 'high', 'files', 'PHP files in the uploads folder', $in_up, 'Uploads should only hold media; PHP there is a classic backdoor.' );
 
+    // 4b. PHP in places WordPress never puts it - loose in the plugins folder (not a
+    //     plugin), in languages (WordPress's own translations are *.l10n.php), in
+    //     cgi-bin - and empty PHP files, which is what a malware cleaner leaves after
+    //     emptying a backdoor (their dates show when the site was infected). Caches
+    //     legitimately hold PHP, so only empty files or malware matches count there.
+    $odd = $empty = array();
+    $note_file = function ( $f, $why ) use ( &$odd, &$empty, $patterns ) {
+        $size = (int) @filesize( $f ); // phpcs:ignore
+        $item = array( 'path' => claude_security_rel( $f ), 'detail' => "{$why}, modified " . wp_date( 'Y-m-d H:i', filemtime( $f ) ) );
+        if ( $size === 0 ) { $empty[] = $item; return; }
+        $item['hits'] = claude_security_scan_file( $f, $patterns );
+        $odd[] = $item;
+    };
+    foreach ( (array) glob( WP_PLUGIN_DIR . '/*.php' ) as $f ) {
+        $b = basename( $f );
+        if ( $b === 'index.php' || isset( $all_plugins[ $b ] ) ) continue;
+        $note_file( $f, 'loose file in the plugins folder that is not a plugin' );
+    }
+    foreach ( claude_security_php_files( WP_CONTENT_DIR . '/languages', 3000, $deadline ) as $f ) {
+        if ( preg_match( '/\.l10n\.php$/', $f ) || ( basename( $f ) === 'index.php' && filesize( $f ) < 100 ) ) continue;
+        $note_file( $f, 'PHP in the languages folder' );
+    }
+    foreach ( claude_security_php_files( ABSPATH . 'cgi-bin', 500, $deadline ) as $f ) {
+        $note_file( $f, 'PHP in cgi-bin' );
+    }
+    foreach ( claude_security_php_files( WP_CONTENT_DIR . '/cache', 5000, $deadline ) as $f ) {
+        if ( (int) @filesize( $f ) === 0 ) { $empty[] = array( 'path' => claude_security_rel( $f ), 'detail' => 'empty, in a cache folder, modified ' . wp_date( 'Y-m-d H:i', filemtime( $f ) ) ); continue; } // phpcs:ignore
+        $h = claude_security_scan_file( $f, $patterns );
+        if ( $h ) $odd[] = array( 'path' => claude_security_rel( $f ), 'detail' => 'in a cache folder, modified ' . wp_date( 'Y-m-d H:i', filemtime( $f ) ), 'hits' => $h );
+    }
+    foreach ( $in_up as $u ) {
+        if ( (int) @filesize( ABSPATH . $u['path'] ) === 0 ) $empty[] = array( 'path' => $u['path'], 'detail' => 'empty, in uploads - ' . $u['detail'] ); // phpcs:ignore
+    }
+    if ( $odd ) $add( 'high', 'files', 'PHP files in places WordPress never puts them', $odd, 'Backdoors hide where nobody looks, with plausible names (cache-handler.php, translation-cache.php, plugin-loader.php).' );
+    if ( $empty ) $add( 'low', 'files', 'Empty PHP files left behind', $empty, 'Usually backdoors a malware cleaner emptied instead of deleting. Harmless now - but files with the same dates elsewhere may still be live, and the dates tell the host when the site was broken into.' );
+
     // 5. Known malware patterns in themes, plugins, mu-plugins and drop-ins.
     $hits    = array();
     $scanned = 0;
@@ -4835,6 +4912,19 @@ function claude_security_scan( $req = null ) {
         $early[] = array( 'path' => claude_security_rel( $f ), 'detail' => in_array( $name, $dropins, true ) ? 'WordPress drop-in' : 'not a known WordPress drop-in' );
     }
     if ( $early ) $add( 'info', 'files', 'Code that loads before plugins (mu-plugins and drop-ins)', $early, 'Usually from hosts and cache plugins; anything you do not recognise deserves a look.' );
+    $random_mu = array();
+    foreach ( (array) glob( ( defined( 'WPMU_PLUGIN_DIR' ) ? WPMU_PLUGIN_DIR : WP_CONTENT_DIR . '/mu-plugins' ) . '/*.php' ) as $f ) {
+        if ( ! preg_match( '/^(?:wp-)?[0-9a-f]{10,}\.php$/i', basename( $f ) ) ) continue;
+        $name = get_file_data( $f, array( 'name' => 'Plugin Name' ) )['name'];
+        $random_mu[] = array( 'path' => claude_security_rel( $f ), 'detail' => ( $name ? "\"{$name}\"" : 'no plugin name' ) . ', modified ' . wp_date( 'Y-m-d H:i', filemtime( $f ) ), 'hits' => claude_security_scan_file( $f, $patterns ) );
+    }
+    if ( $random_mu ) $add( 'high', 'files', 'Must-use plugins with random names', $random_mu, 'Must-use plugins load on every request and cannot be switched off in wp-admin. A random hex name is typical of the copies a backdoor uses to reinstall itself.' );
+    global $wpdb;
+    $random_opts = array();
+    foreach ( (array) $wpdb->get_col( "SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE 'wp\\_%' OR option_name LIKE 'wlh\\_%' LIMIT 5000" ) as $name ) { // phpcs:ignore
+        if ( preg_match( '/^(?:wp_[0-9a-f]{20,}|wlh_.+)$/', $name ) ) $random_opts[] = array( 'path' => $name, 'detail' => 'setting with a random name' );
+    }
+    if ( $random_opts ) $add( 'medium', 'database', 'Settings with random names', $random_opts, 'Backdoors keep their (often encrypted) configuration in settings like these. Remove them only together with the code that uses them, or it recreates them.' );
 
     // 7. PHP files changed in the last 7 days outside core.
     $week   = time() - 7 * DAY_IN_SECONDS;
@@ -4848,6 +4938,14 @@ function claude_security_scan( $req = null ) {
     usort( $recent, function ( $a, $b ) { return $b['t'] - $a['t']; } );
     if ( $recent ) $add( 'low', 'files', 'PHP files changed in the last 7 days', array_map( function ( $r ) { unset( $r['t'] ); return $r; }, $recent ), 'Updates change files too - compare against what was updated.' );
 
+    // 8a. The same username on several accounts. WordPress never allows that, so
+    //     these rows were written straight into the database (malware, SQL injection).
+    $dups = array();
+    foreach ( (array) $wpdb->get_results( "SELECT user_login, COUNT(*) AS n, GROUP_CONCAT(ID) AS ids FROM {$wpdb->users} GROUP BY user_login HAVING COUNT(*) > 1 LIMIT 50" ) as $d ) { // phpcs:ignore
+        $dups[] = array( 'path' => $d->user_login, 'detail' => "{$d->n} accounts with this username - user IDs {$d->ids}" );
+    }
+    if ( $dups ) $add( 'high', 'users', 'The same username on several accounts (inserted straight into the database)', $dups, 'WordPress never creates two accounts with one username - these rows were written into the database directly, typically by malware or an SQL injection, and are usually rogue administrators. Remove them by user ID, never by username (one name matches several), reassigning their content to a real administrator.' );
+
     // 8. Administrator accounts, with reasons any look out of place. With a
     //    trusted list (sent by the dashboard, else the site's own), an admin is
     //    judged by its email - the username is ignored - and any other admin is flagged.
@@ -4860,6 +4958,7 @@ function claude_security_scan( $req = null ) {
         $reg     = strtotime( $u->user_registered );
         $new     = $reg > time() - 30 * DAY_IN_SECONDS;
         $trust   = $trusted ? claude_trusted_match( $u->user_email, $trusted ) : null;
+        if ( trim( (string) $u->user_email ) === '' ) { $reasons[] = 'no email address (WordPress requires one - often added straight into the database)'; $trust = null; }
         if ( $trust === 'domain' ) {
             if ( $new ) $reasons[] = 'created in the last 30 days - trusted by its domain only, so check it is a real colleague';
         } elseif ( $trust !== 'email' ) {
@@ -4872,8 +4971,9 @@ function claude_security_scan( $req = null ) {
         }
         $entry = array(
             'path'       => $u->user_login,
+            'id'         => (int) $u->ID,
             'email'      => strtolower( (string) $u->user_email ),
-            'detail'     => $u->user_email . ' · registered ' . wp_date( 'Y-m-d', $reg ) . ' · ' . count_user_posts( $u->ID ) . ' posts · display "' . $u->display_name . '"' . ( $trust ? ' · trusted' . ( $trust === 'domain' ? ' (by domain)' : '' ) : '' ) . ( $reasons ? ' · ' . implode( '; ', $reasons ) : '' ),
+            'detail'     => '#' . $u->ID . ' · ' . ( $u->user_email ?: 'no email' ) . ' · registered ' . wp_date( 'Y-m-d', $reg ) . ' · ' . count_user_posts( $u->ID ) . ' posts · display "' . $u->display_name . '"' . ( $trust ? ' · trusted' . ( $trust === 'domain' ? ' (by domain)' : '' ) : '' ) . ( $reasons ? ' · ' . implode( '; ', $reasons ) : '' ),
             'trusted'    => $trust,
             'suspicious' => ! empty( $reasons ),
         );
@@ -4913,8 +5013,23 @@ function claude_security_scan( $req = null ) {
     //     module is visible even though it lives in the database, not a file.
     global $wpdb;
     $home_host = strtolower( (string) parse_url( home_url(), PHP_URL_HOST ) );
+    // Widget domains you trust (sent by the dashboard, else the site's own list).
+    $th            = $req instanceof WP_REST_Request ? $req->get_param( 'trusted_hosts' ) : null;
+    $trusted_hosts = $th !== null ? claude_trusted_hosts_clean( $th ) : claude_trusted_hosts();
+    // Well-known widget, analytics, chat, booking and embed services, matched with
+    // their subdomains (stats.wp.com, quiescence.au3.cliniko.com).
+    $known_domains = array(
+        'googletagmanager.com', 'google-analytics.com', 'googlesyndication.com', 'googleadservices.com', 'doubleclick.net', 'wp.com', 'gravatar.com',
+        'licdn.com', 'linkedin.com', 'hotjar.com', 'clarity.ms', 'crazyegg.com', 'podium.com', 'fontawesome.com', 'cliniko.com', 'mailerlite.com',
+        'acuityscheduling.com', 'calendly.com', 'typeform.com', 'jotform.com', 'tawk.to', 'tidio.co', 'intercom.io', 'intercomcdn.com', 'zdassets.com',
+        'zendesk.com', 'livechatinc.com', 'pinterest.com', 'pinimg.com', 'tiktok.com', 'twitter.com', 'twimg.com', 'x.com', 'cloudflare.com',
+        'recaptcha.net', 'hcaptcha.com', 'wistia.com', 'wistia.net', 'vidyard.com', 'loom.com', 'matterport.com', 'issuu.com', 'opentable.com',
+        'opentable.com.au', 'resdiary.com', 'simplybook.me', 'fresha.com', 'mindbodyonline.com', 'addtoany.com', 'sharethis.com', 'microsoft.com',
+        'squareup.com', 'paypal.com', 'paypalobjects.com', 'stripe.com', 'stripe.network', 'list-manage.com', 'credly.com', 'reviewability.com',
+        'easyweddings.com.au', 'book-directonline.com', 'siteminder.com', 'tourmake.net', 'trustindex.io', 'elfsight.com', 'hubspot.com', 'hsforms.com',
+    );
 
-    $find_injection = function ( $text ) use ( $home_host ) {
+    $find_injection = function ( $text ) use ( $home_host, $trusted_hosts, $known_domains ) {
         if ( $text === '' || $text === null ) return null;
         $decoded = html_entity_decode( str_replace( array( '||et_pb_line_break_holder||', '%22', '%91', '%93' ), array( "\n", '"', '[', ']' ), $text ), ENT_QUOTES, 'UTF-8' );
         $ok = array(
@@ -4926,7 +5041,11 @@ function claude_security_scan( $req = null ) {
             'cdn.trustindex.io', 'static.elfsight.com', 'apps.elfsight.com', 'core.service.elfsight.com', 'static.elfsightcdn.com', 'cdn.curator.io', 'widgets.sociablekit.com', 'embedsocial.com', 'cdn.embedsocial.com', 'www.powr.io', 'cdn.powr.io', 'widget.tagembed.com', 'cdn.tagembed.com', 'widget.reviews.io', 'widget.reviews.co.uk', 'cdn.reviews.io', 'www.birdeye.com', 'reviewsonmywebsite.com', 'static.cdn-website.com', 'www.mailchimp.com', 'chimpstatic.com', 'js.hsforms.net', 'js.hs-scripts.com', 'static.klaviyo.com', 'cdn.jsdelivr.net', 'www.instagram.com', 'snapwidget.com', 'cdn.lightwidget.com', 'lightwidget.com', 'embed.youtube.com', 'maps.googleapis.com', 'www.gstatic.com', 'consent.cookiebot.com', 'consentcdn.cookiebot.com', 'cdn.cookielaw.org'
         );
         // Known iframe-embed hosts (and regional variants) are not injections.
-        $embed_ok = function ( $host ) use ( $ok ) {
+        $embed_ok = function ( $host ) use ( $ok, $trusted_hosts, $known_domains ) {
+            if ( preg_match( '/^(?:storage|firebasestorage)\.googleapis\.com$/', $host ) ) return false; // anyone can host files there
+            foreach ( array_merge( $trusted_hosts, $known_domains ) as $d ) {
+                if ( $host === $d || substr( $host, -strlen( '.' . $d ) ) === '.' . $d ) return true;
+            }
             return in_array( $host, $ok, true ) || preg_match( '/(^|\.)(google|googleapis|gstatic|youtube|youtube-nocookie|vimeo|facebook|fbcdn|instagram|cdninstagram|spotify|soundcloud|openstreetmap|bing|tripadvisor|trustpilot|trustindex|elfsight|elfsightcdn|curator|sociablekit|embedsocial|powr|tagembed|reviews|birdeye|snapwidget|lightwidget|cookiebot|cookielaw|hubspot|hs-scripts|hsforms|klaviyo|mailchimp|stripe|paypal|cloudflareinsights)\.[a-z.]+$/', $host );
         };
         foreach ( array( (string) $text, (string) $decoded ) as $hay ) {
@@ -4935,13 +5054,13 @@ function claude_security_scan( $req = null ) {
             if ( preg_match_all( '#<script\b[^>]*\bsrc\s*=\s*["\']?(?:https?:)?//([^"\'\s>/]+)[^>]*>#i', $hay, $ms, PREG_SET_ORDER ) ) {
                 foreach ( $ms as $m ) {
                     $host = strtolower( $m[1] );
-                    if ( $host !== $home_host && strpos( $host, $home_host ) === false && ! $embed_ok( $host ) ) return array( 'why' => "external script from {$host}", 'snippet' => trim( substr( $m[0], 0, 180 ) ) );
+                    if ( $host !== $home_host && strpos( $host, $home_host ) === false && ! $embed_ok( $host ) ) return array( 'why' => "external script from {$host}", 'host' => $host, 'snippet' => trim( substr( $m[0], 0, 180 ) ) );
                 }
             }
             if ( preg_match_all( '#<iframe\b[^>]*\bsrc\s*=\s*["\']?(?:https?:)?//([^"\'\s>/]+)[^>]*>#i', $hay, $ms, PREG_SET_ORDER ) ) {
                 foreach ( $ms as $m ) {
                     $fhost = strtolower( $m[1] );
-                    if ( $fhost !== $home_host && strpos( $fhost, $home_host ) === false && ! $embed_ok( $fhost ) ) return array( 'why' => "iframe from {$fhost}", 'snippet' => trim( substr( $m[0], 0, 180 ) ) );
+                    if ( $fhost !== $home_host && strpos( $fhost, $home_host ) === false && ! $embed_ok( $fhost ) ) return array( 'why' => "iframe from {$fhost}", 'host' => $fhost, 'snippet' => trim( substr( $m[0], 0, 180 ) ) );
                 }
             }
             if ( preg_match( '#(eval\s*\(\s*(?:atob|function|String\.fromCharCode)|String\.fromCharCode\s*\(|document\.write\s*\(\s*unescape|\batob\s*\(\s*["\']|(?:\\\\x[0-9a-f]{2}){8,}|base64_decode\s*\()#i', $hay, $m, PREG_OFFSET_CAPTURE ) ) {
@@ -4968,14 +5087,14 @@ function claude_security_scan( $req = null ) {
         $inj = $find_injection( (string) $r->post_content );
         if ( ! $inj ) continue;
         $builder = strpos( $r->post_content, 'et_pb_code' ) !== false ? ' (in a Divi Code module)' : ( strpos( $r->post_content, 'et_pb_' ) !== false ? ' (in Divi builder content)' : '' );
-        $hits[] = array( 'path' => "{$r->post_type} #{$r->ID}: " . ( $r->post_title ?: '(no title)' ), 'detail' => $inj['why'] . $builder, 'hits' => array( array( 'label' => $inj['why'], 'line' => 0, 'snippet' => preg_replace( '/\s+/', ' ', $inj['snippet'] ) ) ) );
+        $hits[] = array( 'path' => "{$r->post_type} #{$r->ID}: " . ( $r->post_title ?: '(no title)' ), 'detail' => $inj['why'] . $builder, 'host' => $inj['host'] ?? null, 'hits' => array( array( 'label' => $inj['why'], 'line' => 0, 'snippet' => preg_replace( '/\s+/', ' ', $inj['snippet'] ) ) ) );
         if ( count( $hits ) >= 50 ) break;
     }
     $meta = $wpdb->get_results( "SELECT post_id, meta_value FROM {$wpdb->postmeta} WHERE meta_key = '_elementor_data' AND (meta_value LIKE '%<script%' OR meta_value LIKE '%fromCharCode%' OR meta_value LIKE '%eval(%' OR meta_value LIKE '%<iframe%' OR meta_value LIKE '%base64%') LIMIT 200" ); // phpcs:ignore
     foreach ( (array) $meta as $mm ) {
         $inj = $find_injection( (string) $mm->meta_value );
         if ( ! $inj ) continue;
-        $hits[] = array( 'path' => 'post #' . $mm->post_id . ' (Elementor)', 'detail' => $inj['why'] . ' (in an Elementor widget)', 'hits' => array( array( 'label' => $inj['why'], 'line' => 0, 'snippet' => preg_replace( '/\s+/', ' ', $inj['snippet'] ) ) ) );
+        $hits[] = array( 'path' => 'post #' . $mm->post_id . ' (Elementor)', 'detail' => $inj['why'] . ' (in an Elementor widget)', 'host' => $inj['host'] ?? null, 'hits' => array( array( 'label' => $inj['why'], 'line' => 0, 'snippet' => preg_replace( '/\s+/', ' ', $inj['snippet'] ) ) ) );
         if ( count( $hits ) >= 70 ) break;
     }
     if ( $hits ) $add( 'high', 'content', 'Injected code in posts, pages or builder content', $hits, "Legitimate embeds (analytics, maps, forms, chat) come from known providers; a script or iframe from an unknown domain, or obfuscated code, is an injection - often hidden inside a Divi Code module or Elementor widget. Site host: {$home_host}." );
@@ -4984,7 +5103,7 @@ function claude_security_scan( $req = null ) {
     $o_items = array();
     foreach ( (array) $opts as $o ) {
         $inj = $find_injection( (string) $o->option_value );
-        if ( $inj ) $o_items[] = array( 'path' => $o->option_name, 'detail' => $inj['why'], 'hits' => array( array( 'label' => $inj['why'], 'line' => 0, 'snippet' => preg_replace( '/\s+/', ' ', $inj['snippet'] ) ) ) );
+        if ( $inj ) $o_items[] = array( 'path' => $o->option_name, 'detail' => $inj['why'], 'host' => $inj['host'] ?? null, 'hits' => array( array( 'label' => $inj['why'], 'line' => 0, 'snippet' => preg_replace( '/\s+/', ' ', $inj['snippet'] ) ) ) );
     }
     if ( $o_items ) $add( 'high', 'content', 'Injected code in settings (wp_options)', $o_items, 'Header/footer-script and theme-option plugins store scripts here legitimately; an unknown external or obfuscated one is not.' );
 

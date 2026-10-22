@@ -19,7 +19,7 @@ import { summarize, LOG_DIR } from './lib/log.js';
 import { previewConnect, confirmConnect } from './lib/connect.js';
 import * as asana from './lib/asana.js';
 import { logIn, closeLoginBrowser } from './lib/login.js';
-import { openForClaude } from './lib/security.js';
+import { openForClaude, effectiveScan } from './lib/security.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, 'public');
@@ -62,7 +62,7 @@ function publicSite(s) {
     health: st.health || null, lastRun: st.lastRun || null, formTest: st.formTest || null,
     forms: st.forms || null, formUrl: st.formUrl || null, mailer: st.mailer || st.overview?.mailer || null,
     agencyId: st.agencyId || null,
-    security: st.security || null,
+    security: st.security ? effectiveScan(st.security, st.secAcks || {}) : null,
     diviForms: st.diviForms || null,
     formTestQueued: st.formTestQueued || null,
     asanaWaiting: !!st.asanaPending, // a run's Asana comment is waiting for this site's form test
@@ -361,6 +361,31 @@ async function api(req, res, url) {
     if (forms) { store.patchSiteState(site.id, { diviForms: { ...forms, at: new Date().toISOString() } }); broadcast('site', publicSite(site)); }
     return send(res, 200, r);
   }
+  if ((mm = p.match(/^\/api\/sites\/([\w-]+)\/security-ack$/))) {
+    // { keys: [ackKey...], note? } marks warning items checked; { keys, undo: true } brings them back.
+    const site = store.getSite(mm[1]);
+    if (!site) return send(res, 404, { message: 'Unknown site' });
+    const acks = { ...(store.siteState(site.id).secAcks || {}) };
+    for (const k of (Array.isArray(body.keys) ? body.keys : []).map(String).filter(k => /^[0-9a-f]{16}$/.test(k))) {
+      if (body.undo) delete acks[k];
+      else acks[k] = { at: new Date().toISOString(), note: String(body.note || '').trim().slice(0, 300) || null };
+    }
+    store.patchSiteState(site.id, { secAcks: acks });
+    broadcast('site', publicSite(site));
+    return send(res, 200, { ok: true });
+  }
+  if (p === '/api/trusted-hosts') {
+    // { add: host } / { remove: host } - widget domains the security check trusts on every site.
+    let hosts = store.getSettings().trustedHosts || [];
+    if (body.add) {
+      const add = store.cleanHosts([body.add]);
+      if (!add.length) return send(res, 400, { message: store.SHARED_HOSTING.test(String(body.add).trim().toLowerCase()) ? 'That is shared storage or hosting anyone can put files on, so it cannot be trusted as a whole.' : 'That is not a domain.' });
+      hosts = [...hosts, ...add];
+    }
+    if (body.remove) hosts = hosts.filter(h => h !== String(body.remove).trim().toLowerCase());
+    const saved = store.saveSettings({ trustedHosts: hosts });
+    return send(res, 200, { trustedHosts: saved.trustedHosts });
+  }
   if ((mm = p.match(/^\/api\/sites\/([\w-]+)\/trusted$/))) {
     // { add: email } / { remove: email } / { set: "a@x.com\nb@y.com" or [...] } - this site's
     // own trusted administrator emails (the agency's list is in Settings). Used by the next security check.
@@ -404,7 +429,7 @@ async function api(req, res, url) {
     if (!site) return send(res, 404, { message: 'Unknown site' });
     const scan = store.siteState(site.id).security;
     if (!scan) return send(res, 400, { message: 'Run the security check first.' });
-    return send(res, 200, await openForClaude(site, scan));
+    return send(res, 200, await openForClaude(site, effectiveScan(scan, store.siteState(site.id).secAcks || {})));
   }
   if ((mm = p.match(/^\/api\/sites\/([\w-]+)\/forms$/))) {
     const site = store.getSite(mm[1]);

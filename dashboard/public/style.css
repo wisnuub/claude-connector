@@ -334,3 +334,6 @@ details.sec.bad { border-color: color-mix(in srgb, var(--bad) 35%, var(--line));
 .pill-btn { border: 0; cursor: pointer; font: inherit; font-size: 12px; }
 .pill-btn:hover { filter: brightness(.96); }
 #dlg-queue { width: min(640px, calc(100vw - 32px)); }
+/* Security warnings you have marked checked */
+.sec-checked { opacity: .75; }
+.sec-items li.sec-item-checked > code, .sec-items li.sec-item-checked > .muted { text-decoration: line-through; text-decoration-color: var(--faint); }

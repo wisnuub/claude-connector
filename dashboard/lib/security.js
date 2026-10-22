@@ -3,9 +3,41 @@
 // change nothing until the user agrees to a plan.
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { ensureWorkspace, openInVSCode } from './connect.js';
 
 const SEV = { high: 'HIGH', medium: 'MEDIUM', low: 'LOW', info: 'INFO' };
+
+/**
+ * A stable key for one warning item. It changes when the item does - a file's
+ * date, a matched snippet, an account's details - so a checked item that
+ * changes is flagged again.
+ */
+export const ackKey = (f, i) => crypto.createHash('sha1')
+  .update(`${f.title}|${i.path}|${i.detail || ''}|${(i.hits || []).map(h => h.snippet).join('|')}`).digest('hex').slice(0, 16);
+
+/**
+ * The scan as you see it: every item carries its ackKey, items you marked
+ * checked carry `checked`, a warning whose items are all checked is `checked`
+ * and no longer counts, and the summary counts what is left (the scanner's own
+ * numbers stay in rawSummary).
+ */
+export function effectiveScan(scan, acks = {}) {
+  if (!scan?.findings) return scan;
+  const findings = scan.findings.map(f => {
+    const items = (f.items || []).map(i => {
+      const key = ackKey(f, i);
+      return acks?.[key] ? { ...i, ackKey: key, checked: acks[key] } : { ...i, ackKey: key };
+    });
+    const done = items.filter(i => i.checked).length;
+    // A warning with more items than the scan listed is never fully checked.
+    const checked = f.severity !== 'info' && items.length > 0 && done === items.length && (f.count || items.length) <= items.length;
+    return { ...f, items, checkedCount: done, checked };
+  });
+  const summary = { ...(scan.summary || {}) };
+  for (const sev of ['high', 'medium', 'low']) summary[sev] = findings.filter(f => f.severity === sev && !f.checked).length;
+  return { ...scan, findings, summary, rawSummary: scan.summary };
+}
 const code = s => '`' + String(s ?? '').replace(/`/g, "'") + '`';
 
 export function reportMarkdown(site, scan) {
@@ -50,10 +82,14 @@ export function reportMarkdown(site, scan) {
   ];
   if (scan.stats?.stopped_early) lines.push('_The scan hit its time limit; some folders may not have been checked - run `wp_security_scan` again._', '');
   if (!scan.findings?.some(f => f.severity !== 'info')) lines.push('No warning signs were found. The info items below are for review.', '');
+  const checked = (scan.findings || []).reduce((n, f) => n + (f.checkedCount || 0), 0);
+  if (checked) lines.push(`_${checked} item${checked === 1 ? '' : 's'} the user already reviewed and marked checked ${checked === 1 ? 'is' : 'are'} left out below._`, '');
   for (const f of scan.findings || []) {
-    lines.push(`## [${SEV[f.severity] || f.severity}] ${f.title} (${f.count})`, '');
+    if (f.checked) continue;
+    lines.push(`## [${SEV[f.severity] || f.severity}] ${f.title} (${f.count - (f.checkedCount || 0)})`, '');
     if (f.note) lines.push(f.note, '');
     for (const it of f.items || []) {
+      if (it.checked) continue;
       lines.push(`- ${code(it.path)}${it.detail ? ` - ${it.detail}` : ''}`);
       for (const h of it.hits || []) lines.push(`  - ${h.label}, line ${h.line}: ${code(h.snippet)}`);
     }

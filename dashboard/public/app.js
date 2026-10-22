@@ -584,6 +584,28 @@ function trustedCard(site) {
   </details>`;
 }
 
+/** Mark one warning item checked (reviewed, fine), or undo that. */
+function ackButton(i) {
+  if (i.checked) {
+    const when = new Date(i.checked.at).toLocaleDateString();
+    return ` <span class="tag ok" title="${h(i.checked.note || 'Marked checked')}">✓ checked ${h(when)}${i.checked.note ? `: ${h(i.checked.note.slice(0, 60))}` : ''}</span> <button class="btn sm ghost" data-action="sec-unack" data-key="${h(i.ackKey)}">Undo</button>`;
+  }
+  return ` <button class="btn sm ghost" data-action="sec-ack" data-key="${h(i.ackKey)}" title="You reviewed it and it is fine - it stops counting, until it changes">Mark checked</button>`;
+}
+
+// Shared storage / hosting anyone can put files on (same list as the server's SHARED_HOSTING).
+const SHARED_HOSTING = /^(?:(?:s3(?:[.-][a-z0-9-]+)?\.)?amazonaws\.com|(?:storage\.|firebasestorage\.)?googleapis\.com|(?:raw\.|objects\.)?githubusercontent\.com|googleusercontent\.com|cloudfront\.net|github\.io|blob\.core\.windows\.net|r2\.dev|pages\.dev|workers\.dev|netlify\.app|vercel\.app|herokuapp\.com|web\.app|firebaseapp\.com|digitaloceanspaces\.com|backblazeb2\.com)$/;
+
+/** A widget's domain from an injected-code warning, with a button to trust it on every site. */
+function hostButton(f, i) {
+  if (!/^Injected code|containing scripts/.test(f.title)) return '';
+  const host = i.host || (String(i.detail || '').match(/(?:script|iframe) from ([a-z0-9.-]+)/i) || [])[1];
+  if (!host) return '';
+  if ((S.settings.trustedHosts || []).some(t => host === t || host.endsWith(`.${t}`))) return ' <span class="tag ok">trusted widget - run the check again</span>';
+  if (SHARED_HOSTING.test(host)) return ' <span class="tag warn" title="Anyone can store files there, so it cannot be trusted as a whole - check what this script is">shared hosting - cannot be trusted</span>';
+  return ` <button class="btn sm ghost" data-action="trust-host" data-host="${h(host)}" title="A widget you recognise: its scripts and iframes are no longer flagged, on every site">Trust ${h(host)}</button>`;
+}
+
 /** Trust / untrust an administrator's email for this site (agency-wide ones are set in Settings). */
 function trustButton(site, email) {
   const agencyList = agencyOf(site)?.trustedAdmins || [];
@@ -604,13 +626,20 @@ function securityTab(site) {
     </div>`;
   if (!sc) return `${head}${trustedCard(site)}<p class="hint">Read-only: compares WordPress core and wordpress.org plugins with their published checksums, looks for PHP in uploads, known malware patterns, active plugins whose files are missing, new administrators, .htaccess redirects and scripts injected into posts and settings. Nothing on the site is changed.</p>`;
   const s = sc.summary || {};
-  const findings = (sc.findings || []).map(f => `
-    <details class="card sec ${SEV_CLS[f.severity] || ''}" ${f.severity === 'high' ? 'open' : ''} style="margin-top:8px">
-      <summary><span class="pill ${SEV_CLS[f.severity] || ''}">${h(f.severity)}</span> <b>${h(f.title)}</b> <span class="muted">(${h(f.count)})</span></summary>
+  // Warnings you have fully checked go last, closed, and no longer count.
+  const ordered = [...(sc.findings || [])].sort((a, b) => (a.checked ? 1 : 0) - (b.checked ? 1 : 0));
+  const findings = ordered.map(f => {
+    const open = (f.items || []).filter(i => !i.checked && i.ackKey);
+    const canAck = f.severity !== 'info';
+    return `
+    <details class="card sec ${f.checked ? 'sec-checked' : SEV_CLS[f.severity] || ''}" ${f.severity === 'high' && !f.checked ? 'open' : ''} style="margin-top:8px">
+      <summary>${f.checked ? '<span class="pill ok"><span class="dot"></span>checked</span>' : `<span class="pill ${SEV_CLS[f.severity] || ''}">${h(f.severity)}</span>`} <b>${h(f.title)}</b> <span class="muted">(${h(f.count)}${f.checkedCount && !f.checked ? `, ${h(f.checkedCount)} checked` : ''})</span></summary>
       ${f.note ? `<p class="hint" style="margin:6px 0">${h(f.note)}</p>` : ''}
-      <ul class="sec-items">${(f.items || []).map(i => `<li><code>${h(i.path)}</code>${i.detail ? ` <span class="muted">${h(i.detail)}</span>` : ''}${f.category === 'users' && i.email ? trustButton(site, i.email) : ''}${(i.hits || []).map(x => `<div class="sec-hit">${h(x.label)}, line ${h(x.line)}: <code>${h(x.snippet)}</code></div>`).join('')}</li>`).join('')}
+      ${canAck && open.length > 1 ? `<div class="bar" style="margin:4px 0"><button class="btn sm ghost" data-action="sec-ack-all" data-keys="${h(open.map(i => i.ackKey).join(','))}" title="You have reviewed every item here and they are fine">Mark all ${open.length} checked</button></div>` : ''}
+      <ul class="sec-items">${(f.items || []).map(i => `<li class="${i.checked ? 'sec-item-checked' : ''}"><code>${h(i.path)}</code>${i.detail ? ` <span class="muted">${h(i.detail)}</span>` : ''}${f.category === 'users' && i.email ? trustButton(site, i.email) : ''}${hostButton(f, i)}${canAck && i.ackKey ? ackButton(i) : ''}${(i.hits || []).map(x => `<div class="sec-hit">${h(x.label)}, line ${h(x.line)}: <code>${h(x.snippet)}</code></div>`).join('')}</li>`).join('')}
       ${f.count > (f.items || []).length ? `<li class="muted">… and ${f.count - f.items.length} more</li>` : ''}</ul>
-    </details>`).join('');
+    </details>`;
+  }).join('');
   return `${head}${trustedCard(site)}
     <div class="notice ${s.high ? 'bad' : s.medium ? 'warn' : ''}" style="margin-top:8px">${s.high || s.medium
       ? `<b>${s.high} high · ${s.medium} medium</b> warning sign${s.high + s.medium === 1 ? '' : 's'}. These are leads, not proof - open the site in VS Code and let Claude look into each one before anything is changed.`
@@ -1426,6 +1455,7 @@ function openSettings() {
   renderAsanaSettings();
   f.elements.loginMode.value = draft.loginMode || 'tab';
   if (f.elements.sitesDir) f.elements.sitesDir.value = draft.sitesDir || '';
+  f.elements.trustedHosts.value = (draft.trustedHosts || []).join('\n');
   const sdn = document.getElementById('sites-dir-note'); if (sdn) sdn.textContent = S.sitesDir ? `Currently scanning: ${S.sitesDir}` : '';
   renderExtStatus();
   $('#dlg-settings').showModal();
@@ -1829,6 +1859,30 @@ document.addEventListener('click', async (ev) => {
       toast(`${site.name} removed`);
       return;
     }
+    case 'sec-ack':
+    case 'sec-ack-all':
+    case 'sec-unack': {
+      const keys = (t.dataset.keys || t.dataset.key || '').split(',').filter(Boolean);
+      let note = '';
+      if (a !== 'sec-unack') {
+        note = prompt(`Mark ${keys.length === 1 ? 'this item' : `these ${keys.length} items`} checked - reviewed and fine? It stops counting as a warning until it changes.\n\nOptional note (why it is fine):`, '');
+        if (note === null) return;
+      }
+      try { await api('POST', `/api/sites/${encodeURIComponent(site.id)}/security-ack`, { keys, note, undo: a === 'sec-unack' }); }
+      catch (e) { toast(e.message); }
+      return;
+    }
+    case 'trust-host': {
+      const host = t.dataset.host;
+      if (!confirm(`Trust ${host} as a widget on every site?\n\nIts scripts and iframes will no longer be flagged. Only do this for a service you recognise - you can remove it in Settings.`)) return;
+      try {
+        const r = await api('POST', '/api/trusted-hosts', { add: host });
+        S.settings.trustedHosts = r.trustedHosts;
+        renderSite(site.id);
+        toast(`${host} trusted - run the security check again to clear its warnings`);
+      } catch (e) { toast(e.message); }
+      return;
+    }
     case 'save-trusted': {
       const box = t.closest('details').querySelector('[data-trusted-site]');
       t.disabled = true;
@@ -2011,6 +2065,7 @@ document.addEventListener('click', async (ev) => {
       draft.formTestMode = f.elements.formTestMode.value;
       draft.loginMode = f.elements.loginMode.value;
       if (f.elements.sitesDir) draft.sitesDir = f.elements.sitesDir.value.trim();
+      draft.trustedHosts = f.elements.trustedHosts.value.split(/[\n,;]+/).map(x => x.trim()).filter(Boolean);
       if (f.elements.asanaPost) {
         draft.asana = { ...draft.asana, postResults: f.elements.asanaPost.checked, logTime: f.elements.asanaTime.checked, commentStyle: f.elements.asanaStyle.value };
       }

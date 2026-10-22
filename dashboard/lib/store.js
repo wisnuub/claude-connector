@@ -62,6 +62,7 @@ export const DEFAULT_SETTINGS = {
   showBrowser: false,
   notifyOnFailure: true,
   sitesDir: '',  // master folder to scan for site workspaces; empty = default (~/claude-sites)
+  trustedHosts: [], // widget / embed domains the security check trusts, on every site
   // Log in: 'tab' = a new tab in your own browser through the Site Maintenance Login
   // extension (dashboard/extension), falling back to 'window' = a separate browser window.
   loginMode: 'tab',
@@ -88,6 +89,24 @@ function cleanAgency(a, i) {
   out.asana = { workspace: /^\d+$/.test(String(a?.asana?.workspace || '')) ? String(a.asana.workspace) : null };
   out.trustedAdmins = cleanTrusted(a?.trustedAdmins);
   return out;
+}
+
+/**
+ * Shared storage and hosting addresses anyone can put files on - trusting one
+ * would trust everything stored there. An owner's own subdomain (one company's
+ * d123.cloudfront.net or bucket.s3.amazonaws.com) is fine.
+ */
+export const SHARED_HOSTING = /^(?:(?:s3(?:[.-][a-z0-9-]+)?\.)?amazonaws\.com|(?:storage\.|firebasestorage\.)?googleapis\.com|(?:raw\.|objects\.)?githubusercontent\.com|googleusercontent\.com|cloudfront\.net|github\.io|blob\.core\.windows\.net|r2\.dev|pages\.dev|workers\.dev|netlify\.app|vercel\.app|herokuapp\.com|web\.app|firebaseapp\.com|digitaloceanspaces\.com|backblazeb2\.com)$/;
+
+/** Widget domains: "widget.example.com" entries (a pasted URL is reduced to its host). */
+export function cleanHosts(list) {
+  const items = Array.isArray(list) ? list : String(list || '').split(/[\s,;]+/);
+  const out = [];
+  for (let h of items) {
+    h = String(h || '').trim().toLowerCase().replace(/^[a-z]+:\/\/([^/:]+).*$/, '$1').replace(/^\*\.|\.$/g, '');
+    if (/^[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$/.test(h) && !SHARED_HOSTING.test(h) && !out.includes(h)) out.push(h);
+  }
+  return out.slice(0, 300);
 }
 
 /** "Name <x@y.com>", "x@y.com" or "@domain.com" entries, lower-cased and de-duplicated. */
@@ -118,6 +137,7 @@ export function getSettings() {
   if (!['now', 'queue', 'off'].includes(out.formTestMode)) out.formTestMode = 'queue';
   out.agencies = (out.agencies?.length ? out.agencies : [DEFAULT_AGENCY]).map(cleanAgency);
   if (!out.agencies.some(a => a.id === out.defaultAgency)) out.defaultAgency = out.agencies[0].id;
+  out.trustedHosts = cleanHosts(out.trustedHosts);
   return out;
 }
 
@@ -131,6 +151,7 @@ export function saveSettings(patch) {
   const seen = new Set();
   for (const a of next.agencies) { while (seen.has(a.id)) a.id += '-2'; seen.add(a.id); }
   if (!next.agencies.some(a => a.id === next.defaultAgency)) next.defaultAgency = next.agencies[0].id;
+  next.trustedHosts = cleanHosts(next.trustedHosts);
   writeJson(F.settings, next);
   return next;
 }

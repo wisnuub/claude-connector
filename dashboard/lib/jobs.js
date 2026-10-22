@@ -8,6 +8,7 @@ import crypto from 'crypto';
 import { call, externalCheck, LONG, WPError } from './wp.js';
 import { getSite, getSettings, siteState, patchSiteState, addHistory, agencyFor } from './store.js';
 import { runFormTest } from './formtest.js';
+import { effectiveScan } from './security.js';
 import { appendTextLog, notify, summarize } from './log.js';
 import { postResults, postAfterFormTest } from './asana.js';
 
@@ -253,25 +254,37 @@ async function healthStep(ctx, title = 'Site health') {
  * previous check had warning signs and this one has none.
  */
 /**
- * The trusted administrator emails for a site - its agency's list plus its
- * own - saved on the site too (so Claude's scans in VS Code use the same list)
- * and sent with the scan. With no list here, the site's own list is used.
+ * The trusted lists for a site's security check - administrator emails (its
+ * agency's plus its own) and widget domains (from Settings) - saved on the site
+ * too, so Claude's scans in VS Code use the same lists, and sent with the scan.
+ * With no list here, the site's own is used.
  */
 async function trustedParams(ctx) {
   const st = siteState(ctx.site.id);
-  const list = [...new Set([...(agencyFor(ctx.site.id).trustedAdmins || []), ...(st.trustedAdmins || [])])];
-  if (!list.length && !st.trustedPushed) return null;
-  await ctx.api('POST', '/security/trusted-admins', { body: { emails: list }, timeout: 30_000 }).catch(() => {});
-  patchSiteState(ctx.site.id, { trustedPushed: list.length > 0 });
-  return { trusted: list.join(',') };
+  const params = {};
+  const emails = [...new Set([...(agencyFor(ctx.site.id).trustedAdmins || []), ...(st.trustedAdmins || [])])];
+  if (emails.length || st.trustedPushed) {
+    await ctx.api('POST', '/security/trusted-admins', { body: { emails }, timeout: 30_000 }).catch(() => {});
+    patchSiteState(ctx.site.id, { trustedPushed: emails.length > 0 });
+    params.trusted = emails.join(',');
+  }
+  const hosts = getSettings().trustedHosts || [];
+  if (hosts.length || st.hostsPushed) {
+    await ctx.api('POST', '/security/trusted-hosts', { body: { hosts }, timeout: 30_000 }).catch(() => {});
+    patchSiteState(ctx.site.id, { hostsPushed: hosts.length > 0 });
+    params.trusted_hosts = hosts.join(',');
+  }
+  return Object.keys(params).length ? params : null;
 }
 
 async function securityStep(ctx) {
-  const prev = siteState(ctx.site.id).security?.summary?.high || 0;
+  const acks = siteState(ctx.site.id).secAcks || {};
+  const prev = effectiveScan(siteState(ctx.site.id).security, acks)?.summary?.high || 0;
   const st = ctx.step('Security check…');
   try {
-    const scan = await ctx.api('GET', '/security/scan', { params: await trustedParams(ctx), timeout: 240_000 });
-    patchSiteState(ctx.site.id, { security: { ...scan, at: new Date().toISOString() } });
+    const raw = await ctx.api('GET', '/security/scan', { params: await trustedParams(ctx), timeout: 240_000 });
+    patchSiteState(ctx.site.id, { security: { ...raw, at: new Date().toISOString() } });
+    const scan = effectiveScan(raw, acks); // items you marked checked do not count
     const high = scan.summary?.high || 0;
     const cleaned = prev > 0 && high === 0;
     st.set(high ? 'warning' : 'ok',
@@ -609,14 +622,15 @@ export function startSecurityScan({ sites }) {
     let scan;
     try {
       scan = await ctx.api('GET', '/security/scan', { params: await trustedParams(ctx), timeout: 240_000 });
+      patchSiteState(ctx.site.id, { security: { ...scan, at: new Date().toISOString() } });
+      scan = effectiveScan(scan, siteState(ctx.site.id).secAcks || {}); // items you marked checked do not count
     } catch (e) {
       const i = errInfo(e);
       st.set('failed', i.code === 'rest_no_route' ? 'Security check needs Claude Connector 1.8.2 or newer on this site' : `Security check: ${i.message}`, null, { kind: 'security', result: 'failed' });
       return null;
     }
-    patchSiteState(ctx.site.id, { security: { ...scan, at: new Date().toISOString() } });
     const s = scan.summary || {};
-    const top = (scan.findings || []).filter(f => f.severity === 'high').map(f => `${f.title} (${f.count})`);
+    const top = (scan.findings || []).filter(f => f.severity === 'high' && !f.checked).map(f => `${f.title} (${f.count - f.checkedCount})`);
     st.set(s.high ? 'failed' : s.medium ? 'warning' : 'ok',
       s.high || s.medium ? `Security check: ${s.high} high, ${s.medium} medium` : 'Security check: no warning signs found',
       top.join(' · ') || null, { kind: 'security', result: s.high ? 'failed' : 'ok' });
