@@ -152,7 +152,8 @@ function signIn(user, pass, submits) {
 // is usually 4590 - try that, then a couple of common alternates, and focus an
 // already-open tab instead of opening another.
 const DASHBOARD_PORTS = [4590, 4591, 4599];
-chrome.action.onClicked.addListener(async () => {
+/** The toolbar icon: open the dashboard, starting it first when it is not running. */
+async function openDashboard() {
   let url = null;
   for (const port of DASHBOARD_PORTS) {
     try {
@@ -168,14 +169,13 @@ chrome.action.onClicked.addListener(async () => {
     else chrome.tabs.create({ url });
     return;
   }
-  // Not running - ask the Site Maintenance app (macOS) to start it. The browser
-  // shows a one-time "Open Site Maintenance?" prompt; the app starts the server
-  // and the dashboard opens itself. On Windows, start it with `npm start`.
-  const dash = `http://127.0.0.1:${DASHBOARD_PORTS[0]}/`;
-  try { await chrome.tabs.create({ url: 'claude-connector://open' }); } catch {}
-  for (let i = 0; i < 40; i++) {
-    await new Promise(r => setTimeout(r, 500));
-    try { const r = await fetch(`${dash}api/state`, { signal: AbortSignal.timeout(1500) }); if (r.ok) { chrome.tabs.create({ url: dash }); return; } } catch {}
-  }
-  chrome.tabs.create({ url: dash }); // give up waiting; open anyway
-});
+  // Not running - ask the dashboard's helper to start it (registered on this Mac
+  // by `npm run shortcut`; the browser runs it for this extension only).
+  const r = await new Promise(resolve => chrome.runtime.sendNativeMessage('com.claude_connector.dashboard', { type: 'start' }, resp => {
+    resolve(resp || { ok: false, error: chrome.runtime.lastError?.message || 'No answer.' });
+  }));
+  if (r.ok) { chrome.tabs.create({ url: r.url }); return; }
+  // No helper (not set up yet, or Windows) or it failed: say what to do instead of nothing.
+  chrome.tabs.create({ url: `${chrome.runtime.getURL('start.html')}?error=${encodeURIComponent(r.error || '')}` });
+}
+chrome.action.onClicked.addListener(openDashboard);

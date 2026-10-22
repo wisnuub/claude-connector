@@ -128,7 +128,7 @@ A small **Claude Connector** extension (in [`dashboard/extension`](dashboard/ext
 3. Click **Load unpacked** and choose the `dashboard/extension` folder. (In the dashboard, **Settings → Log in → Open the folder** jumps straight to it.)
 4. The **Claude Connector** icon (an orange plug) appears in the toolbar. Pin it, then click it any time to open the dashboard.
 
-Clicking the icon when the dashboard is **not** running asks the Site Maintenance app (macOS) to start it - a one-time "Open Site Maintenance?" prompt, then the dashboard opens itself; on Windows, start it once with `npm start`. 
+Clicking the icon when the dashboard is **not** running starts it and opens it (macOS). `npm run shortcut` registers a small helper the browser may run for this extension only (Chrome's *native messaging*, in `~/Library/Application Support/Site Maintenance/`); it asks the Site Maintenance app to start the dashboard. Run `npm run shortcut` once, then reload the extension in `chrome://extensions`. Without the helper - or on Windows, where you start the dashboard with `npm start` - the icon opens a page saying what to do. 
 
 The extension only talks to the dashboard on `127.0.0.1`; it holds a login in the browser's memory for the one tab it opens and drops it once you are signed in, when the tab closes, or after 10 minutes. Since it is loaded unpacked (not from the Chrome Web Store), the browser may occasionally remind you that a developer-mode extension is installed - that is normal.
 

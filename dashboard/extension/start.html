@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Start Site Maintenance</title>
+  <style>
+    :root { color-scheme: light dark; --bg: #f6f7f9; --card: #fff; --text: #1d2330; --muted: #5d6675; --line: #dfe3ea; --accent: #2459d6; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #15181e; --card: #1d2129; --text: #e8ebf0; --muted: #9aa3b2; --line: #2e3440; --accent: #6c95ff; } }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 -apple-system, system-ui, sans-serif; }
+    main { max-width: 600px; margin: 48px auto; padding: 0 16px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 22px 24px; }
+    h1 { font-size: 20px; margin: 0 0 8px; }
+    p, li { color: var(--muted); }
+    code { background: var(--bg); border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; font-size: 13px; color: var(--text); }
+    button { margin-top: 12px; font: inherit; font-weight: 600; color: #fff; background: var(--accent); border: 0; border-radius: 8px; padding: 8px 16px; cursor: pointer; }
+    .err { font-size: 13px; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="card">
+      <h1>The dashboard is not running</h1>
+      <p>The Claude Connector extension could not start it on this computer.</p>
+      <ul>
+        <li><b>Mac:</b> open <b>Site Maintenance</b> from Spotlight or the Dock. To let this icon start it next time, run <code>npm run shortcut</code> once in the <code>dashboard</code> folder, then reload this extension in <code>chrome://extensions</code>.</li>
+        <li><b>Windows:</b> in the <code>dashboard</code> folder run <code>npm start</code>.</li>
+      </ul>
+      <p class="err" id="err" hidden></p>
+      <button id="again">Try again</button>
+    </div>
+  </main>
+  <script src="start.js"></script>
+</body>
+</html>
