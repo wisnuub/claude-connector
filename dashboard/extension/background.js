@@ -20,6 +20,13 @@ const dropJob = tabId => chrome.storage.session.remove(key(tabId));
 
 chrome.runtime.onMessageExternal.addListener((msg, sender, reply) => {
   if (msg?.type === 'ping') { reply({ ok: true, version: chrome.runtime.getManifest().version }); return; }
+  if (msg?.type === 'focus' && sender.tab) {
+    // The dashboard tab has a site to confirm: bring it to the front.
+    chrome.tabs.update(sender.tab.id, { active: true });
+    chrome.windows.update(sender.tab.windowId, { focused: true });
+    reply({ ok: true });
+    return;
+  }
   if (msg?.type !== 'login') return;
   (async () => {
     let url;

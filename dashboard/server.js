@@ -16,7 +16,7 @@ import { call } from './lib/wp.js';
 import { closeBrowser } from './lib/formtest.js';
 import { startScheduler, nextRun, scheduledSites } from './lib/scheduler.js';
 import { summarize, LOG_DIR } from './lib/log.js';
-import { previewConnect, confirmConnect } from './lib/connect.js';
+import { previewConnect, confirmConnect, ensureWorkspace, openInVSCode } from './lib/connect.js';
 import * as asana from './lib/asana.js';
 import { logIn, closeLoginBrowser } from './lib/login.js';
 import { openForClaude, effectiveScan } from './lib/security.js';
@@ -315,12 +315,20 @@ async function api(req, res, url) {
     try { return send(res, 200, await logIn(body)); }
     catch (e) { return send(res, 400, { message: e.message.split('\n')[0] }); }
   }
+  if (p === '/api/connect/handoff') {
+    // A tab just opened for a connect link: give the link to the dashboard tab
+    // already open (the one connected last), which asks for it in turn.
+    const tab = [...sseClients].pop();
+    if (!tab || typeof body.link !== 'string') return send(res, 200, { delivered: false });
+    tab.write(`event: connect\ndata: ${JSON.stringify({ link: body.link })}\n\n`);
+    return send(res, 200, { delivered: true });
+  }
   if (p === '/api/connect/preview') {
     try { return send(res, 200, await previewConnect(body.link)); }
     catch (e) { return send(res, 400, { message: e.message }); } // a bad or used link, not a server fault
   }
   if (p === '/api/connect/confirm') {
-    const r = await confirmConnect(body.id, { openEditor: body.openEditor !== false });
+    const r = await confirmConnect(body.id, { openEditor: body.openEditor === true });
     // Pick the new workspace up now rather than on the watcher's next tick, so the agency can be set.
     const site = store.listSites({ includeHidden: true }).find(s => s.url.replace(/\/+$/, '') === r.url.replace(/\/+$/, ''));
     if (site && body.agencyId) store.patchSiteState(site.id, { agencyId: body.agencyId });
@@ -422,6 +430,12 @@ async function api(req, res, url) {
       } catch (e) { return send(res, e.status === 401 ? 401 : 400, { message: e.message }); }
     }
     return send(res, 200, asanaDraft(site.id));
+  }
+  if ((mm = p.match(/^\/api\/sites\/([\w-]+)\/open-editor$/))) {
+    const site = store.getSite(mm[1]);
+    if (!site) return send(res, 404, { message: 'Unknown site' });
+    const folder = await ensureWorkspace(site);
+    return send(res, 200, { folder, opened: await openInVSCode(folder) });
   }
   if ((mm = p.match(/^\/api\/sites\/([\w-]+)\/claude-review$/))) {
     // Last security check → SECURITY-REPORT.md in the site's workspace, opened in VS Code.

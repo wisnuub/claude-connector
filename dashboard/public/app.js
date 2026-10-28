@@ -361,6 +361,7 @@ function siteRow(site) {
         <button class="btn sm icon" data-action="site-check" data-stop ${run ? 'disabled' : ''} title="Check - read-only: updates, health, security, Divi forms" aria-label="Check ${h(site.name)}">${ICON.refresh}</button>
         <button class="btn sm ${c.total ? 'primary' : ''}" data-action="site-maintain" data-stop ${run ? 'disabled' : ''} title="Update WordPress, plugins and themes">${ICON.download}Update</button>
         <a class="btn sm ghost icon" href="${h(site.url)}/wp-admin/" target="_blank" rel="noopener" data-stop title="Login on WP" aria-label="Login on WP - ${h(site.name)}">${ICON.wp}</a>
+        <button class="btn sm ghost icon" data-action="open-editor" data-stop title="Open in VS Code - the site's Claude Code workspace" aria-label="Open ${h(site.name)} in VS Code">${ICON.code}</button>
       </div>
       ${run ? `<div class="progress"><span class="spin"></span><span>${h(run.label)}</span></div>` : ''}
     </div>
@@ -493,6 +494,7 @@ function manageCard(site) {
       <div class="bar" style="margin:10px 0 0">
         <button class="btn sm" data-action="site-url">Edit address</button>
         <button class="btn sm ghost" data-action="site-check">Re-check</button>
+        <button class="btn sm ghost" data-action="open-editor">Open in VS Code</button>
         ${site.source !== 'manual' ? '<button class="btn sm ghost" data-action="site-hide">Hide from dashboard</button>' : ''}
         <button class="btn sm ghost danger" data-action="site-delete">${site.source === 'manual' ? 'Remove site' : 'Delete site'}</button>
       </div></div>`;
@@ -715,6 +717,7 @@ const ICON = {
   refresh: '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 0 1-9.6 3.7M2.5 8a5.5 5.5 0 0 1 9.6-3.7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M12.6 1.8v2.8H9.8M3.4 14.2v-2.8h2.8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   download: '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M8 2.5v7.5M4.8 7.2 8 10.4l3.2-3.2M2.5 11.5V13a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-1.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   wp: '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><circle cx="8" cy="8" r="6.75" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M3.9 5.6 6 11.2 8 6.6l2 4.6 2.1-5.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  code: '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M5.5 4.5 2 8l3.5 3.5M10.5 4.5 14 8l-3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
 };
 
 /** A tag when the theme overrides WooCommerce templates - a WooCommerce or theme update can break the shop. */
@@ -1331,6 +1334,8 @@ function connect() {
     renderSite(s.id);
     if (wasQueued !== !!s.formTestQueued) { if (S.view === 'sites') renderToolbar(); if ($('#dlg-queue').open) renderQueue(); }
   });
+  // A connect link handed over by a tab WP Admin just opened (see checkConnectHash).
+  es.addEventListener('connect', ev => { queueConnect(JSON.parse(ev.data).link); focusThisTab(); });
   es.addEventListener('schedule', ev => { S.schedule = JSON.parse(ev.data); renderToolbar(); });
   es.addEventListener('failures', ev => { S.failures = JSON.parse(ev.data); renderBanner(); if (S.view === 'log') loadLog(); });
   es.addEventListener('sites', async ev => {
@@ -1823,6 +1828,16 @@ document.addEventListener('click', async (ev) => {
     }
     case 'site-security': S.tab[site.id] = 'security'; return startJob({ type: 'security', sites: [site.id] });
     case 'bulk-security': return startJob({ type: 'security', sites: selectedIds() });
+    case 'open-editor': {
+      ev.stopPropagation();
+      t.disabled = true;
+      try {
+        const r = await api('POST', `/api/sites/${encodeURIComponent(site.id)}/open-editor`, {});
+        toast(r.opened ? `Opening ${site.name} in VS Code` : `VS Code did not open - the workspace is ${r.folder}`);
+      } catch (e) { toast(e.message); }
+      t.disabled = false;
+      return;
+    }
     case 'claude-review': {
       t.disabled = true;
       try {
@@ -2186,12 +2201,37 @@ setInterval(() => { renderStats(); if (S.view === 'sites') renderSites(); }, 60_
 // The Site Maintenance app (Mac) or WP Admin itself (Windows) opens /#connect=<claude-connector:// link>.
 
 let connectPreview = null;
+let connectBusy = false;
+// Connect links waiting their turn: one dialog at a time, the next when it closes.
+const connectQueue = [];
+
+function queueConnect(link) {
+  if (!connectQueue.includes(link)) connectQueue.push(link);
+  if (!$('#dlg-connect').open) nextConnect();
+  else connectTitle();
+}
+function nextConnect() {
+  const link = connectQueue.shift();
+  if (link) startConnect(link);
+}
+function connectTitle() {
+  const n = connectQueue.length;
+  $('#dlg-connect .dh h3').textContent = `Connect a site${n ? ` (${n} more waiting)` : ''}`;
+}
+$('#dlg-connect').addEventListener('cancel', ev => { if (connectBusy) ev.preventDefault(); }); // no Esc mid-setup
+$('#dlg-connect').addEventListener('close', () => setTimeout(nextConnect));
+
+/** Asks the extension, when installed, to bring this tab to the front. */
+function focusThisTab() {
+  try { window.chrome?.runtime?.sendMessage?.(EXT_ID, { type: 'focus' }, () => void window.chrome.runtime.lastError); } catch {}
+}
 
 async function startConnect(link) {
   history.replaceState(null, '', location.pathname); // a reload must not reuse the link
   const dlg = $('#dlg-connect');
   const body = $('[data-body]', dlg);
   const go = $('[data-action=run-connect]', dlg);
+  connectTitle();
   go.disabled = true;
   go.textContent = 'Connect';
   body.innerHTML = '<p class="muted">Fetching the site\'s details…</p>';
@@ -2209,7 +2249,7 @@ async function startConnect(link) {
     ${c.exists ? '<div class="notice">This site is already set up here - its API key and MCP bridge are refreshed; CLAUDE.md is kept.</div>' : ''}
     <p class="hint" style="margin:0">Only connect sites you opened this from yourself.</p>
     <label class="field">Agency<select name="agencyId"></select></label>
-    <label class="check"><input type="checkbox" name="openEditor" checked> Open the workspace in VS Code</label>`;
+    <label class="check"><input type="checkbox" name="openEditor"> Open the workspace in VS Code</label>`;
   agencyOptions($('select[name=agencyId]', dlg), S.agency !== 'all' ? S.agency : S.settings.defaultAgency);
   go.disabled = false;
 }
@@ -2221,27 +2261,49 @@ document.addEventListener('click', async (ev) => {
   const go = $('[data-action=run-connect]', dlg);
   go.disabled = true;
   go.textContent = 'Setting up… (installing the MCP bridge can take a minute)';
+  connectBusy = true;
   try {
     const r = await api('POST', '/api/connect/confirm', {
       id: connectPreview.id,
       agencyId: $('select[name=agencyId]', dlg).value,
       openEditor: $('input[name=openEditor]', dlg).checked,
     });
+    connectBusy = false;
     dlg.close();
     await load();
     toast(`${r.name} connected${r.opened ? ' - opening VS Code' : ''}. Press Check to see its updates.`);
     if (r.siteId) { S.open.add(r.siteId); renderSites(); }
   } catch (e) {
+    connectBusy = false;
     $('[data-body]', dlg).insertAdjacentHTML('beforeend', `<div class="notice bad">${h(e.message)}</div>`);
     go.textContent = 'Connect';
   }
 });
 
-function checkConnectHash() {
+/**
+ * A #connect= link in the address. In a tab just opened for it, while another
+ * dashboard tab is open, the link goes to that tab and this one closes, so
+ * connecting several sites keeps to one tab.
+ * @returns true when the link was handed to another tab
+ */
+async function checkConnectHash(justOpened = false) {
   const m = location.hash.match(/^#connect=(.+)$/);
-  if (m) startConnect(decodeURIComponent(m[1]));
+  if (!m) return false;
+  const link = decodeURIComponent(m[1]);
+  history.replaceState(null, '', location.pathname); // a reload must not reuse the link
+  if (justOpened) {
+    const r = await api('POST', '/api/connect/handoff', { link }).catch(() => null);
+    if (r?.delivered) {
+      window.close();
+      // Still here: the browser did not let this tab close itself.
+      $('#sites').innerHTML = '<div class="empty"><h2>Sent to your dashboard tab</h2><p>The site is waiting for you to confirm it in the dashboard tab that was already open. You can close this tab.</p></div>';
+      return true;
+    }
+  }
+  queueConnect(link);
+  return false;
 }
-window.addEventListener('hashchange', checkConnectHash);
+window.addEventListener('hashchange', () => checkConnectHash());
 window.addEventListener('focus', () => { if ($('#dlg-settings').open) renderExtStatus(); });
 
-load().then(() => { connect(); checkConnectHash(); }).catch(e => { $('#sites').innerHTML = `<div class="empty"><h2>Could not load</h2><p>${h(e.message)}</p></div>`; });
+load().then(async () => { if (!(await checkConnectHash(true))) connect(); }).catch(e => { $('#sites').innerHTML = `<div class="empty"><h2>Could not load</h2><p>${h(e.message)}</p></div>`; });

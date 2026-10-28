@@ -117,8 +117,10 @@ fi
 case "$1" in
   claude-connector://start) ;;   # from the browser extension's helper: start only, it opens the tab
   claude-connector://connect*)
-    # A Connect-on-this-Mac link: the dashboard asks before connecting.
-    open "$URL/#connect=$(${sh(process.execPath)} -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$1")" ;;
+    # A Connect-on-this-Mac link: the dashboard asks before connecting. An open
+    # dashboard tab takes it (no new tab); otherwise open one with it.
+    ${sh(process.execPath)} -e 'fetch(process.argv[1] + "/api/connect/handoff", { method: "POST", headers: { "Content-Type": "application/json", "X-CC-Dashboard": "1" }, body: JSON.stringify({ link: process.argv[2] }) }).then(r => r.json()).then(j => process.exit(j.delivered ? 0 : 1), () => process.exit(1))' "$URL" "$1" \\
+      || open "$URL/#connect=$(${sh(process.execPath)} -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$1")" ;;
   *) open "$URL" ;;   # claude-connector://open (from the extension) or no argument: just open it
 esac
 `;

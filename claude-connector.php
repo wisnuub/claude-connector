@@ -193,6 +193,12 @@ function claude_connector_clear_update_cache( $upgrader, $hook_extra ) {
     }
 }
 
+// Dashboard → Updates → "Check again" (and the dashboard's Check) clear WordPress's
+// update cache: ask GitHub again too, so a new release shows without waiting 12h.
+add_action( 'delete_site_transient_update_plugins', function () {
+    delete_transient( 'claude_connector_gh_release' );
+} );
+
 // ──────────────────────────────────────────────────────────────────────────────
 //  API Key helpers
 // ──────────────────────────────────────────────────────────────────────────────
