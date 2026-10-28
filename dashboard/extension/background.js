@@ -27,6 +27,22 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, reply) => {
     reply({ ok: true });
     return;
   }
+  if (msg?.type === 'handoff' && sender.tab) {
+    // A tab opened for a connect link gave it to the dashboard tab already open:
+    // switch to that tab first, then close this one - closing first would let the
+    // browser pick the tab to show (usually WP Admin).
+    (async () => {
+      const origin = new URL(sender.url).origin;
+      const tabs = (await chrome.tabs.query({ url: `${origin}/*` })).filter(t => t.id !== sender.tab.id);
+      const dash = tabs.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
+      if (!dash) return { ok: false };
+      await chrome.tabs.update(dash.id, { active: true });
+      await chrome.windows.update(dash.windowId, { focused: true });
+      await chrome.tabs.remove(sender.tab.id);
+      return { ok: true };
+    })().then(reply, e => reply({ ok: false, error: e.message }));
+    return true; // reply asynchronously
+  }
   if (msg?.type !== 'login') return;
   (async () => {
     let url;

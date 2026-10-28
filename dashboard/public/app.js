@@ -933,8 +933,10 @@ async function renderExtStatus() {
   if (!el) return;
   el.innerHTML = '<p class="hint">Checking for the extension…</p>';
   const ext = await extensionRuntime();
+  const old = ext && ext.version.split('.').map(Number).reduce((r, x, i) => r || x - [1, 4, 1][i], 0) < 0;
   el.innerHTML = ext
-    ? `<p class="hint" style="margin:0">✓ The Claude Connector extension ${h(ext.version)} is installed in this browser. Click its toolbar icon any time to open this dashboard.</p>`
+    ? `<p class="hint" style="margin:0">✓ The Claude Connector extension ${h(ext.version)} is installed in this browser. Click its toolbar icon any time to open this dashboard.</p>
+       ${old ? '<div class="notice warn" style="margin:6px 0 0">A newer version is in the <code>extension</code> folder: on <code>chrome://extensions</code> press the reload arrow on Claude Connector, so Connect switches to this tab.</div>' : ''}`
     : `<div class="notice" style="margin:0">
         <b>Install the Claude Connector extension once</b> (Chrome or Edge, Windows or Mac) so Log in opens a new tab in this browser:
         <ol style="margin:6px 0 6px 18px;padding:0">
@@ -2226,6 +2228,18 @@ function focusThisTab() {
   try { window.chrome?.runtime?.sendMessage?.(EXT_ID, { type: 'focus' }, () => void window.chrome.runtime.lastError); } catch {}
 }
 
+/** Asks the extension to show the other dashboard tab and close this one; false without the extension. */
+function extensionHandoff() {
+  return new Promise(resolve => {
+    const rt = window.chrome?.runtime;
+    if (!rt?.sendMessage) return resolve(false);
+    const timer = setTimeout(() => resolve(false), 1500);
+    try {
+      rt.sendMessage(EXT_ID, { type: 'handoff' }, r => { clearTimeout(timer); void rt.lastError; resolve(!!r?.ok); });
+    } catch { clearTimeout(timer); resolve(false); }
+  });
+}
+
 async function startConnect(link) {
   history.replaceState(null, '', location.pathname); // a reload must not reuse the link
   const dlg = $('#dlg-connect');
@@ -2294,6 +2308,8 @@ async function checkConnectHash(justOpened = false) {
   if (justOpened) {
     const r = await api('POST', '/api/connect/handoff', { link }).catch(() => null);
     if (r?.delivered) {
+      // The extension switches to the dashboard tab and closes this one; without it, close this tab ourselves.
+      if (await extensionHandoff()) return true;
       window.close();
       // Still here: the browser did not let this tab close itself.
       $('#sites').innerHTML = '<div class="empty"><h2>Sent to your dashboard tab</h2><p>The site is waiting for you to confirm it in the dashboard tab that was already open. You can close this tab.</p></div>';
