@@ -1140,7 +1140,7 @@ function renderTasks() {
           <td><a href="${h(t.url)}" target="_blank" rel="noopener">${h(t.name)}</a>${doneThisMonth(t) ? ` <span class="tag accent" title="${h(`${t.lastDone.text}${t.lastDone.by ? ` - ${t.lastDone.by}` : ''}`)}">✓ updated ${h(new Date(t.lastDone.at).toLocaleDateString('en-AU', { day: 'numeric', month: 'short' }))}</span>` : ''}</td>
           <td>${agTag(t.agency)}${h(t.project?.name || '')}</td>
           <td>${t.siteId ? (t.siteIds || [t.siteId]).map(id => `<a href="#" data-action="goto-site" data-site="${h(id)}">${h(S.sites.find(x => x.id === id)?.name || id)}</a>`).join(' + ')
-            : `<span class="tag" title="Log in works on any site. Updates, form tests and the security check need Claude Connector installed and connected: install it from wp-admin, then click Connect on this Mac on its settings page.">Not connected</span>${t.siteUrl ? ` <a href="${h(t.siteUrl)}" target="_blank" rel="noopener" class="faint">${h(t.siteUrl.replace(/^https?:\/\//, '').replace(/\/wp-(admin|login\.php).*$/, ''))}</a>` : ''}`}</td>
+            : `<span class="tag" title="Log in works on any site. Updates, form tests and the security check need Claude Connector installed and connected: install it from wp-admin, then click Connect on this Mac (or PC) on its settings page.">Not connected</span>${t.siteUrl ? ` <a href="${h(t.siteUrl)}" target="_blank" rel="noopener" class="faint">${h(t.siteUrl.replace(/^https?:\/\//, '').replace(/\/wp-(admin|login\.php).*$/, ''))}</a>` : ''}`}</td>
           <td class="hide-sm">${t.due ? `<span class="${t.due < new Date().toISOString().slice(0, 10) ? 'ver-arrow' : ''}">${h(new Date(t.due + 'T00:00').toLocaleDateString())}</span>` : ''}</td>
           <td class="hide-sm">${h(minutes(t.minutes))}</td>
           <td class="acts">${t.siteId ? '' : `<button class="btn sm" data-action="install-connector" data-gid="${h(t.gid)}" title="Downloads claude-connector.zip and opens the site's Add Plugins › Upload page, signed in with the login from Asana when there is one">Install connector</button>`}<button class="btn sm" data-action="asana-logins" data-gid="${h(t.gid)}">${S.logins[t.gid] ? 'Hide login' : 'Login'}</button></td>
@@ -1635,7 +1635,7 @@ document.addEventListener('click', async (ev) => {
         if (!got) return;
         if (login) await signIn(upload, login.user, login.pass);
         else window.open(upload, '_blank', 'noopener');
-        toast(`${got === 'downloaded' ? 'claude-connector.zip is downloading. ' : ''}On the page that opened: choose claude-connector.zip, Install Now, then Activate - it lands on Connect on this Mac.`);
+        toast(`${got === 'downloaded' ? 'claude-connector.zip is downloading. ' : ''}On the page that opened: choose claude-connector.zip, Install Now, then Activate - it lands on Connect on this Mac (or PC).`);
       } catch (e) { toast(`Could not open the upload page: ${e.message}`); }
       finally { t.disabled = false; t.textContent = 'Install connector'; }
       return;
@@ -2182,8 +2182,8 @@ document.addEventListener('input', (ev) => {
 // Refresh relative times once a minute.
 setInterval(() => { renderStats(); if (S.view === 'sites') renderSites(); }, 60_000);
 
-// ── Connect on this Mac ──────────────────────────────────────────────────────
-// The Site Maintenance app opens /#connect=<claude-connector:// link>.
+// ── Connect on this Mac / PC ────────────────────────────────────────────────────
+// The Site Maintenance app (Mac) or WP Admin itself (Windows) opens /#connect=<claude-connector:// link>.
 
 let connectPreview = null;
 

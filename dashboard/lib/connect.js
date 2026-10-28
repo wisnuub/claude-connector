@@ -1,5 +1,7 @@
-// "Connect on this Mac": the WordPress settings page opens a claude-connector://
-// link, the Site Maintenance app (shortcut.js) passes it here, and this sets the
+// "Connect on this Mac" / "Connect on this PC": the WordPress settings page makes a
+// claude-connector:// link - on a Mac the Site Maintenance app (shortcut.js) opens
+// it, on Windows WP Admin opens the dashboard's /#connect= directly - it is passed
+// here, and this sets the
 // site up the way the Mac setup script does - shared MCP server in
 // ~/claude-sites/.mcp-server, a workspace in ~/claude-sites/<slug> with .mcp.json
 // and CLAUDE.md - then opens it in VS Code.
@@ -70,9 +72,15 @@ function freeSlug(slug, url) {
   }
 }
 
+const WIN = process.platform === 'win32';
+const winArg = a => (/[\s&()^|<>"]/.test(a) ? `"${a.replace(/"/g, '""')}"` : a);
+
 function run(cmd, args, opts = {}) {
   return new Promise((resolve, reject) => {
-    const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], ...opts });
+    // npm and code are .cmd files on Windows, which Node only starts through a shell.
+    const p = WIN
+      ? spawn([cmd, ...args.map(winArg)].join(' '), { stdio: ['ignore', 'pipe', 'pipe'], shell: true, ...opts })
+      : spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], ...opts });
     let err = '';
     p.stderr.on('data', d => { err += d; });
     p.on('error', reject);
@@ -81,7 +89,11 @@ function run(cmd, args, opts = {}) {
 }
 
 // launchd / Finder start the app with a bare PATH; look next to this node first.
-const PATH_PLUS = [path.dirname(process.execPath), '/opt/homebrew/bin', '/usr/local/bin', process.env.PATH || '/usr/bin:/bin'].join(':');
+// Windows keeps the user's PATH (its key is "Path", and entries contain ':').
+const RUN_ENV = WIN ? process.env : {
+  ...process.env,
+  PATH: [path.dirname(process.execPath), '/opt/homebrew/bin', '/usr/local/bin', process.env.PATH || '/usr/bin:/bin'].join(':'),
+};
 
 /** Refreshes the shared MCP server, as the setup script does on every run. */
 async function ensureMcpServer() {
@@ -96,14 +108,14 @@ async function ensureMcpServer() {
       fs.copyFileSync(path.join(ROOT, '..', 'mcp-server', f), path.join(mcpDir(), f));
     }
   }
-  await run('npm', ['install', '--silent', '--no-audit', '--no-fund'], { cwd: mcpDir(), env: { ...process.env, PATH: PATH_PLUS } });
+  await run('npm', ['install', '--silent', '--no-audit', '--no-fund'], { cwd: mcpDir(), env: RUN_ENV });
 }
 
 /** Opens a folder (and optionally a file in it) in VS Code. */
 export async function openInVSCode(dir, file = null) {
   const args = file ? [dir, file] : [dir];
-  try { await run('code', args, { env: { ...process.env, PATH: PATH_PLUS } }); return true; } catch {}
-  try { await run('open', ['-a', 'Visual Studio Code', ...args]); return true; } catch {}
+  try { await run('code', args, { env: RUN_ENV }); return true; } catch {}
+  if (!WIN) try { await run('open', ['-a', 'Visual Studio Code', ...args]); return true; } catch {}
   return false;
 }
 
@@ -138,7 +150,7 @@ export async function ensureWorkspace(site) {
 /** Step 2: the user confirmed - write the workspace and open it. */
 export async function confirmConnect(id, { openEditor = true } = {}) {
   const p = pending.get(id);
-  if (!p || p.expires < Date.now()) throw new Error('This connect request has expired - click Connect on this Mac in WP Admin again.');
+  if (!p || p.expires < Date.now()) throw new Error('This connect request has expired - click Connect in WP Admin again.');
   pending.delete(id);
   const d = p.details;
 

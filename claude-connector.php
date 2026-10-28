@@ -559,7 +559,7 @@ function claude_settings_page() {
     <div class="wrap">
         <h1>Claude Connector <span style="font-size:13px;font-weight:400;color:#666;">v<?php echo esc_html( CLAUDE_CONNECTOR_VERSION ); ?></span></h1>
         <?php if ( isset( $_GET['welcome'] ) ) : // phpcs:ignore ?>
-        <div class="notice notice-success"><p><strong>Claude Connector is active.</strong> Press <strong>Connect on this Mac</strong> below to add this site to the Site Maintenance dashboard.</p></div>
+        <div class="notice notice-success"><p><strong>Claude Connector is active.</strong> Press <strong>Connect on this Mac</strong> (or <strong>Connect on this PC</strong>) below to add this site to the Site Maintenance dashboard.</p></div>
         <?php endif; ?>
         <table class="form-table" role="presentation">
             <tr>
@@ -748,10 +748,22 @@ function claude_settings_page() {
                 </div>
             </div>
         </div>
-        <div id="claude-setup-windows" style="margin-top:12px;">
-            <p style="margin:0 0 6px;"><strong>Windows:</strong> download the script, then right-click it &rarr; Run with PowerShell.</p>
-            <a id="claude-dl-windows" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-ajax.php?action=claude_connect_script&os=windows' ), 'claude_connect_script' ) ); ?>"
-               class="button button-primary" style="font-size:13px;">&#x229e;&nbsp; Download Windows Script (.ps1)</a>
+        <div id="claude-setup-windows" style="margin-top:12px;max-width:960px;">
+            <p style="margin:0 0 8px;"><strong>Windows</strong> - pick either option:</p>
+            <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                <div style="flex:1 1 280px;border:1px solid #c3c4c7;border-radius:6px;padding:12px 14px;background:#fff;">
+                    <h3 style="margin:0 0 4px;font-size:14px;">Option 1 - Connect on this PC</h3>
+                    <p class="description" style="margin:0 0 10px;">One click, if the Site Maintenance dashboard is running on this PC. It sets up the workspace, opens VS Code and adds the site to the dashboard.</p>
+                    <button type="button" class="button button-primary" id="claude-connect-win">Connect on this PC</button>
+                    <p class="description" id="claude-connect-win-hint" style="display:none;margin-top:8px;">Confirm in the dashboard tab that opened. It says the page cannot be reached? The dashboard is not running: in the repo's <code>dashboard</code> folder run <code>npm start</code>, then click again - or use option 2.</p>
+                </div>
+                <div style="flex:1 1 280px;border:1px solid #c3c4c7;border-radius:6px;padding:12px 14px;background:#fff;">
+                    <h3 style="margin:0 0 4px;font-size:14px;">Option 2 - Download the script</h3>
+                    <p class="description" style="margin:0 0 10px;">Download it, then right-click it &rarr; Run with PowerShell.</p>
+                    <a id="claude-dl-windows" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-ajax.php?action=claude_connect_script&os=windows' ), 'claude_connect_script' ) ); ?>"
+                       class="button button-primary">&#x229e;&nbsp; Download Windows Script (.ps1)</a>
+                </div>
+            </div>
         </div>
         <script>
         (function () {
@@ -799,6 +811,26 @@ function claude_settings_page() {
                     } )
                     .catch( function ( e ) { alert( 'Could not create the connect link: ' + e.message ); } )
                     .then( function () { cbtn.disabled = false; } );
+            } );
+            // Windows has no Site Maintenance app: open the dashboard's connect screen directly.
+            var wbtn = document.getElementById( 'claude-connect-win' );
+            wbtn.addEventListener( 'click', function () {
+                // Open the tab during the click so popup blockers allow it, then point it at the dashboard.
+                var tab = window.open( 'about:blank', '_blank' );
+                if ( tab ) tab.opener = null;
+                wbtn.disabled = true;
+                fetchSetup()
+                    .then( function ( d ) {
+                        var url = 'http://127.0.0.1:4590/#connect=' + encodeURIComponent( d.connect );
+                        if ( tab ) tab.location.href = url;
+                        else window.open( url, '_blank', 'noopener' );
+                        document.getElementById( 'claude-connect-win-hint' ).style.display = '';
+                    } )
+                    .catch( function ( e ) {
+                        if ( tab ) tab.close();
+                        alert( 'Could not create the connect link: ' + e.message );
+                    } )
+                    .then( function () { wbtn.disabled = false; } );
             } );
             document.getElementById( 'claude-setup-copy' ).addEventListener( 'click', function () {
                 var b = this;
