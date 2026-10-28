@@ -64,7 +64,7 @@ function freeSlug(slug, url) {
     const cfg = path.join(sitesDir(), s, '.mcp.json');
     if (!fs.existsSync(cfg)) return s;
     try {
-      const env = JSON.parse(fs.readFileSync(cfg, 'utf8'))?.mcpServers?.['claude-connector']?.env;
+      const env = JSON.parse(fs.readFileSync(cfg, 'utf8').replace(/^\uFEFF/, ''))?.mcpServers?.['claude-connector']?.env;
       if ((env?.WP_URL || '').replace(/\/+$/, '') === String(url).replace(/\/+$/, '')) return s; // same site: refresh it
     } catch {}
   }

@@ -10,8 +10,9 @@ export const DATA_DIR = process.env.CC_DASHBOARD_DATA || path.join(ROOT, 'data')
 export const SCREENS_DIR = path.join(DATA_DIR, 'screens');
 fs.mkdirSync(SCREENS_DIR, { recursive: true });
 
+// Strips a UTF-8 BOM: Windows PowerShell 5 writes one, and JSON.parse rejects it.
 function readJson(file, fallback) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
+  try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); } catch { return fallback; }
 }
 
 // Write to a temp file and rename, so a crash mid-write never leaves half a file.
