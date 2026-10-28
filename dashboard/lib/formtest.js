@@ -10,6 +10,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { SCREENS_DIR } from './store.js';
+import { importPlaywright } from './deps.js';
 
 function playwrightChromium() {
   const roots = [
@@ -41,9 +42,7 @@ async function browser(headless) {
     if (b) await b.close().catch(() => {});
   }
   browserPromise = (async () => {
-    let chromium;
-    try { ({ chromium } = await import('playwright-core')); }
-    catch { throw new Error('The form test needs playwright-core. In the dashboard folder run: npm install'); }
+    const { chromium } = await importPlaywright('The form test');
     const exe = process.env.CHROME_PATH || playwrightChromium();
     let b = null;
     if (exe) b = await chromium.launch({ executablePath: exe, headless });

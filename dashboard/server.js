@@ -2,7 +2,7 @@
 // Claude Connector maintenance dashboard - a local web app for running updates
 // and form tests across many WordPress sites.
 //
-//   cd dashboard && npm install && npm start      → http://127.0.0.1:4590
+//   cd dashboard && npm start      → http://127.0.0.1:4590  (installs its dependency on first start)
 //
 // Listens on 127.0.0.1 only. API keys stay in this process and in data/.
 import http from 'http';
@@ -20,6 +20,7 @@ import { previewConnect, confirmConnect, ensureWorkspace, openInVSCode } from '.
 import * as asana from './lib/asana.js';
 import { logIn, closeLoginBrowser } from './lib/login.js';
 import { openForClaude, effectiveScan } from './lib/security.js';
+import { ensureDeps } from './lib/deps.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, 'public');
@@ -511,6 +512,8 @@ server.listen(PORT, HOST, () => {
   const n = store.listSites().length;
   console.log(`Claude Connector dashboard ${VERSION} → http://${HOST}:${PORT}  (${n} site${n === 1 ? '' : 's'} found)`);
   console.log(`Data: ${store.DATA_DIR}`);
+  // Form tests and Log in need playwright-core: install it now if this checkout lacks it.
+  ensureDeps().catch(e => console.error(`Could not install the dependencies (${e.message}) - form tests and Log in will not work. In the dashboard folder run: npm install`));
 });
 
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, async () => { await closeBrowser(); await closeLoginBrowser(); process.exit(0); });

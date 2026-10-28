@@ -7,6 +7,7 @@
 // security check before the form, a two-factor code - it leaves that to you.
 import path from 'path';
 import { DATA_DIR } from './store.js';
+import { importPlaywright } from './deps.js';
 
 const PROFILE = path.join(DATA_DIR, 'browser-profile');
 let ctxPromise = null;
@@ -17,9 +18,7 @@ async function context() {
     try { await existing.pages(); return existing; } catch {}
   }
   ctxPromise = (async () => {
-    let chromium;
-    try { ({ chromium } = await import('playwright-core')); }
-    catch { throw new Error('Log in needs playwright-core. In the dashboard folder run: npm install'); }
+    const { chromium } = await importPlaywright('Log in');
     // CC_LOGIN_HEADLESS is for automated checks; people get a window they can use.
     const opts = { headless: !!process.env.CC_LOGIN_HEADLESS, viewport: null, args: ['--start-maximized'] };
     for (const channel of ['chrome', 'msedge']) {
