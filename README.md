@@ -736,6 +736,14 @@ No SFTP. No SSH. No cPanel. No asking the client to do anything except install a
 
 ## Changelog
 
+### 1.8.16 - Connect on this PC (Windows)
+
+- **Connect on this PC**: on Windows, WP Admin → Settings → Claude Connector now has a one-click connect button next to the PowerShell script. It opens the Site Maintenance dashboard's connect screen (`http://127.0.0.1:4590`) in a new tab, where you confirm as on a Mac. The dashboard has to be running (`npm start` in the `dashboard` folder).
+- **Dashboard on Windows**: connecting a site no longer fails with `spawn npm ENOENT` while installing the MCP bridge, and opening a workspace in VS Code works. `npm` and `code` are `.cmd` files there, now started through a shell, and the dashboard keeps your own `PATH` instead of adding macOS folders to it.
+- **Dashboard**: sites whose `~/claude-sites/<site>/.mcp.json` was saved by Windows PowerShell (with a byte-order mark) are listed again; they were skipped without a message.
+
+**Verified** on Windows 11 with Node 24: a full connect against a stand-in site (details fetched, MCP bridge installed, `.mcp.json` written, the site listed) - the same run on 1.8.15 failed with `spawn npm ENOENT`; 18 BOM-prefixed workspaces listed, 0 before.
+
 ### 1.8.15 — Deeper security check; mark warnings checked; trusted widget domains
 
 **Added to the security check**
