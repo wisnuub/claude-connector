@@ -298,6 +298,15 @@ async function api(req, res, url) {
     broadcast('site', publicSite(store.getSite(body.site)));
     return send(res, 200, { ok: true });
   }
+  if (p === '/api/asana/mark-done') {
+    // { task, sites: [id], done, whole } - in the dashboard only, never completes the task in Asana.
+    const task = String(body.task || '').replace(/\D/g, '');
+    if (!task) return send(res, 400, { message: 'task is required' });
+    const sites = (Array.isArray(body.sites) ? body.sites : []).map(id => store.getSite(id)).filter(Boolean);
+    asana.markDone(task, sites.map(s => s.id), { done: body.done !== false, whole: !!body.whole });
+    for (const s of sites) broadcast('site', publicSite(s));
+    return send(res, 200, { ok: true });
+  }
   if (p === '/api/extension/reveal') {
     // Opens the extension folder in the OS file manager, ready for Chrome's "Load unpacked".
     try {

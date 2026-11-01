@@ -1048,11 +1048,16 @@ function taskStatusCard(site) {
     : `<span class="pill"><span class="dot"></span>Open</span> <span class="muted">not marked complete yet</span>`]);
   if (t.lastDoneComment) rows.push(['Last "update done"', comment(t.lastDoneComment)]);
   rows.push(['Latest comment', comment(t.lastComment) || '<span class="faint">none</span>']);
+  const d = site.asanaDone;
+  const marked = !t.completed && d?.manual && d.taskGid === site.asana.taskGid && thisMonth(d.at);
+  if (marked) rows.push(['In the dashboard', `Marked done ${h(ago(d.at))} <span class="muted">- not on the Asana to-do list</span>`]);
   // Told the boss but not acknowledged yet?
-  const told = t.lastDoneComment && !t.completed;
+  const told = (t.lastDoneComment || marked) && !t.completed;
   return `<dl class="kv">${rows.map(([k, v]) => `<dt>${h(k)}</dt><dd>${v}</dd>`).join('')}</dl>
-    ${told ? '<p class="hint" style="margin-top:8px">You\'ve already posted an "update done" comment - waiting for it to be marked complete in Asana. No need to comment again.</p>' : ''}
-    <div class="bar" style="margin:8px 0 0"><a class="btn sm ghost" href="${h(t.url || site.asana.url)}" target="_blank" rel="noopener">Open in Asana ↗</a><button class="btn sm ghost" data-action="refresh-task-status">Refresh</button></div>`;
+    ${told ? `<p class="hint" style="margin-top:8px">${marked ? 'Marked done here' : 'You\'ve already posted an "update done" comment'} - waiting for it to be marked complete in Asana. No need to comment again.</p>` : ''}
+    <div class="bar" style="margin:8px 0 0"><a class="btn sm ghost" href="${h(t.url || site.asana.url)}" target="_blank" rel="noopener">Open in Asana ↗</a><button class="btn sm ghost" data-action="refresh-task-status">Refresh</button>${t.completed ? ''
+      : marked ? `<button class="btn sm ghost" data-action="mark-done" data-gid="${h(site.asana.taskGid)}" data-done="0" title="Show it as to-do again">Undo done</button>`
+      : `<button class="btn sm" data-action="mark-done" data-gid="${h(site.asana.taskGid)}" title="${h(MARK_TIP)}">Mark as done</button>`}</div>`;
 }
 
 async function loadTaskStatus(id) {
@@ -1096,13 +1101,22 @@ const doneThisMonth = t => !!t.lastDone?.at && thisMonth(t.lastDone.at);
  * counts only when it names this site - or this site posted its own.
  */
 function siteDoneThisMonth(siteId, t) {
+  const site = S.sites.find(s => s.id === siteId);
+  if (site?.asanaDone?.taskGid === t.gid && thisMonth(site.asanaDone.at)) return true;
   const ids = t.siteIds || [t.siteId];
   if (ids.length < 2) return doneThisMonth(t);
-  const site = S.sites.find(s => s.id === siteId);
   if (!site) return false;
-  if (site.asanaDone?.taskGid === t.gid && thisMonth(site.asanaDone.at)) return true;
   return doneThisMonth(t) && (t.lastDone.text || '').toLowerCase().includes(site.name.toLowerCase());
 }
+
+/** Done this month: an "updates done" comment, or every site on it done. */
+const taskDone = t => doneThisMonth(t) || (!!t.siteIds?.length && t.siteIds.every(id => siteDoneThisMonth(id, t)));
+
+/** Marked done by hand in the dashboard (so it can be undone). */
+const markedDone = t => !!t.lastDone?.manual && thisMonth(t.lastDone.at)
+  || (t.siteIds || []).some(id => { const d = S.sites.find(s => s.id === id)?.asanaDone; return d?.manual && d.taskGid === t.gid && thisMonth(d.at); });
+
+const MARK_TIP = 'Hides it from the Asana to-do lists here, for when you tested the form and commented in Asana yourself. Nothing changes in Asana: the task stays open for whoever ticks it complete.';
 
 function renderTasks() {
   const el = $('#view-tasks');
@@ -1113,9 +1127,9 @@ function renderTasks() {
   }
   if (!S.tasks) { el.innerHTML = '<p class="muted">Loading your tasks from Asana…</p>'; loadTasks(); return; }
   const q = S.tasksQ.toLowerCase();
-  const hiddenDone = (S.tasks.tasks || []).filter(doneThisMonth).length;
+  const hiddenDone = (S.tasks.tasks || []).filter(taskDone).length;
   const list = (S.tasks.tasks || []).filter(t => {
-    if (!S.showDone && doneThisMonth(t)) return false;
+    if (!S.showDone && taskDone(t)) return false;
     if (q && !`${t.name} ${t.project?.name || ''} ${t.siteName || ''}`.toLowerCase().includes(q)) return false;
     if (S.tasksShow === 'site') return !!t.siteId;
     if (S.tasksShow === 'nosite') return !t.siteId;
@@ -1130,7 +1144,7 @@ function renderTasks() {
       <span class="count">${list.length} task${list.length === 1 ? '' : 's'}</span>
       <div class="seg" role="group" aria-label="Show">${[['all', 'All'], ['site', 'Connected'], ['nosite', 'Not connected']].map(([k, l]) => `<button data-action="tasks-show" data-v="${k}" class="${S.tasksShow === k ? 'on' : ''}">${l}</button>`).join('')}</div>
       <input type="search" id="tq" placeholder="Search tasks" value="${h(S.tasksQ)}" data-action="search-tasks">
-      <label class="check" title="WordPress update tasks with an 'update done' comment this month"><input type="checkbox" data-action="show-done" ${S.showDone ? 'checked' : ''}> Show done this month${hiddenDone ? ` (${hiddenDone})` : ''}</label>
+      <label class="check" title="Tasks with an 'update done' comment this month, or marked done here"><input type="checkbox" data-action="show-done" ${S.showDone ? 'checked' : ''}> Show done this month${hiddenDone ? ` (${hiddenDone})` : ''}</label>
       <span class="grow"></span>
       <span class="muted" style="font-size:13px">${h(who)}${S.tasks.at ? ` · ${h(ago(S.tasks.at))}` : ''}</span>
       <button class="btn sm" data-action="tasks-refresh">↻ Refresh</button>
@@ -1142,13 +1156,15 @@ function renderTasks() {
       <div class="tablewrap"><table class="list tasks">
         <thead><tr><th>Task</th><th>Project</th><th>Site</th><th class="hide-sm">Due</th><th class="hide-sm">Actual time</th><th></th></tr></thead>
         <tbody>${list.map(t => `<tr data-gid="${h(t.gid)}">
-          <td><a href="${h(t.url)}" target="_blank" rel="noopener">${h(t.name)}</a>${doneThisMonth(t) ? ` <span class="tag accent" title="${h(`${t.lastDone.text}${t.lastDone.by ? ` - ${t.lastDone.by}` : ''}`)}">✓ updated ${h(new Date(t.lastDone.at).toLocaleDateString('en-AU', { day: 'numeric', month: 'short' }))}</span>` : ''}</td>
+          <td><a href="${h(t.url)}" target="_blank" rel="noopener">${h(t.name)}</a>${doneThisMonth(t) && !t.lastDone.manual ? ` <span class="tag accent" title="${h(`${t.lastDone.text}${t.lastDone.by ? ` - ${t.lastDone.by}` : ''}`)}">✓ updated ${h(new Date(t.lastDone.at).toLocaleDateString('en-AU', { day: 'numeric', month: 'short' }))}</span>` : markedDone(t) ? ' <span class="tag accent" title="Marked done in the dashboard - still open in Asana">✓ marked done</span>' : ''}</td>
           <td>${agTag(t.agency)}${h(t.project?.name || '')}</td>
           <td>${t.siteId ? (t.siteIds || [t.siteId]).map(id => `<a href="#" data-action="goto-site" data-site="${h(id)}">${h(S.sites.find(x => x.id === id)?.name || id)}</a>`).join(' + ')
             : `<span class="tag" title="Log in works on any site. Updates, form tests and the security check need Claude Connector installed and connected: install it from wp-admin, then click Connect on this Mac (or PC) on its settings page.">Not connected</span>${t.siteUrl ? ` <a href="${h(t.siteUrl)}" target="_blank" rel="noopener" class="faint">${h(t.siteUrl.replace(/^https?:\/\//, '').replace(/\/wp-(admin|login\.php).*$/, ''))}</a>` : ''}`}</td>
           <td class="hide-sm">${t.due ? `<span class="${t.due < new Date().toISOString().slice(0, 10) ? 'ver-arrow' : ''}">${h(new Date(t.due + 'T00:00').toLocaleDateString())}</span>` : ''}</td>
           <td class="hide-sm">${h(minutes(t.minutes))}</td>
-          <td class="acts">${t.siteId ? '' : `<button class="btn sm" data-action="install-connector" data-gid="${h(t.gid)}" title="Downloads claude-connector.zip and opens the site's Add Plugins › Upload page, signed in with the login from Asana when there is one">Install connector</button>`}<button class="btn sm" data-action="asana-logins" data-gid="${h(t.gid)}">${S.logins[t.gid] ? 'Hide login' : 'Login'}</button></td>
+          <td class="acts">${t.siteId ? '' : `<button class="btn sm" data-action="install-connector" data-gid="${h(t.gid)}" title="Downloads claude-connector.zip and opens the site's Add Plugins › Upload page, signed in with the login from Asana when there is one">Install connector</button>`}<button class="btn sm" data-action="asana-logins" data-gid="${h(t.gid)}">${S.logins[t.gid] ? 'Hide login' : 'Login'}</button>${markedDone(t)
+            ? `<button class="btn sm ghost" data-action="mark-done" data-gid="${h(t.gid)}" data-done="0" title="Show it as to-do again">Undo done</button>`
+            : taskDone(t) ? '' : `<button class="btn sm ghost" data-action="mark-done" data-gid="${h(t.gid)}" title="${h(MARK_TIP)}">Mark as done</button>`}</td>
         </tr>${S.logins[t.gid] ? `<tr class="logins-row"><td colspan="6">${loginsBlock(t.gid, S.sites.find(s => s.id === t.siteId)?.url)}</td></tr>` : ''}`).join('')}</tbody>
       </table></div>
     </div>`;
@@ -1591,6 +1607,26 @@ document.addEventListener('click', async (ev) => {
       return;
     }
     case 'rebuild-comment': delete S.drafts[site.id]; renderSite(site.id); return;
+    case 'mark-done': {
+      // From a site's Asana tab: just that site. From the task list: every site on the task.
+      const gid = t.dataset.gid, done = t.dataset.done !== '0';
+      const task = S.tasks?.tasks?.find(x => x.gid === gid);
+      const ids = site ? [site.id] : task?.siteIds || [];
+      t.disabled = true;
+      try {
+        await api('POST', '/api/asana/mark-done', { task: gid, sites: ids, done, whole: !site });
+        // Same as the server's change, so the lists are right before its update arrives.
+        for (const id of ids) {
+          const s = S.sites.find(x => x.id === id);
+          if (s && done) s.asanaDone = { at: new Date().toISOString(), taskGid: gid, manual: true, prev: s.asanaDone?.manual ? s.asanaDone.prev || null : s.asanaDone || null };
+          else if (s?.asanaDone?.manual && s.asanaDone.taskGid === gid) s.asanaDone = s.asanaDone.prev || null;
+        }
+        toast(done ? 'Marked done here - the task stays open in Asana' : 'Back on the to-do list');
+        await loadTasks();
+        if (site) renderSite(site.id);
+      } catch (e) { toast(e.message); t.disabled = false; }
+      return;
+    }
     case 'tasks-show': S.tasksShow = t.dataset.v; renderTasks(); return;
     case 'goto-site': {
       ev.preventDefault();

@@ -263,6 +263,7 @@ function withSites(tasks, errors = []) {
     const list = ids.map(id => sites.find(s => s.id === id)).filter(Boolean);
     return { ...t, siteId: list[0]?.id || null, siteIds: list.map(s => s.id), siteName: list.map(s => s.name).join(' + ') || null, siteUrl: list[0]?.url || known };
   };
+  const marks = getMeta().asanaMarkedDone || {};
   const out = tasks.map(t => {
     const linked = sites.filter(s => siteState(s.id).asana?.taskGid === t.gid);
     const known = t.project ? urls[t.project.gid] || null : null;
@@ -270,7 +271,10 @@ function withSites(tasks, errors = []) {
     // Match within the task's agency first, then across all sites.
     const own = sites.filter(s => agencyFor(s.id).id === t.agency);
     const site = linked[0] || byHost || (t.project ? matchSite(t.project.name, own) || matchSite(t.project.name, sites) : null);
-    return { ...describe(t, [...new Set([...linked.map(s => s.id), ...(site ? [site.id] : [])])], known), linked: linked.length > 0 };
+    // Marked done in the dashboard counts like an "updates done" comment.
+    const mark = marks[t.gid];
+    const lastDone = mark && !(t.lastDone?.at > mark.at) ? { at: mark.at, by: 'you', text: 'Marked done in the dashboard', manual: true } : t.lastDone;
+    return { ...describe({ ...t, lastDone }, [...new Set([...linked.map(s => s.id), ...(site ? [site.id] : [])])], known), linked: linked.length > 0 };
   });
   for (const s of sites) {
     if (siteState(s.id).asana?.taskGid) continue;
@@ -280,6 +284,29 @@ function withSites(tasks, errors = []) {
     if (pick) patchSiteState(s.id, { asana: { taskGid: pick.gid, taskName: pick.name, project: pick.project?.name || null, url: pick.url, agency: pick.agency || null, auto: true } });
   }
   return { at: new Date(cache.at).toISOString(), tasks: out, errors };
+}
+
+/**
+ * Marks a task done for these sites in the dashboard only - for work signed off
+ * by hand, like a form tested past its reCAPTCHA and a comment written in Asana.
+ * Nothing is sent to Asana: the task stays open there for whoever completes it.
+ * `whole` marks the task itself too (from the task list, so it also works for a
+ * task with no site); undoing any site unmarks the task.
+ */
+export function markDone(taskGid, siteIds, { done = true, whole = false } = {}) {
+  const at = new Date().toISOString();
+  const marks = { ...(getMeta().asanaMarkedDone || {}) };
+  if (done && whole) marks[taskGid] = { at };
+  if (!done) delete marks[taskGid];
+  for (const [gid, m] of Object.entries(marks)) if (Date.now() - Date.parse(m.at) > 62 * 864e5) delete marks[gid];
+  patchMeta({ asanaMarkedDone: marks });
+  for (const id of siteIds) {
+    const cur = siteState(id).asanaDone;
+    // Done by hand: a run's comment still waiting for the morning form test is not needed.
+    // The comment it replaces comes back on undo.
+    if (done) patchSiteState(id, { asanaDone: { at, taskGid, manual: true, prev: cur?.manual ? cur.prev || null : cur || null }, asanaPending: null });
+    else if (cur?.manual && cur.taskGid === taskGid) patchSiteState(id, { asanaDone: cur.prev || null });
+  }
 }
 
 export function linkTask(siteId, task) {
